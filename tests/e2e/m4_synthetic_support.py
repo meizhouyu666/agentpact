@@ -506,6 +506,7 @@ def isolated_m4_environment() -> Iterator[IsolatedM4Environment]:
     postgres_bin = find_postgres_bin()
     postgres_data = root / "postgres-data"
     postgres_log = root / "postgres.log"
+    postgres_socket = root / "postgres-socket"
     console_log_path = root / "console.log"
     postgres_port = _reserve_loopback_port()
     console_port = _reserve_loopback_port()
@@ -527,23 +528,33 @@ def isolated_m4_environment() -> Iterator[IsolatedM4Environment]:
             ],
             cwd=repository,
         )
-        _run(
-            [
-                postgres_bin / postgres_executable("pg_ctl"),
-                "-D",
-                postgres_data,
-                "-l",
-                postgres_log,
-                "-o",
-                f"-p {postgres_port} -h 127.0.0.1",
-                "-w",
-                "-t",
-                "30",
-                "start",
-            ],
-            cwd=repository,
-            capture_output=False,
-        )
+        postgres_options = f"-p {postgres_port} -h 127.0.0.1"
+        if os.name != "nt":
+            # Debian/Ubuntu PostgreSQL defaults to /var/run/postgresql, which
+            # is not writable by an unprivileged GitHub Actions runner.
+            postgres_socket.mkdir()
+            postgres_options += f" -k {postgres_socket}"
+        try:
+            _run(
+                [
+                    postgres_bin / postgres_executable("pg_ctl"),
+                    "-D",
+                    postgres_data,
+                    "-l",
+                    postgres_log,
+                    "-o",
+                    postgres_options,
+                    "-w",
+                    "-t",
+                    "30",
+                    "start",
+                ],
+                cwd=repository,
+                capture_output=False,
+            )
+        except RuntimeError as exc:
+            server_log = postgres_log.read_text(encoding="utf-8", errors="replace") if postgres_log.is_file() else ""
+            raise RuntimeError(f"{exc}\npostgres log:\n{server_log}") from exc
         cleanup.postgres_pid = _postgres_pid(postgres_data)
         _wait_for_port(postgres_port, expected_open=True)
         _run(

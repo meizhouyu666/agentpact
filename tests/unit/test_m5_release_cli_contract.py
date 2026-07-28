@@ -225,3 +225,7 @@ def test_m4_discovery_is_windows_and_posix_aware_without_fixed_commands() -> Non
     assert 'shutil.which(postgres_executable("initdb"))' in source
     assert 'postgres_bin / "initdb.exe"' not in source
     assert 'postgres_bin / "pg_ctl.exe"' not in source
+    assert 'postgres_socket = root / "postgres-socket"' in source
+    assert 'postgres_options += f" -k {postgres_socket}"' in source
+    assert 'postgres log:\\n{server_log}' in source
+    assert "capture_output=False" in source
