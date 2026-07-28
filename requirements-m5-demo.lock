@@ -1,0 +1,10 @@
+# Direct, tested M5 demo/tooling dependencies. The project itself is installed
+# from pyproject.toml; transitive dependency authority remains with that file.
+alembic==1.18.5
+asyncpg==0.31.0
+fastapi==0.128.8
+playwright==1.61.0
+pytest==8.4.2
+pytest-asyncio==0.26.0
+SQLAlchemy==2.0.51
+uvicorn==0.51.0

@@ -1,0 +1,177 @@
+[
+  {
+    "id": "handler_locator_coordinate_javascript",
+    "inventory_marker": "ActionHandler-internal locator/coordinate fallback",
+    "current_status": "sealed",
+    "required_disposition": "route_through_public_handler",
+    "guard_owner": "action_handler_public_boundary",
+    "required_controls": ["execution_profile", "execution_authorization", "execution_attempt"],
+    "closure_test": "test_handler_mechanisms_require_profile_authorization_and_attempt",
+    "enforce_eligible": true,
+    "sources": [
+      {
+        "path": "skyvern/forge/agent.py",
+        "markers": ["ActionHandler.handle_action("]
+      },
+      {
+        "path": "skyvern/webeye/actions/handler.py",
+        "markers": [
+          "require_execution_mechanism(ExecutionMechanism.LOCATOR)",
+          "require_execution_mechanism(ExecutionMechanism.LABEL)",
+          "require_execution_mechanism(ExecutionMechanism.COORDINATE)",
+          "require_execution_mechanism(ExecutionMechanism.JAVASCRIPT)",
+          "coordinate_click",
+          "page.evaluate("
+        ]
+      }
+    ]
+  },
+  {
+    "id": "skyvern_page_script_proxy",
+    "inventory_marker": "Page method proxies",
+    "current_status": "sealed",
+    "required_disposition": "reject_governed_script",
+    "guard_owner": "shared_governed_script_rejection",
+    "required_controls": ["shared_rejection_before_adapter_creation"],
+    "closure_test": "test_governed_script_page_creation_is_rejected",
+    "enforce_eligible": true,
+    "sources": [
+      {
+        "path": "skyvern/core/script_generations/skyvern_page.py",
+        "markers": ["def __getattribute__", "await locator.click"]
+      },
+      {
+        "path": "skyvern/core/script_generations/script_skyvern_page.py",
+        "markers": ["await handle_complete_action"]
+      },
+      {
+        "path": "skyvern/core/script_generations/real_skyvern_page_ai.py",
+        "markers": ["assert_script_execution_is_not_governed()", "await handle_click_action"]
+      }
+    ]
+  },
+  {
+    "id": "shared_script_launchers",
+    "inventory_marker": "Script service and direct script launchers",
+    "current_status": "sealed",
+    "required_disposition": "reject_governed_script",
+    "guard_owner": "shared_governed_script_rejection",
+    "required_controls": ["shared_rejection_before_user_code"],
+    "closure_test": "test_all_governed_script_launchers_share_rejection",
+    "enforce_eligible": true,
+    "sources": [
+      {
+        "path": "skyvern/services/script_service.py",
+        "markers": ["async def execute_script", "async def run_script"]
+      },
+      {
+        "path": "skyvern/core/script_generations/run_initializer.py",
+        "markers": ["ScriptSkyvernPage.create"]
+      },
+      {
+        "path": "skyvern/forge/sdk/routes/scripts.py",
+        "markers": ["async def run_script", "AsyncExecutorFactory.get_executor().execute_script"]
+      },
+      {
+        "path": "skyvern/forge/sdk/executor/background_task_executor.py",
+        "markers": ["async def execute_script", "script_service.execute_script"]
+      },
+      {
+        "path": "skyvern/cli/run_commands.py",
+        "markers": ["from skyvern.services.script_service import run_script", "asyncio.run(run_script"]
+      }
+    ]
+  },
+  {
+    "id": "cua_ui_tars",
+    "inventory_marker": "CUA/UI-TARS",
+    "current_status": "sealed",
+    "required_disposition": "route_through_public_handler",
+    "guard_owner": "cua_engine_adapter_and_action_handler_boundary",
+    "required_controls": ["fresh_observation", "execution_profile", "execution_authorization", "engine_evidence"],
+    "closure_test": "test_cua_requires_fresh_evidence_profile_and_authorization",
+    "enforce_eligible": true,
+    "sources": [
+      {
+        "path": "skyvern/forge/agent.py",
+        "markers": ["RunEngine.openai_cua", "RunEngine.anthropic_cua", "RunEngine.ui_tars", "ActionHandler.handle_action("]
+      },
+      {
+        "path": "skyvern/webeye/actions/handler.py",
+        "markers": ["cua_execution_evidence", "require_cua_execution_evidence("]
+      },
+      {
+        "path": "enterprise/governance/permit_service.py",
+        "markers": ["cua_execution_evidence.model_dump", "require_cua_execution_evidence("]
+      },
+      {
+        "path": "enterprise/governance/execution_attempt_service.py",
+        "markers": ["persisted_cua_evidence != cua_execution_evidence", "require_cua_execution_evidence("]
+      }
+    ]
+  },
+  {
+    "id": "cached_speculative_actions",
+    "inventory_marker": "Cached/speculative actions",
+    "current_status": "sealed",
+    "required_disposition": "fresh_reobserve",
+    "guard_owner": "forge_agent_observation_coordinator",
+    "required_controls": ["fresh_observation", "fresh_policy_decision", "execution_authorization"],
+    "closure_test": "test_cached_actions_require_fresh_observation_and_authorization",
+    "enforce_eligible": true,
+    "sources": [
+      {
+        "path": "skyvern/forge/agent.py",
+        "markers": ["speculative_plans.pop", "speculative_plan.llm_json_response", "precomputed_action_reuse_is_allowed()"]
+      },
+      {
+        "path": "skyvern/webeye/actions/caching.py",
+        "markers": ["retrieve_action_plan", "cached_actions_to_execute", "precomputed_action_reuse_is_allowed()"]
+      },
+      {
+        "path": "skyvern/governance_guard.py",
+        "markers": ["def precomputed_action_reuse_is_allowed", "settings.GOVERNANCE_MODE != \"enforce\""]
+      }
+    ]
+  },
+  {
+    "id": "sdk_direct_script_clients",
+    "inventory_marker": "SDK/direct integrations",
+    "current_status": "sealed",
+    "required_disposition": "inventory_only",
+    "guard_owner": "sdk_and_script_caller_inventory",
+    "required_controls": ["caller_route_inventory", "public_handler_or_shared_script_rejection"],
+    "closure_test": "test_direct_clients_reach_handler_or_shared_script_rejection",
+    "enforce_eligible": true,
+    "sources": [
+      {
+        "path": "skyvern/client/scripts/raw_client.py",
+        "markers": ["def run_script", "async def run_script"]
+      },
+      {
+        "path": "skyvern/client/scripts/client.py",
+        "markers": ["def run_script", "self._raw_client.run_script"]
+      },
+      {
+        "path": "skyvern/forge/sdk/routes/sdk.py",
+        "markers": ["ScriptSkyvernPage.create_scraped_page", "RealSkyvernPageAi(scraped_page, page)"]
+      },
+      {
+        "path": "skyvern/forge/sdk/routes/scripts.py",
+        "markers": ["async def run_script", "raise HTTPException(status_code=400, detail=\"Not implemented\")"]
+      },
+      {
+        "path": "skyvern/forge/sdk/executor/background_task_executor.py",
+        "markers": ["async def execute_script", "script_service.execute_script"]
+      },
+      {
+        "path": "skyvern/services/script_service.py",
+        "markers": ["async def execute_script", "assert_script_execution_is_not_governed()"]
+      },
+      {
+        "path": "skyvern/core/script_generations/script_skyvern_page.py",
+        "markers": ["async def create_scraped_page", "assert_script_execution_is_not_governed()"]
+      }
+    ]
+  }
+]

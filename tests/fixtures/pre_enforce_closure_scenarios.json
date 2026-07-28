@@ -1,0 +1,96 @@
+[
+  {
+    "id": "allow_read",
+    "runner": "dry_run",
+    "readiness": "ready",
+    "actions": [{"action_type": "click", "element_id": "query"}],
+    "elements": {"query": {"text": "Query account balance", "attributes": {}}},
+    "expected": {"outcome": "allow", "risk": "low", "effect": "read"}
+  },
+  {
+    "id": "approval_high",
+    "runner": "dry_run",
+    "readiness": "ready",
+    "actions": [{"action_type": "click", "element_id": "submit"}],
+    "elements": {"submit": {"text": "Submit loan application", "attributes": {}}},
+    "expected": {"outcome": "require_approval", "risk": "high", "effect": "internal_write"}
+  },
+  {
+    "id": "external_write_critical",
+    "runner": "dry_run",
+    "readiness": "ready",
+    "actions": [{"action_type": "click", "element_id": "pay"}],
+    "elements": {"pay": {"text": "Confirm transfer", "attributes": {}}},
+    "expected": {"outcome": "require_approval", "risk": "critical", "effect": "external_write"}
+  },
+  {
+    "id": "loading_transitioning",
+    "runner": "dry_run",
+    "readiness": "transitioning",
+    "actions": [{"action_type": "click", "element_id": "pay"}],
+    "elements": {"pay": {"text": "Confirm transfer", "attributes": {}}},
+    "expected": {"outcome": "needs_human", "risk": "unknown", "effect": "external_write"}
+  },
+  {
+    "id": "action_drift",
+    "runner": "authorization_drift",
+    "drift": "action",
+    "expected_error": "current action"
+  },
+  {
+    "id": "page_drift",
+    "runner": "authorization_drift",
+    "drift": "page",
+    "expected_error": "current page"
+  },
+  {
+    "id": "multi_external_write_rejection",
+    "runner": "dry_run",
+    "readiness": "ready",
+    "actions": [
+      {"action_type": "click", "element_id": "pay"},
+      {"action_type": "click", "element_id": "delete"}
+    ],
+    "elements": {
+      "pay": {"text": "Confirm transfer", "attributes": {}},
+      "delete": {"text": "Delete beneficiary", "attributes": {}}
+    },
+    "expected_error": "multiple external writes"
+  },
+  {
+    "id": "cached_speculative_stale_observation",
+    "runner": "entrypoint_contract",
+    "entrypoint_id": "cached_speculative_actions",
+    "expected_disposition": "fresh_reobserve",
+    "expected_control": "fresh_observation",
+    "expected_status": "sealed",
+    "expected_enforce_eligible": true
+  },
+  {
+    "id": "cua_missing_evidence",
+    "runner": "entrypoint_contract",
+    "entrypoint_id": "cua_ui_tars",
+    "expected_disposition": "route_through_public_handler",
+    "expected_control": "engine_evidence",
+    "expected_status": "sealed",
+    "expected_enforce_eligible": true
+  },
+  {
+    "id": "governed_script_rejection",
+    "runner": "entrypoint_contract",
+    "entrypoint_id": "shared_script_launchers",
+    "expected_disposition": "reject_governed_script",
+    "expected_control": "shared_rejection_before_user_code",
+    "expected_status": "sealed",
+    "expected_enforce_eligible": true
+  },
+  {
+    "id": "sdk_direct_route_or_reject",
+    "runner": "entrypoint_contract",
+    "entrypoint_id": "sdk_direct_script_clients",
+    "expected_disposition": "inventory_only",
+    "expected_control": "caller_route_inventory",
+    "expected_status": "sealed",
+    "expected_enforce_eligible": true
+  }
+]

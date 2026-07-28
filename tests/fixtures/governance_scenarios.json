@@ -1,0 +1,83 @@
+[
+  {
+    "id": "query_balance",
+    "url": "https://bank.example/accounts",
+    "html": "<button>Query account balance</button>",
+    "readiness": "ready",
+    "action": {"action_type": "click", "element_id": "query"},
+    "element": {"text": "Query account balance", "attributes": {}},
+    "expected": {"operation": "read", "effect": "read", "outcome": "allow", "risk": "low"}
+  },
+  {
+    "id": "download_public_brochure",
+    "url": "https://bank.example/products",
+    "html": "<button>Download product brochure</button>",
+    "readiness": "ready",
+    "action": {"action_type": "click", "element_id": "brochure"},
+    "element": {"text": "Download product brochure", "attributes": {}},
+    "expected": {"operation": "download", "effect": "read", "outcome": "allow", "risk": "low"}
+  },
+  {
+    "id": "download_customer_statement",
+    "url": "https://bank.example/statements",
+    "html": "<button>Export customer statement</button>",
+    "readiness": "ready",
+    "action": {"action_type": "click", "element_id": "export"},
+    "element": {"text": "Export customer statement", "attributes": {}},
+    "expected": {"operation": "download", "effect": "read", "outcome": "require_approval", "risk": "high"}
+  },
+  {
+    "id": "submit_loan_application",
+    "url": "https://bank.example/loan",
+    "html": "<button>Submit loan application</button>",
+    "readiness": "ready",
+    "action": {"action_type": "click", "element_id": "submit"},
+    "element": {"text": "Submit loan application", "attributes": {}},
+    "expected": {"operation": "submit", "effect": "internal_write", "outcome": "require_approval", "risk": "high"}
+  },
+  {
+    "id": "approve_loan",
+    "url": "https://bank.example/approval",
+    "html": "<button>Approve loan</button>",
+    "readiness": "ready",
+    "action": {"action_type": "click", "element_id": "approve"},
+    "element": {"text": "Approve loan", "attributes": {}},
+    "expected": {"operation": "approve", "effect": "internal_write", "outcome": "require_approval", "risk": "high"}
+  },
+  {
+    "id": "confirm_transfer",
+    "url": "https://bank.example/transfer/confirm",
+    "html": "<button>Confirm transfer</button>",
+    "readiness": "ready",
+    "action": {"action_type": "click", "element_id": "confirm"},
+    "element": {"text": "Confirm transfer", "attributes": {}},
+    "expected": {"operation": "payment", "effect": "external_write", "outcome": "require_approval", "risk": "critical"}
+  },
+  {
+    "id": "delete_beneficiary",
+    "url": "https://bank.example/beneficiaries",
+    "html": "<button>Delete beneficiary</button>",
+    "readiness": "ready",
+    "action": {"action_type": "click", "element_id": "delete"},
+    "element": {"text": "Delete beneficiary", "attributes": {}},
+    "expected": {"operation": "delete", "effect": "external_write", "outcome": "require_approval", "risk": "critical"}
+  },
+  {
+    "id": "password_input",
+    "url": "https://bank.example/login",
+    "html": "<input aria-label='Password'>",
+    "readiness": "ready",
+    "action": {"action_type": "input_text", "element_id": "password", "text": "not-recorded"},
+    "element": {"text": "", "attributes": {"aria-label": "Password"}},
+    "expected": {"operation": "input_text", "effect": "internal_write", "outcome": "allow", "risk": "low"}
+  },
+  {
+    "id": "loading_transfer_confirmation",
+    "url": "https://bank.example/transfer/confirm",
+    "html": "<div class='loading'>Loading</div><button>Confirm transfer</button>",
+    "readiness": "loading",
+    "action": {"action_type": "click", "element_id": "confirm"},
+    "element": {"text": "Confirm transfer", "attributes": {}},
+    "expected": {"operation": "payment", "effect": "external_write", "outcome": "needs_human", "risk": "unknown"}
+  }
+]

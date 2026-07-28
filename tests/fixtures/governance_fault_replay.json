@@ -1,0 +1,50 @@
+[
+  {
+    "id": "spa_stale_locator",
+    "failure_class": "page_locator",
+    "expected": {"level": "L1", "action": "reobserve_and_redecide", "max_attempts": 0}
+  },
+  {
+    "id": "iframe_context_lost",
+    "failure_class": "browser_environment",
+    "expected": {"level": "L2", "action": "create_new_step_after_rescrape", "max_attempts": 1}
+  },
+  {
+    "id": "post_submit_outcome_unknown",
+    "failure_class": "unknown",
+    "expected": {"level": "L4", "action": "pause_for_result_probe", "max_attempts": 0, "requires_result_probe": true}
+  },
+  {
+    "id": "attempt_state_unknown_overrides_transient_label",
+    "failure_class": "technical_transient",
+    "attempt_status": "unknown",
+    "expected": {"level": "L4", "action": "pause_for_result_probe", "max_attempts": 0, "requires_result_probe": true}
+  },
+  {
+    "id": "bounded_network_timeout",
+    "failure_class": "technical_transient",
+    "expected": {"level": "L0", "action": "retry_same_action", "max_attempts": 1}
+  },
+  {
+    "id": "business_state_changed_within_contract",
+    "failure_class": "business_state_mismatch",
+    "contract_scope_unchanged": true,
+    "expected": {"level": "L3", "action": "request_constrained_replan", "max_attempts": 0}
+  },
+  {
+    "id": "business_state_changed_outside_contract",
+    "failure_class": "business_state_mismatch",
+    "contract_scope_unchanged": false,
+    "expected": {"level": "L4", "action": "invalidate_and_reauthorize", "max_attempts": 0, "requires_reauthorization": true}
+  },
+  {
+    "id": "permission_revoked",
+    "failure_class": "policy_or_permission",
+    "expected": {"level": "L4", "action": "pause_for_human_or_reauthorization", "max_attempts": 0, "requires_reauthorization": true}
+  },
+  {
+    "id": "manual_verification_blocker",
+    "failure_class": "manual_blocker",
+    "expected": {"level": "L4", "action": "pause_for_human_or_reauthorization", "max_attempts": 0}
+  }
+]

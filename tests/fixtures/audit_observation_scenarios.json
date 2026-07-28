@@ -1,0 +1,98 @@
+[
+  {
+    "id": "spa_route_transition",
+    "page_url": "https://synthetic.example/app/orders",
+    "page_html": "<main data-route='orders'><button>Next page</button></main>",
+    "actions": [{"action_type": "click", "element_id": "next"}],
+    "elements": {"next": {"text": "Next page", "attributes": {}}},
+    "screenshot_markers": ["spa-orders-before"],
+    "expected_candidate_count": 1
+  },
+  {
+    "id": "iframe_target",
+    "page_url": "https://synthetic.example/embed",
+    "page_html": "<iframe title='embedded form'></iframe>",
+    "actions": [{"action_type": "click", "element_id": "frame_submit"}],
+    "elements": {"frame_submit": {"text": "Continue", "attributes": {"frame": "payment-frame"}}},
+    "screenshot_markers": ["iframe-before"],
+    "expected_candidate_count": 1
+  },
+  {
+    "id": "overlay_target",
+    "page_url": "https://synthetic.example/overlay",
+    "page_html": "<div role='dialog'><input aria-label='Phone number'></div>",
+    "actions": [{"action_type": "input_text", "element_id": "phone", "text": "13800138000"}],
+    "elements": {"phone": {"text": "13800138000", "attributes": {"aria-label": "Phone number"}}},
+    "screenshot_markers": ["overlay-before"],
+    "expected_candidate_count": 1
+  },
+  {
+    "id": "post_submit_timeout",
+    "page_url": "https://synthetic.example/submit",
+    "page_html": "<div class='loading'>Waiting for confirmation</div>",
+    "actions": [{"action_type": "wait", "element_id": null}],
+    "elements": {},
+    "screenshot_markers": ["submit-timeout"],
+    "expected_candidate_count": 1
+  },
+  {
+    "id": "script_generation_candidate",
+    "page_url": "https://synthetic.example/script-preview",
+    "page_html": "<textarea aria-label='script preview'></textarea>",
+    "actions": [{"action_type": "javascript", "element_id": "script_preview", "script": "return document.title"}],
+    "elements": {"script_preview": {"text": "return document.title", "attributes": {"data-source": "generated"}}},
+    "screenshot_markers": ["script-preview"],
+    "expected_candidate_count": 1
+  },
+  {
+    "id": "cua_coordinate_candidate",
+    "page_url": "https://synthetic.example/cua-canvas",
+    "page_html": "<canvas aria-label='remote desktop'></canvas>",
+    "actions": [{"action_type": "click", "element_id": null, "coordinates": {"x": 240, "y": 160}, "source": "cua"}],
+    "elements": {},
+    "screenshot_markers": ["cua-coordinate"],
+    "expected_candidate_count": 1
+  },
+  {
+    "id": "cached_speculative_candidate",
+    "page_url": "https://synthetic.example/catalog",
+    "page_html": "<button data-version='42'>Open details</button>",
+    "actions": [{"action_type": "click", "element_id": "details", "source": "cached_plan", "speculative": true}],
+    "elements": {"details": {"text": "Open details", "attributes": {"data-version": "42"}}},
+    "screenshot_markers": ["cached-plan"],
+    "expected_candidate_count": 1
+  },
+  {
+    "id": "locator_coordinate_fallback",
+    "page_url": "https://synthetic.example/fallback",
+    "page_html": "<button data-testid='continue'>Continue</button>",
+    "actions": [{"action_type": "click", "element_id": "continue", "locator": "[data-testid='continue']", "fallback": "coordinate", "coordinates": {"x": 180, "y": 72}}],
+    "elements": {"continue": {"text": "Continue", "attributes": {"data-testid": "continue"}}},
+    "screenshot_markers": ["locator-coordinate-fallback"],
+    "expected_candidate_count": 1
+  },
+  {
+    "id": "page_drift_observation",
+    "page_url": "https://synthetic.example/form?revision=2",
+    "page_html": "<section data-page-revision='2'><button>Review changed form</button></section>",
+    "actions": [{"action_type": "click", "element_id": "review"}],
+    "elements": {"review": {"text": "Review changed form", "attributes": {"data-page-revision": "2"}}},
+    "screenshot_markers": ["page-drift-revision-2"],
+    "expected_candidate_count": 1
+  },
+  {
+    "id": "same_observation_multiple_candidates",
+    "page_url": "https://synthetic.example/form",
+    "page_html": "<button>Save</button><button>Cancel</button>",
+    "actions": [
+      {"action_type": "click", "element_id": "save"},
+      {"action_type": "click", "element_id": "cancel"}
+    ],
+    "elements": {
+      "save": {"text": "Save", "attributes": {}},
+      "cancel": {"text": "Cancel", "attributes": {}}
+    },
+    "screenshot_markers": ["form-candidates"],
+    "expected_candidate_count": 2
+  }
+]

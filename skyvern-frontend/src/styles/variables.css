@@ -1,0 +1,95 @@
+/*
+ * FinRPA Enterprise Design Tokens
+ * White frosted-glass style with deep-sea blue accent
+ */
+
+:root {
+  /* === Primary Colors === */
+  --finrpa-blue: #1A3A5C;
+  --finrpa-blue-light: #2A5A8C;
+  --finrpa-blue-dark: #0F2440;
+  --finrpa-gold: #C9A84C;
+  --finrpa-gold-light: #DFC474;
+  --finrpa-gold-dark: #A68A30;
+
+  /* === Background === */
+  --finrpa-bg: #EFF1F5;
+  --finrpa-bg-alt: #E8EBF0;
+
+  /* === Text — blue-tinted grays for warmth, high contrast === */
+  --finrpa-text-primary: #1A1D2E;
+  --finrpa-text-secondary: #374155;
+  --finrpa-text-muted: #526077;
+  --finrpa-text-white: #FFFFFF;
+
+  /* === Glass Properties === */
+  --glass-bg: rgba(255, 255, 255, 0.82);
+  --glass-bg-hover: rgba(255, 255, 255, 0.92);
+  --glass-border: rgba(26, 58, 92, 0.13);
+  --glass-blur: 14px;
+  --glass-shadow: 0 4px 24px rgba(0, 0, 0, 0.08);
+  --glass-shadow-hover: 0 8px 32px rgba(0, 0, 0, 0.13);
+
+  /* === Sidebar === */
+  --sidebar-width: 256px;
+  --sidebar-collapsed-width: 72px;
+  --sidebar-bg: rgba(255, 255, 255, 0.72);
+  --sidebar-shadow: 0 8px 32px rgba(26, 58, 92, 0.12), 0 2px 8px rgba(0, 0, 0, 0.06);
+  --sidebar-border: rgba(26, 58, 92, 0.1);
+  --sidebar-blur: 20px;
+  --sidebar-margin: 12px;
+  --sidebar-radius: 16px;
+
+  /* === Spacing === */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-2xl: 48px;
+
+  /* === Border Radius === */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+  --radius-full: 9999px;
+
+  /* === Status Colors === */
+  --status-running: #3B82F6;
+  --status-completed: #10B981;
+  --status-failed: #EF4444;
+  --status-pending-approval: #C9A84C;
+  --status-needs-human: #F97316;
+  --status-paused: #8B5CF6;
+  --status-queued: #6B7280;
+  --status-timeout: #DC2626;
+
+  /* === Risk Colors === */
+  --risk-low: #10B981;
+  --risk-medium: #F59E0B;
+  --risk-high: #EF4444;
+  --risk-critical: #991B1B;
+
+  /* === Charts === */
+  --chart-axis: #D1D5DB;
+  --chart-grid: #E5E7EB;
+  --chart-blue: #1A3A5C;
+  --chart-gold: #C9A84C;
+  --chart-green: #10B981;
+  --chart-red: #EF4444;
+  --chart-purple: #8B5CF6;
+  --chart-cyan: #06B6D4;
+
+  /* === Transitions === */
+  --transition-fast: 150ms ease;
+  --transition-normal: 200ms ease;
+  --transition-slow: 300ms ease;
+
+  /* === Slate Elevations (light-theme overrides for glass-page) === */
+  --slate-elevation-1: 220 20% 96%;
+  --slate-elevation-2: 218 18% 93%;
+  --slate-elevation-3: 216 16% 90%;
+  --slate-elevation-4: 215 14% 87%;
+  --slate-elevation-5: 214 12% 84%;
+}

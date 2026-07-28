@@ -1,0 +1,35 @@
+{
+  "schema_version": "domain-pack-sdk/v1",
+  "pack_id": "conformance.synthetic.reference",
+  "pack_version": "1.0.0",
+  "kind": "synthetic_reference",
+  "display_name": "Synthetic Conformance Reference",
+  "contract_catalog_only": true,
+  "runtime_wiring_eligible": false,
+  "owner_refs": [
+    {"role": "business", "owner_ref": "synthetic-owner:business"},
+    {"role": "tenant_policy", "owner_ref": "synthetic-owner:tenant-policy"},
+    {"role": "identity_security", "owner_ref": "synthetic-owner:identity-security"},
+    {"role": "integration_probe", "owner_ref": "synthetic-owner:integration-probe"},
+    {"role": "registry_interface", "owner_ref": "synthetic-owner:registry-interface"},
+    {"role": "data_control", "owner_ref": "synthetic-owner:data-control"},
+    {"role": "risk", "owner_ref": "synthetic-owner:risk"},
+    {"role": "legal_compliance", "owner_ref": "synthetic-owner:legal-compliance"},
+    {"role": "rehearsal", "owner_ref": "synthetic-owner:rehearsal"},
+    {"role": "sre_release", "owner_ref": "synthetic-owner:sre-release"}
+  ],
+  "freshness_ceiling_seconds": 300,
+  "canonical_facts": [
+    {"fact_id": "synthetic.record.id", "schema_ref": "synthetic.record.identity/v1", "data_classification": "internal", "source_ref": "synthetic-source:record-catalog/v1", "evidence_requirement_id": "synthetic.record.authoritative-read"},
+    {"fact_id": "synthetic.record.state", "schema_ref": "synthetic.record.state/v1", "data_classification": "internal", "source_ref": "synthetic-source:record-catalog/v1", "evidence_requirement_id": "synthetic.record.authoritative-read"}
+  ],
+  "evidence_requirements": [
+    {"evidence_id": "synthetic.record.authoritative-read", "kind": "authoritative_read", "source_schema_ref": "synthetic-source:record-catalog/v1", "maximum_age_seconds": 120},
+    {"evidence_id": "synthetic.record.result-probe", "kind": "result_probe", "source_schema_ref": "synthetic-source:result-probe/v1", "maximum_age_seconds": 60}
+  ],
+  "lifecycle": {"lifecycle_id": "synthetic.record.lifecycle", "states": ["drafted", "confirmed", "cancelled"], "terminal_states": ["confirmed", "cancelled"], "transitions": [{"transition_id": "synthetic.record.confirm", "source_state": "drafted", "target_state": "unknown"}]},
+  "capabilities": [
+    {"capability_id": "conformance.synthetic.reference.read", "pack_version": "1.0.0", "display_name": "Read synthetic record", "effect_class": "read_only", "authorization_dimensions": ["discover", "read_record"], "canonical_fact_ids": ["synthetic.record.id", "synthetic.record.state"], "evidence_requirement_ids": ["synthetic.record.authoritative-read"], "lifecycle_transition_id": null, "result_evidence_id": null, "approval_policy_ref": null},
+    {"capability_id": "conformance.synthetic.reference.confirm", "pack_version": "1.0.0", "display_name": "Confirm synthetic record", "effect_class": "external_write", "authorization_dimensions": ["request_transition", "execute_transition", "request_approval"], "canonical_fact_ids": ["synthetic.record.id", "synthetic.record.state"], "evidence_requirement_ids": ["synthetic.record.authoritative-read", "synthetic.record.result-probe"], "lifecycle_transition_id": "synthetic.record.confirm", "result_evidence_id": "synthetic.record.result-probe", "approval_policy_ref": "synthetic-policy:dual-control/v1"}
+  ]
+}
