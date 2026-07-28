@@ -193,9 +193,10 @@ def test_release_readme_is_concise_synthetic_only_and_non_production() -> None:
     readme = README.read_text(encoding="utf-8")
     lowered = readme.casefold()
     assert len(readme.splitlines()) < 120
-    assert readme.isascii()
-    assert "synthetic-only, non-production" in lowered
-    assert "there is no deployment" in lowered
+    assert not readme.isascii()
+    assert "仅使用合成数据" in readme
+    assert "不面向生产环境" in readme
+    assert "不包含部署" in readme
     forbidden = (
         "make dev-prod",
         "default credentials",
