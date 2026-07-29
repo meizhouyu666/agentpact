@@ -7,6 +7,7 @@ ForgeAgent, ActionHandler, Playwright, or any browser-facing code.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Protocol
@@ -69,6 +70,8 @@ class ExecutionWorkOrder(BaseModel):
     business_plan_step_id: str
     task_id: str
     contract_id: str
+    plan_task_id: str | None = None
+    authority_contract_id: str | None = None
     grant_id: str
     navigation_goal: str
     allowed_operations: set[str] = Field(default_factory=set)
@@ -92,14 +95,28 @@ class ReplanAssessment(BaseModel):
     requires_reauthorization: bool
     invalidated_contract_ids: set[str] = Field(default_factory=set)
     invalidated_grant_ids: set[str] = Field(default_factory=set)
+    completed_prefix_length: int = Field(default=0, ge=0)
+    accepted_suffix_step_ids: tuple[str, ...] = ()
     reasons: list[str] = Field(default_factory=list)
 
 
 class SkyvernWorkOrderAdapter(Protocol):
     """Adapter boundary; implementation may prepare, never directly execute, a Work Order."""
 
-    async def prepare(self, work_order: ExecutionWorkOrder) -> None:
-        """Hand a validated Work Order to a future Skyvern integration point."""
+    async def prepare(self, work_order: ExecutionWorkOrder) -> "SkyvernPreparationReceipt":
+        """Publish or reconcile one bounded native Task/Step pair without executing it."""
+
+
+class SkyvernPreparationReceipt(BaseModel):
+    """Frozen native publication identity returned by a concrete adapter."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    work_order_id: str = Field(min_length=1)
+    native_task_id: str = Field(min_length=1)
+    native_step_id: str = Field(min_length=1)
+    binding_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    duplicate: bool = False
 
 
 def validate_business_plan(plan: BusinessPlan, grants: CapabilityGrantSet, *, now: datetime) -> None:
@@ -121,16 +138,25 @@ def validate_work_order(
 ) -> None:
     """Ensure a Work Order remains within its originating plan, step, contract, and grant."""
 
-    if work_order.task_id != plan.task_id:
-        raise ValueError("Work Order task_id must match the originating BusinessPlan task_id")
+    if work_order.plan_task_id is None:
+        if work_order.task_id != plan.task_id:
+            raise ValueError("Work Order task_id must match the originating BusinessPlan task_id")
+    elif work_order.plan_task_id != plan.task_id:
+        raise ValueError("Work Order plan_task_id must match the originating BusinessPlan task_id")
     if work_order.business_plan_step_id != step.step_id:
         raise ValueError("Work Order must reference its originating BusinessPlanStep")
     if step not in plan.steps:
         raise ValueError("Work Order step must belong to the originating BusinessPlan")
-    if work_order.contract_id != plan.contract_id:
-        raise ValueError("Work Order contract_id must match the originating BusinessPlan contract_id")
-    if work_order.contract_id != step.contract_id:
-        raise ValueError("Work Order contract_id must match the BusinessPlanStep contract_id")
+    if work_order.authority_contract_id is None:
+        if work_order.contract_id != plan.contract_id:
+            raise ValueError("Work Order contract_id must match the originating BusinessPlan contract_id")
+        if work_order.contract_id != step.contract_id:
+            raise ValueError("Work Order contract_id must match the BusinessPlanStep contract_id")
+    elif (
+        work_order.authority_contract_id != plan.contract_id
+        or work_order.authority_contract_id != step.contract_id
+    ):
+        raise ValueError("Work Order authority_contract_id must match the BusinessPlan authority contract")
     if work_order.grant_id != step.grant_id:
         raise ValueError("Work Order grant_id must match the BusinessPlanStep grant_id")
     grants.require_executable(capability_id=step.capability_id, grant_id=step.grant_id, now=now)
@@ -172,6 +198,58 @@ def assess_replan(previous: BusinessPlan, proposed: BusinessPlan) -> ReplanAsses
     )
 
 
+def assess_suffix_replan(
+    previous: BusinessPlan,
+    proposed: BusinessPlan,
+    *,
+    completed_prefix_length: int,
+) -> ReplanAssessment:
+    """Validate an immutable completed prefix and an authority-equivalent replacement suffix."""
+
+    reasons: list[str] = []
+    contract_ids: set[str] = set()
+    grant_ids: set[str] = set()
+    if completed_prefix_length < 0 or completed_prefix_length > len(previous.steps):
+        raise ValueError("Completed prefix length is outside the previous plan")
+    if proposed.version != previous.version + 1:
+        reasons.append("Proposed plan version is not the direct successor")
+    if previous.task_id != proposed.task_id:
+        reasons.append("Plan-root Task changed")
+    if previous.contract_id != proposed.contract_id:
+        reasons.append("Task contract changed")
+    if _scope_expands(previous.data_scope, proposed.data_scope) or _scope_expands(
+        proposed.data_scope, previous.data_scope
+    ):
+        reasons.append("Data scope changed")
+
+    previous_prefix = previous.steps[:completed_prefix_length]
+    proposed_prefix = proposed.steps[:completed_prefix_length]
+    if len(proposed_prefix) != len(previous_prefix) or any(
+        _canonical_json(left.model_dump(mode="json")) != _canonical_json(right.model_dump(mode="json"))
+        for left, right in zip(previous_prefix, proposed_prefix, strict=True)
+    ):
+        reasons.append("Completed prefix changed")
+
+    previous_suffix = previous.steps[completed_prefix_length:]
+    proposed_suffix = proposed.steps[completed_prefix_length:]
+    available_authority = Counter(_step_authority_digest(step) for step in previous_suffix)
+    proposed_authority = Counter(_step_authority_digest(step) for step in proposed_suffix)
+    if proposed_authority - available_authority:
+        reasons.append("Replacement suffix expands business authority or inputs")
+
+    if reasons:
+        contract_ids.add(previous.contract_id)
+        grant_ids.update(step.grant_id for step in previous_suffix)
+    return ReplanAssessment(
+        requires_reauthorization=bool(reasons),
+        invalidated_contract_ids=contract_ids,
+        invalidated_grant_ids=grant_ids,
+        completed_prefix_length=completed_prefix_length,
+        accepted_suffix_step_ids=tuple(step.step_id for step in proposed_suffix) if not reasons else (),
+        reasons=reasons,
+    )
+
+
 def _scope_expands(previous: CapabilityDataScope, proposed: CapabilityDataScope) -> bool:
     if previous.department_id != proposed.department_id:
         return True
@@ -199,5 +277,10 @@ def _business_inputs_changed(previous: list[BusinessPlanStep], proposed: list[Bu
     return False
 
 
-def _canonical_json(value: dict[str, Any]) -> str:
+def _step_authority_digest(step: BusinessPlanStep) -> str:
+    payload = step.model_dump(mode="json", exclude={"step_id"})
+    return _canonical_json(payload)
+
+
+def _canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)

@@ -15,7 +15,7 @@ from playwright._impl._errors import Error as PlaywrightError
 from playwright.async_api import FileChooser, Frame, Locator, Page, TimeoutError
 from pydantic import BaseModel
 
-from enterprise.governance.contracts import ExecutionAuthorization
+from enterprise.governance.contracts import ExecutionAuthorization, ExecutionEffect
 from enterprise.governance.execution_profiles import (
     CUAExecutionEvidence,
     ExecutionMechanism,
@@ -69,6 +69,13 @@ from skyvern.exceptions import (
 )
 from skyvern.experimentation.wait_utils import get_or_create_wait_config, get_wait_time
 from skyvern.forge import app
+from skyvern.forge.native_action import (
+    NativeActionDisposition,
+    NativeActionHandlerOutcome,
+    NativeActionResolution,
+    NativeGovernanceDenied,
+    PostActionControl,
+)
 from skyvern.forge.prompts import prompt_engine
 from skyvern.forge.sdk.api.files import (
     check_downloading_files_and_wait_for_download_to_complete,
@@ -409,8 +416,23 @@ class ActionHandler:
         execution_authorization: ExecutionAuthorization | None = None,
         execution_profile: ExecutionProfile | None = None,
         cua_execution_evidence: CUAExecutionEvidence | None = None,
-    ) -> list[ActionResult]:
+        native_resolution: NativeActionResolution | None = None,
+    ) -> list[ActionResult] | NativeActionHandlerOutcome:
         """Run an action, optionally through the Phase 2 governed boundary."""
+
+        if native_resolution is not None:
+            return await ActionHandler._handle_native_action(
+                scraped_page=scraped_page,
+                task=task,
+                step=step,
+                page=page,
+                action=action,
+                resolution=native_resolution,
+                cua_execution_evidence=cua_execution_evidence,
+            )
+
+        if (execution_authorization is None) != (execution_profile is None):
+            raise PermissionError("Partial governed execution context cannot fall back to ungoverned execution")
 
         if not has_complete_governed_execution_context(execution_authorization, execution_profile):
             return await ActionHandler._handle_action_ungoverned(
@@ -422,7 +444,7 @@ class ActionHandler:
             )
         assert execution_authorization is not None
         assert execution_profile is not None
-        return await ActionHandler._handle_governed_action(
+        results, _attempt_id = await ActionHandler._handle_governed_action(
             scraped_page=scraped_page,
             task=task,
             step=step,
@@ -432,6 +454,76 @@ class ActionHandler:
             execution_profile=execution_profile,
             cua_execution_evidence=cua_execution_evidence,
         )
+        return results
+
+    @staticmethod
+    async def _handle_native_action(
+        *,
+        scraped_page: ScrapedPage,
+        task: Task,
+        step: Step,
+        page: Page,
+        action: Action,
+        resolution: NativeActionResolution,
+        cua_execution_evidence: CUAExecutionEvidence | None,
+    ) -> NativeActionHandlerOutcome:
+        if resolution.disposition is NativeActionDisposition.BOUND_DENIED:
+            raise NativeGovernanceDenied(resolution.denial_code or "M7_BOUND_DENIED")
+        if resolution.disposition is NativeActionDisposition.UNBOUND_COMPATIBILITY:
+            results = await ActionHandler._handle_action_ungoverned(
+                scraped_page=scraped_page,
+                task=task,
+                step=step,
+                page=page,
+                action=action,
+            )
+            return NativeActionHandlerOutcome(results=results)
+        if resolution.disposition is NativeActionDisposition.BOUND_NON_EFFECT:
+            if ActionHandler._native_action_may_cross_effect_boundary(action):
+                raise NativeGovernanceDenied("M7_NON_EFFECT_HANDLER_REJECTED")
+            results = await ActionHandler._handle_action_ungoverned(
+                scraped_page=scraped_page,
+                task=task,
+                step=step,
+                page=page,
+                action=action,
+            )
+            return NativeActionHandlerOutcome(results=results)
+
+        if not ActionHandler._native_action_may_cross_effect_boundary(action):
+            raise NativeGovernanceDenied("M7_AUTHORITY_NOT_REQUIRED_FOR_NON_EFFECT")
+        authorization = resolution.execution_authorization
+        profile = resolution.execution_profile
+        if authorization is None or profile is None or authorization.effect is not ExecutionEffect.EXTERNAL_WRITE:
+            raise NativeGovernanceDenied("M7_INCOMPLETE_EFFECT_AUTHORITY")
+        results, attempt_id = await ActionHandler._handle_governed_action(
+            scraped_page=scraped_page,
+            task=task,
+            step=step,
+            page=page,
+            action=action,
+            execution_authorization=authorization,
+            execution_profile=profile,
+            cua_execution_evidence=cua_execution_evidence,
+        )
+        return NativeActionHandlerOutcome(
+            results=results,
+            post_action_control=PostActionControl.SUSPEND_FOR_PROBE,
+            attempt_id=attempt_id,
+        )
+
+    @staticmethod
+    def _native_action_may_cross_effect_boundary(action: Action) -> bool:
+        return action.action_type in {
+            ActionType.CLICK,
+            ActionType.CHECKBOX,
+            ActionType.DOWNLOAD_FILE,
+            ActionType.DRAG,
+            ActionType.GOTO_URL,
+            ActionType.KEYPRESS,
+            ActionType.LEFT_MOUSE,
+            ActionType.UPLOAD_FILE,
+        }
 
     @staticmethod
     async def _handle_governed_action(
@@ -444,7 +536,7 @@ class ActionHandler:
         execution_authorization: ExecutionAuthorization,
         execution_profile: ExecutionProfile,
         cua_execution_evidence: CUAExecutionEvidence | None,
-    ) -> list[ActionResult]:
+    ) -> tuple[list[ActionResult], str]:
         """Persist the crash-recovery boundary around one browser side effect."""
 
         from enterprise.governance.execution_attempt_service import (
@@ -504,7 +596,7 @@ class ActionHandler:
         # Handler success is transport-level evidence only. A later business
         # result probe must resolve UNKNOWN to CONFIRMED or FAILED.
         await ActionHandler._mark_governed_attempt_unknown(attempt.attempt_id)
-        return results
+        return results, attempt.attempt_id
 
     @staticmethod
     async def _mark_governed_attempt_unknown(attempt_id: str) -> None:

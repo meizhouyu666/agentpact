@@ -66,6 +66,15 @@ from skyvern.exceptions import (
 )
 from skyvern.forge import app
 from skyvern.forge.async_operations import AgentPhase, AsyncOperationPool
+from skyvern.forge.native_action import (
+    NativeActionContextProvider,
+    NativeActionDisposition,
+    NativeActionHandlerOutcome,
+    NativeActionResolution,
+    NativeGovernanceDenied,
+    PostActionControl,
+    carries_m7_native_binding,
+)
 from skyvern.forge.prompts import prompt_engine
 from skyvern.forge.sdk.api.aws import get_aws_client
 from skyvern.forge.sdk.api.files import (
@@ -165,8 +174,41 @@ class ActionLinkedNode:
 
 
 class ForgeAgent:
-    def __init__(self) -> None:
+    def __init__(self, native_action_context_provider: NativeActionContextProvider | None = None) -> None:
         self.async_operation_pool = AsyncOperationPool()
+        self.native_action_context_provider = native_action_context_provider
+
+    async def _handle_action_with_native_governance(
+        self,
+        *,
+        scraped_page: ScrapedPage,
+        task: Task,
+        step: Step,
+        page: Page,
+        action: Action,
+    ) -> tuple[NativeActionResolution | None, list[ActionResult] | NativeActionHandlerOutcome]:
+        native_resolution = None
+        if self.native_action_context_provider is None:
+            if carries_m7_native_binding(task=task, step=step):
+                raise NativeGovernanceDenied("M7_BOUND_PROVIDER_REQUIRED")
+        else:
+            native_resolution = await self.native_action_context_provider.resolve(
+                task=task,
+                step=step,
+                scraped_page=scraped_page,
+                action=action,
+            )
+            if native_resolution.disposition is NativeActionDisposition.BOUND_DENIED:
+                raise NativeGovernanceDenied(native_resolution.denial_code or "M7_BOUND_DENIED")
+        handler_outcome = await ActionHandler.handle_action(
+            scraped_page=scraped_page,
+            task=task,
+            step=step,
+            page=page,
+            action=action,
+            native_resolution=native_resolution,
+        )
+        return native_resolution, handler_outcome
 
     async def create_task_and_step_from_block(
         self,
@@ -1393,18 +1435,45 @@ class ForgeAgent:
                     ):
                         action.skip_auto_complete_tab = True
 
-                results = await ActionHandler.handle_action(
+                native_resolution, handler_outcome = await self._handle_action_with_native_governance(
                     scraped_page=scraped_page,
                     task=task,
                     step=step,
                     page=current_page,
                     action=action,
                 )
+                if isinstance(handler_outcome, NativeActionHandlerOutcome):
+                    results = handler_outcome.results
+                else:
+                    results = handler_outcome
                 await app.AGENT_FUNCTION.post_action_execution(action)
                 detailed_agent_step_output.actions_and_results[action_idx] = (
                     action,
                     results,
                 )
+
+                if (
+                    isinstance(handler_outcome, NativeActionHandlerOutcome)
+                    and handler_outcome.post_action_control is PostActionControl.SUSPEND_FOR_PROBE
+                ):
+                    if (
+                        self.native_action_context_provider is None
+                        or native_resolution is None
+                        or handler_outcome.attempt_id is None
+                    ):
+                        raise RuntimeError("M7 suspension requires its exact provider, resolution, and Attempt")
+                    for result in results:
+                        result.step_retry_number = step.retry_index
+                        result.step_order = step.order
+                    step.output = detailed_agent_step_output.to_agent_step_output()
+                    action_results.extend(results)
+                    step = await self.native_action_context_provider.suspend_for_probe(
+                        task=task,
+                        step=step,
+                        resolution=native_resolution,
+                        attempt_id=handler_outcome.attempt_id,
+                    )
+                    return step, detailed_agent_step_output
 
                 # Determine wait time between actions
                 wait_time = random.uniform(0.5, 1.0)

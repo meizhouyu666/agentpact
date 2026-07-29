@@ -27,6 +27,27 @@ from urllib.request import Request, urlopen
 def _install_unrelated_runtime_import_shims() -> None:
     """Keep missing optional branches from blocking the real governed locator path."""
 
+    if importlib.util.find_spec("openai") is None:
+        openai = ModuleType("openai")
+        openai_types = ModuleType("openai.types")
+        openai_responses = ModuleType("openai.types.responses")
+        openai_response = ModuleType("openai.types.responses.response")
+        openai_response.Response = Any  # type: ignore[attr-defined]
+        sys.modules[openai.__name__] = openai
+        sys.modules[openai_types.__name__] = openai_types
+        sys.modules[openai_responses.__name__] = openai_responses
+        sys.modules[openai_response.__name__] = openai_response
+
+    if importlib.util.find_spec("opentelemetry") is None:
+        opentelemetry = ModuleType("opentelemetry")
+        opentelemetry_trace = ModuleType("opentelemetry.trace")
+        opentelemetry_trace.get_current_span = lambda: SimpleNamespace(  # type: ignore[attr-defined]
+            set_attribute=lambda *_args, **_kwargs: None
+        )
+        opentelemetry.trace = opentelemetry_trace  # type: ignore[attr-defined]
+        sys.modules[opentelemetry.__name__] = opentelemetry
+        sys.modules[opentelemetry_trace.__name__] = opentelemetry_trace
+
     if importlib.util.find_spec("jinja2") is None:
         local_app_data = Path(os.environ.get("LOCALAPPDATA", ""))
         site_packages = sorted(
@@ -102,10 +123,22 @@ def _install_unrelated_skyvern_module_stubs() -> None:
     def unavailable(*_args: Any, **_kwargs: Any) -> Any:
         raise RuntimeError("The M4 locator proof entered an unrelated Skyvern branch")
 
-    def deterministic_select_prompt(template_name: str, **_kwargs: Any) -> str:
-        if template_name != "normal-select":
-            return unavailable(template_name, **_kwargs)
-        return "Select the exact synthetic fault value supplied by the M4 test boundary."
+    def deterministic_select_prompt(template_name: str, **kwargs: Any) -> str:
+        if template_name == "normal-select":
+            return "Select the exact synthetic fault value supplied by the M4 test boundary."
+        if template_name == "extract-action":
+            return "\n".join(
+                (
+                    f"Goal: {kwargs.get('navigation_goal')}",
+                    f"Current URL: {kwargs.get('current_url')}",
+                    f"Elements:\n{kwargs.get('elements', '')}",
+                )
+            )
+        return unavailable(template_name, **kwargs)
+
+    analytics = ModuleType("skyvern.analytics")
+    analytics.capture = lambda *_args, **_kwargs: None  # type: ignore[attr-defined]
+    sys.modules[analytics.__name__] = analytics
 
     prompts = ModuleType("skyvern.forge.prompts")
     prompts.prompt_engine = SimpleNamespace(load_prompt=deterministic_select_prompt)  # type: ignore[attr-defined]
@@ -115,8 +148,16 @@ def _install_unrelated_skyvern_module_stubs() -> None:
     files.check_downloading_files_and_wait_for_download_to_complete = unavailable  # type: ignore[attr-defined]
     files.download_file = unavailable  # type: ignore[attr-defined]
     files.get_download_dir = unavailable  # type: ignore[attr-defined]
+    files.get_path_for_workflow_download_directory = unavailable  # type: ignore[attr-defined]
+    files.list_downloading_files_in_directory = unavailable  # type: ignore[attr-defined]
     files.list_files_in_directory = unavailable  # type: ignore[attr-defined]
+    files.rename_file = unavailable  # type: ignore[attr-defined]
+    files.wait_for_download_finished = unavailable  # type: ignore[attr-defined]
     sys.modules[files.__name__] = files
+
+    aws = ModuleType("skyvern.forge.sdk.api.aws")
+    aws.get_aws_client = unavailable  # type: ignore[attr-defined]
+    sys.modules[aws.__name__] = aws
 
     llm_factory = ModuleType("skyvern.forge.sdk.api.llm.api_handler_factory")
 
@@ -125,10 +166,18 @@ def _install_unrelated_skyvern_module_stubs() -> None:
         def get_llm_caller(_task_id: str) -> None:
             return None
 
+    class LLMCaller:
+        pass
+
     class LLMAPIHandlerFactory:
-        get_override_llm_api_handler = staticmethod(unavailable)
+        _prompt_caching_settings = None
+
+        @staticmethod
+        def get_override_llm_api_handler(_llm_key: str | None, *, default: Any) -> Any:
+            return default
 
     llm_factory.LLMCallerManager = LLMCallerManager  # type: ignore[attr-defined]
+    llm_factory.LLMCaller = LLMCaller  # type: ignore[attr-defined]
     llm_factory.LLMAPIHandlerFactory = LLMAPIHandlerFactory  # type: ignore[attr-defined]
     sys.modules[llm_factory.__name__] = llm_factory
 
@@ -138,7 +187,25 @@ def _install_unrelated_skyvern_module_stubs() -> None:
         pass
 
     llm_exceptions.LLMProviderError = LLMProviderError  # type: ignore[attr-defined]
+    llm_exceptions.LLM_PROVIDER_ERROR_RETRYABLE_TASK_TYPE = ()  # type: ignore[attr-defined]
+    llm_exceptions.LLM_PROVIDER_ERROR_TYPE = ()  # type: ignore[attr-defined]
     sys.modules[llm_exceptions.__name__] = llm_exceptions
+
+    config_registry = ModuleType("skyvern.forge.sdk.api.llm.config_registry")
+    config_registry.LLMConfigRegistry = type(  # type: ignore[attr-defined]
+        "LLMConfigRegistry",
+        (),
+        {"get_config": staticmethod(unavailable)},
+    )
+    sys.modules[config_registry.__name__] = config_registry
+
+    ui_tars = ModuleType("skyvern.forge.sdk.api.llm.ui_tars_llm_caller")
+    ui_tars.UITarsLLMCaller = type("UITarsLLMCaller", (), {})  # type: ignore[attr-defined]
+    sys.modules[ui_tars.__name__] = ui_tars
+
+    vertex_cache = ModuleType("skyvern.forge.sdk.api.llm.vertex_cache_manager")
+    vertex_cache.get_cache_manager = unavailable  # type: ignore[attr-defined]
+    sys.modules[vertex_cache.__name__] = vertex_cache
 
     schema_validator = ModuleType("skyvern.forge.sdk.api.llm.schema_validator")
     schema_validator.validate_and_fill_extraction_result = unavailable  # type: ignore[attr-defined]
@@ -168,6 +235,16 @@ def _install_unrelated_skyvern_module_stubs() -> None:
     service_utils.is_cua_task = unavailable  # type: ignore[attr-defined]
     sys.modules[service_utils.__name__] = service_utils
 
+    run_service = ModuleType("skyvern.services.run_service")
+    run_service.get_run_response = unavailable  # type: ignore[attr-defined]
+    sys.modules[run_service.__name__] = run_service
+
+    otp_service = ModuleType("skyvern.services.otp_service")
+    otp_service.extract_totp_from_navigation_inputs = unavailable  # type: ignore[attr-defined]
+    otp_service.poll_otp_value = unavailable  # type: ignore[attr-defined]
+    otp_service.try_generate_totp_from_credential = unavailable  # type: ignore[attr-defined]
+    sys.modules[otp_service.__name__] = otp_service
+
     action_service = ModuleType("skyvern.services.action_service")
     action_service.get_action_history = unavailable  # type: ignore[attr-defined]
     sys.modules[action_service.__name__] = action_service
@@ -179,7 +256,24 @@ def _install_unrelated_skyvern_module_stubs() -> None:
         (),
         {"model_validate": unavailable},
     )
-    prompt_utils.load_prompt_with_elements = unavailable  # type: ignore[attr-defined]
+    prompt_utils.MaxStepsReasonResponse = type(  # type: ignore[attr-defined]
+        "MaxStepsReasonResponse",
+        (),
+        {"model_validate": unavailable},
+    )
+    def deterministic_load_prompt_with_elements(
+        element_tree_builder: Any,
+        prompt_engine: Any,
+        template_name: str,
+        html_need_skyvern_attrs: bool = True,
+        **kwargs: Any,
+    ) -> str:
+        elements = element_tree_builder.build_element_tree(
+            html_need_skyvern_attrs=html_need_skyvern_attrs
+        )
+        return prompt_engine.load_prompt(template_name, elements=elements, **kwargs)
+
+    prompt_utils.load_prompt_with_elements = deterministic_load_prompt_with_elements  # type: ignore[attr-defined]
     sys.modules[prompt_utils.__name__] = prompt_utils
 
     browser_factory = ModuleType("skyvern.webeye.browser_factory")
@@ -189,6 +283,7 @@ def _install_unrelated_skyvern_module_stubs() -> None:
 
     image_resizer = ModuleType("skyvern.utils.image_resizer")
     image_resizer.Resolution = dict  # type: ignore[attr-defined]
+    image_resizer.scale_coordinates = unavailable  # type: ignore[attr-defined]
     sys.modules[image_resizer.__name__] = image_resizer
 
     if importlib.util.find_spec("PIL") is None:
@@ -199,6 +294,27 @@ def _install_unrelated_skyvern_module_stubs() -> None:
     token_counter = ModuleType("skyvern.utils.token_counter")
     token_counter.count_tokens = lambda text: len(text.encode("utf-8"))  # type: ignore[attr-defined]
     sys.modules[token_counter.__name__] = token_counter
+
+    workflow_context = ModuleType("skyvern.forge.sdk.workflow.context_manager")
+    workflow_context.WorkflowRunContext = type("WorkflowRunContext", (), {})  # type: ignore[attr-defined]
+    sys.modules[workflow_context.__name__] = workflow_context
+
+    workflow_block = ModuleType("skyvern.forge.sdk.workflow.models.block")
+    base_task_block = type("BaseTaskBlock", (), {})
+    workflow_block.BaseTaskBlock = base_task_block  # type: ignore[attr-defined]
+    workflow_block.ActionBlock = type("ActionBlock", (base_task_block,), {})  # type: ignore[attr-defined]
+    workflow_block.ValidationBlock = type("ValidationBlock", (base_task_block,), {})  # type: ignore[attr-defined]
+    sys.modules[workflow_block.__name__] = workflow_block
+
+    workflow_models = ModuleType("skyvern.forge.sdk.workflow.models.workflow")
+    workflow_models.Workflow = type("Workflow", (), {})  # type: ignore[attr-defined]
+    workflow_models.WorkflowRun = type("WorkflowRun", (), {})  # type: ignore[attr-defined]
+    workflow_models.WorkflowRunStatus = type(  # type: ignore[attr-defined]
+        "WorkflowRunStatus",
+        (),
+        {"canceled": "canceled", "timed_out": "timed_out"},
+    )
+    sys.modules[workflow_models.__name__] = workflow_models
 
 
 _install_unrelated_skyvern_module_stubs()
@@ -225,6 +341,7 @@ from enterprise.governance.models import (
 )
 from enterprise.governance.permit_service import issue_permit
 from skyvern.config import settings
+from skyvern.forge import agent as forge_agent_module
 from skyvern.forge import app as forge_app
 from skyvern.forge import set_force_app_instance
 from skyvern.forge.sdk.core import skyvern_context
@@ -309,6 +426,46 @@ def _normalize_declared_naive_timestamps(
     return statement, normalize(parameters)
 
 
+def _task_from_model(model: TaskModel) -> Task:
+    return Task(
+        task_id=model.task_id,
+        organization_id=model.organization_id,
+        status=TaskStatus(model.status),
+        task_type=model.task_type,
+        title=model.title,
+        url=model.url,
+        navigation_goal=model.navigation_goal,
+        navigation_payload=model.navigation_payload,
+        application=model.application,
+        errors=model.errors,
+        created_at=model.created_at,
+        modified_at=model.modified_at,
+        started_at=model.started_at,
+        finished_at=model.finished_at,
+    )
+
+
+def _step_from_model(model: StepModel) -> Step:
+    return Step(
+        task_id=model.task_id,
+        step_id=model.step_id,
+        organization_id=model.organization_id,
+        status=StepStatus(model.status),
+        output=model.output,
+        order=model.order,
+        retry_index=model.retry_index,
+        is_last=model.is_last,
+        created_by=model.created_by,
+        created_at=model.created_at,
+        modified_at=model.modified_at,
+        input_token_count=model.input_token_count or 0,
+        output_token_count=model.output_token_count or 0,
+        reasoning_token_count=model.reasoning_token_count,
+        cached_token_count=model.cached_token_count,
+        step_cost=float(model.step_cost or 0),
+    )
+
+
 class M4Database:
     """Real-PostgreSQL adapter for the exact ActionHandler surface used by M4."""
 
@@ -349,6 +506,75 @@ class M4Database:
             await session.commit()
             await session.refresh(model)
             return SimpleNamespace(action_id=model.action_id)
+
+    async def get_task(self, task_id: str, organization_id: str | None = None) -> Task | None:
+        async with self.Session() as session:
+            statement = select(TaskModel).where(TaskModel.task_id == task_id)
+            if organization_id is not None:
+                statement = statement.where(TaskModel.organization_id == organization_id)
+            model = (await session.scalars(statement)).first()
+            return _task_from_model(model) if model is not None else None
+
+    async def get_step(self, step_id: str, organization_id: str | None = None) -> Step | None:
+        async with self.Session() as session:
+            statement = select(StepModel).where(StepModel.step_id == step_id)
+            if organization_id is not None:
+                statement = statement.where(StepModel.organization_id == organization_id)
+            model = (await session.scalars(statement)).first()
+            return _step_from_model(model) if model is not None else None
+
+    async def update_task(
+        self,
+        task_id: str,
+        status: TaskStatus | None = None,
+        organization_id: str | None = None,
+        **updates: Any,
+    ) -> Task:
+        async with self.Session() as session:
+            statement = select(TaskModel).where(TaskModel.task_id == task_id)
+            if organization_id is not None:
+                statement = statement.where(TaskModel.organization_id == organization_id)
+            model = (await session.scalars(statement)).first()
+            if model is None:
+                raise LookupError(f"Task not found: {task_id}")
+            if status is not None:
+                model.status = status.value
+            for field_name in ("extracted_information", "failure_reason", "errors", "max_steps_per_run"):
+                if field_name in updates and updates[field_name] is not None:
+                    setattr(model, field_name, updates[field_name])
+            await session.commit()
+            await session.refresh(model)
+            return _task_from_model(model)
+
+    async def update_step(
+        self,
+        task_id: str,
+        step_id: str,
+        status: StepStatus | None = None,
+        output: Any | None = None,
+        organization_id: str | None = None,
+        **updates: Any,
+    ) -> Step:
+        async with self.Session() as session:
+            statement = select(StepModel).where(
+                StepModel.task_id == task_id,
+                StepModel.step_id == step_id,
+            )
+            if organization_id is not None:
+                statement = statement.where(StepModel.organization_id == organization_id)
+            model = (await session.scalars(statement)).first()
+            if model is None:
+                raise LookupError(f"Step not found: {step_id}")
+            if status is not None:
+                model.status = status.value
+            if output is not None:
+                model.output = output.model_dump(mode="json", exclude_none=True)
+            for field_name in ("is_last", "retry_index", "created_by"):
+                if field_name in updates and updates[field_name] is not None:
+                    setattr(model, field_name, updates[field_name])
+            await session.commit()
+            await session.refresh(model)
+            return _step_from_model(model)
 
 
 class M4BrowserState:
@@ -724,6 +950,92 @@ def configured_forge_boundary(database: M4Database, browser_state: M4BrowserStat
             skyvern_context.set(previous_context)
 
 
+class _NativeAgentFunctions:
+    async def prepare_step_execution(self, **_kwargs: Any) -> None:
+        return None
+
+    async def post_action_execution(self, _action: Any) -> None:
+        return None
+
+    def cleanup_element_tree_factory(self, **_kwargs: Any) -> Any:
+        async def identity_cleanup(
+            _page: Any,
+            _url: str,
+            tree: list[dict[str, Any]],
+        ) -> list[dict[str, Any]]:
+            return tree
+
+        return identity_cleanup
+
+
+class _NativeArtifactManager:
+    async def create_artifact(self, **kwargs: Any) -> SimpleNamespace:
+        artifact_type = kwargs.get("artifact_type")
+        return SimpleNamespace(artifact_id=f"m7-noop-{getattr(artifact_type, 'value', 'artifact')}")
+
+
+class _NativeExperimentationProvider:
+    async def is_feature_enabled_cached(self, *_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+
+@contextmanager
+def configured_native_forge_boundary(
+    database: M4Database,
+    browser_state: M4BrowserState,
+    *,
+    organization_id: str,
+    task_id: str,
+    step_id: str,
+    run_id: str,
+    llm_api_handler: Any,
+) -> Iterator[None]:
+    previous = object.__getattribute__(forge_app, "_inst")
+    previous_secret = settings.GOVERNANCE_AUDIT_HMAC_SECRET
+    previous_mode = settings.GOVERNANCE_MODE
+    previous_context = skyvern_context.current()
+    previous_action_history = forge_agent_module.get_action_history
+
+    async def empty_action_history(**_kwargs: Any) -> list[Any]:
+        return []
+
+    set_force_app_instance(
+        SimpleNamespace(
+            DATABASE=database,
+            REPLICA_DATABASE=database,
+            BROWSER_MANAGER=_SingleBrowserManager(browser_state),
+            AGENT_FUNCTION=_NativeAgentFunctions(),
+            ARTIFACT_MANAGER=_NativeArtifactManager(),
+            EXPERIMENTATION_PROVIDER=_NativeExperimentationProvider(),
+            LLM_API_HANDLER=llm_api_handler,
+            NORMAL_SELECT_AGENT_LLM_API_HANDLER=_deterministic_normal_select,
+            scrape_exclude=None,
+        )
+    )
+    forge_agent_module.get_action_history = empty_action_history
+    settings.GOVERNANCE_AUDIT_HMAC_SECRET = HMAC_SECRET
+    settings.GOVERNANCE_MODE = "off"
+    skyvern_context.set(
+        skyvern_context.SkyvernContext(
+            organization_id=organization_id,
+            task_id=task_id,
+            step_id=step_id,
+            run_id=run_id,
+        )
+    )
+    try:
+        yield
+    finally:
+        forge_agent_module.get_action_history = previous_action_history
+        settings.GOVERNANCE_AUDIT_HMAC_SECRET = previous_secret
+        settings.GOVERNANCE_MODE = previous_mode
+        object.__setattr__(forge_app, "_inst", previous)
+        if previous_context is None:
+            skyvern_context.reset()
+        else:
+            skyvern_context.set(previous_context)
+
+
 async def seed_governance_context(
     database: M4Database,
     console_url: str,
@@ -1025,6 +1337,7 @@ async def install_execute_order_probe(
     idempotency_key: str,
     observed_statuses: list[str | None],
     observed_urls: list[str],
+    task_id: str = TASK_ID,
 ) -> None:
     async def capture(route: Route) -> None:
         request_url = route.request.url
@@ -1034,7 +1347,7 @@ async def install_execute_order_probe(
             attempt = (
                 await session.scalars(
                     select(ExecutionAttemptModel).where(
-                        ExecutionAttemptModel.task_id == TASK_ID,
+                        ExecutionAttemptModel.task_id == task_id,
                         ExecutionAttemptModel.idempotency_key == idempotency_key,
                     )
                 )
@@ -1045,12 +1358,17 @@ async def install_execute_order_probe(
     await page.route("**/api/challenges/*/execute", capture)
 
 
-async def execution_attempt(database: M4Database, idempotency_key: str) -> ExecutionAttemptModel:
+async def execution_attempt(
+    database: M4Database,
+    idempotency_key: str,
+    *,
+    task_id: str = TASK_ID,
+) -> ExecutionAttemptModel:
     async with database.Session() as session:
         attempt = (
             await session.scalars(
                 select(ExecutionAttemptModel).where(
-                    ExecutionAttemptModel.task_id == TASK_ID,
+                    ExecutionAttemptModel.task_id == task_id,
                     ExecutionAttemptModel.idempotency_key == idempotency_key,
                 )
             )

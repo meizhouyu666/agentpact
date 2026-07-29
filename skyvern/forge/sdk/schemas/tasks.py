@@ -190,6 +190,7 @@ class TaskStatus(StrEnum):
     pending_approval = "pending_approval"
     resuming = "resuming"
     needs_human = "needs_human"
+    pending_result_probe = "pending_result_probe"
     timed_out = "timed_out"
     failed = "failed"
     terminated = "terminated"
@@ -223,6 +224,7 @@ class TaskStatus(StrEnum):
             TaskStatus.running: {
                 TaskStatus.pending_approval,
                 TaskStatus.needs_human,
+                TaskStatus.pending_result_probe,
                 TaskStatus.completed,
                 TaskStatus.failed,
                 TaskStatus.terminated,
@@ -242,6 +244,7 @@ class TaskStatus(StrEnum):
                 TaskStatus.canceled,
             },
             TaskStatus.needs_human: {TaskStatus.resuming, TaskStatus.terminated, TaskStatus.canceled},
+            TaskStatus.pending_result_probe: {TaskStatus.completed, TaskStatus.failed},
             TaskStatus.failed: set(),
             TaskStatus.terminated: set(),
             TaskStatus.completed: set(),
@@ -262,6 +265,7 @@ class TaskStatus(StrEnum):
             TaskStatus.pending_approval,
             TaskStatus.resuming,
             TaskStatus.needs_human,
+            TaskStatus.pending_result_probe,
             TaskStatus.failed,
             TaskStatus.terminated,
         }

@@ -11,6 +11,7 @@ from enterprise.agent.work_orders import (
     RecoveryLevel,
     ReplanReason,
     assess_replan,
+    assess_suffix_replan,
     validate_business_plan,
     validate_work_order,
 )
@@ -153,3 +154,50 @@ def test_replan_changing_business_inputs_or_expected_transition_requires_reautho
 
     assert assessment.requires_reauthorization
     assert "Business inputs or expected transition changed" in assessment.reasons
+
+
+def test_root_plan_can_bind_a_distinct_native_task_and_contract():
+    grants = _grants()
+    plan = _plan(grants.grants[0].grant_id)
+    step = plan.steps[0]
+    work_order = ExecutionWorkOrder(
+        business_plan_step_id=step.step_id,
+        task_id="native_task_1",
+        contract_id="native_contract_1",
+        plan_task_id=plan.task_id,
+        authority_contract_id=plan.contract_id,
+        grant_id=step.grant_id,
+        navigation_goal="Execute one child under the root authority snapshot",
+        allowed_operations={"read"},
+        max_recovery_level=RecoveryLevel.L3,
+        result_probe_ref="synthetic.result-probe.v1",
+    )
+
+    validate_work_order(work_order, plan, step, grants, now=grants.grants[0].resolved_at)
+    with pytest.raises(ValueError, match="plan_task_id"):
+        validate_work_order(
+            work_order.model_copy(update={"plan_task_id": "root_other"}),
+            plan,
+            step,
+            grants,
+            now=grants.grants[0].resolved_at,
+        )
+
+
+def test_suffix_replan_preserves_prefix_and_allows_new_suffix_identity_only():
+    grants = _grants()
+    previous = _plan(grants.grants[0].grant_id)
+    previous.steps.append(previous.steps[0].model_copy(update={"step_id": "step_2"}, deep=True))
+    proposed = previous.model_copy(deep=True)
+    proposed.version = 2
+    proposed.replan_reason = ReplanReason.BUSINESS_STATE_CHANGED
+    proposed.steps[1].step_id = "step_2_replanned"
+
+    accepted = assess_suffix_replan(previous, proposed, completed_prefix_length=1)
+    assert not accepted.requires_reauthorization
+    assert accepted.accepted_suffix_step_ids == ("step_2_replanned",)
+
+    proposed.steps[0].inputs = {"resource": "changed"}
+    rejected = assess_suffix_replan(previous, proposed, completed_prefix_length=1)
+    assert rejected.requires_reauthorization
+    assert "Completed prefix changed" in rejected.reasons

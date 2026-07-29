@@ -15,6 +15,7 @@ class StepStatus(StrEnum):
     pending_approval = "pending_approval"
     resuming = "resuming"
     needs_human = "needs_human"
+    pending_result_probe = "pending_result_probe"
     failed = "failed"
     completed = "completed"
     canceled = "canceled"
@@ -28,10 +29,12 @@ class StepStatus(StrEnum):
                 StepStatus.canceled,
                 StepStatus.pending_approval,
                 StepStatus.needs_human,
+                StepStatus.pending_result_probe,
             },
             StepStatus.pending_approval: {StepStatus.resuming, StepStatus.failed, StepStatus.canceled},
             StepStatus.resuming: {StepStatus.running, StepStatus.failed, StepStatus.canceled},
             StepStatus.needs_human: {StepStatus.resuming, StepStatus.failed, StepStatus.canceled},
+            StepStatus.pending_result_probe: {StepStatus.completed, StepStatus.failed},
             StepStatus.failed: set(),
             StepStatus.completed: set(),
             StepStatus.canceled: set(),
@@ -49,6 +52,7 @@ class StepStatus(StrEnum):
             StepStatus.pending_approval,
             StepStatus.resuming,
             StepStatus.needs_human,
+            StepStatus.pending_result_probe,
         }
         return self in status_cant_have_output
 
