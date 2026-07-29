@@ -207,12 +207,14 @@ from playwright.async_api import Browser, BrowserContext, Page, Playwright, Rout
 from sqlalchemy import event, pool, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from enterprise.domains.synthetic_payment.m6_runtime import SyntheticM6ExecutionBinding
 from enterprise.governance.contracts import (
     DecisionOutcome,
     ExecutionAttemptStatus,
     ExecutionAuthorization,
     ExecutionEffect,
     PolicyDecision,
+    TaskContract,
 )
 from enterprise.governance.execution_attempt_service import resolve_unknown_execution_attempt
 from enterprise.governance.execution_profiles import ExecutionMechanism, ExecutionProfile
@@ -722,8 +724,32 @@ def configured_forge_boundary(database: M4Database, browser_state: M4BrowserStat
             skyvern_context.set(previous_context)
 
 
-async def seed_governance_context(database: M4Database, console_url: str) -> SeededGovernanceContext:
+async def seed_governance_context(
+    database: M4Database,
+    console_url: str,
+    task_contract: TaskContract | None = None,
+) -> SeededGovernanceContext:
     now = datetime.now(timezone.utc)
+    contract = task_contract or TaskContract(
+        contract_id=CONTRACT_ID,
+        task_id=TASK_ID,
+        organization_id=ORGANIZATION_ID,
+        goal="Submit one approved synthetic payment through the governed Skyvern boundary",
+        allowed_operations={"synthetic.payment.submit"},
+        data_scope={"hosts": ["127.0.0.1"], "domain_pack": "synthetic.payment"},
+        authorization_snapshot={"run_id": RUN_ID, "synthetic_only": True},
+        policy_profile="finrpa-m4-synthetic",
+        policy_version="phase2-m4-v2",
+        success_criteria=["independent result probe confirms one submission"],
+        mode="audit",
+        expires_at=now + timedelta(minutes=10),
+    )
+    if (
+        contract.contract_id != CONTRACT_ID
+        or contract.task_id != TASK_ID
+        or contract.organization_id != ORGANIZATION_ID
+    ):
+        raise ValueError("Governed browser seed rejected a mismatched TaskContract identity")
     async with database.Session() as session:
         session.add(OrganizationModel(organization_id=ORGANIZATION_ID, organization_name="FinRPA M4 Synthetic"))
         await session.flush()
@@ -752,18 +778,23 @@ async def seed_governance_context(database: M4Database, console_url: str) -> See
         await session.flush()
         session.add(
             TaskContractModel(
-                contract_id=CONTRACT_ID,
-                task_id=TASK_ID,
-                organization_id=ORGANIZATION_ID,
-                goal="Submit one approved synthetic payment through the governed Skyvern boundary",
-                allowed_operations=["synthetic.payment.submit"],
-                data_scope={"hosts": ["127.0.0.1"], "domain_pack": "synthetic.payment"},
-                authorization_snapshot={"run_id": RUN_ID, "synthetic_only": True},
-                policy_profile="finrpa-m4-synthetic",
-                policy_version="phase2-m4-v2",
-                success_criteria=["independent result probe confirms one submission"],
-                mode="audit",
-                expires_at=now + timedelta(minutes=10),
+                contract_id=contract.contract_id,
+                task_id=contract.task_id,
+                organization_id=contract.organization_id,
+                initiator_id=contract.initiator_id,
+                service_principal_id=contract.service_principal_id,
+                department_id=contract.department_id,
+                business_line_id=contract.business_line_id,
+                goal=contract.goal,
+                allowed_operations=sorted(contract.allowed_operations),
+                data_scope=contract.data_scope,
+                authorization_snapshot=contract.authorization_snapshot,
+                policy_profile=contract.policy_profile,
+                policy_version=contract.policy_version,
+                success_criteria=contract.success_criteria,
+                mode=contract.mode.value,
+                expires_at=contract.expires_at,
+                version=contract.version,
             )
         )
         await session.commit()
@@ -875,12 +906,25 @@ async def run_handler_action(
     return results
 
 
+async def observe_synthetic_payment_inputs(page: Page) -> dict[str, object]:
+    """Read the synthetic form facts without granting a second execution path."""
+
+    return {
+        "payment_id": await page.input_value("#paymentId"),
+        "beneficiary_id": await page.input_value("#beneficiary"),
+        "amount": await page.input_value("#amount"),
+        "currency": await page.input_value("#currency"),
+        "reference": await page.input_value("#reference"),
+    }
+
+
 async def issue_exact_permit(
     *,
     database: M4Database,
     action: ClickAction,
     scraped_page: ScrapedPage,
     idempotency_key: str,
+    execution_binding: SyntheticM6ExecutionBinding | None = None,
 ) -> tuple[ExecutionAuthorization, ExecutionProfile]:
     from enterprise.governance.audit import observation_hash
     from enterprise.governance.classification import action_fingerprint
@@ -893,10 +937,26 @@ async def issue_exact_permit(
         observation_hash=observed_hash,
         secret=HMAC_SECRET,
     )
+    now = datetime.now(timezone.utc)
+    permit_ttl_seconds = 300
+    pending_action_expires_at = now + timedelta(minutes=5)
+    if execution_binding is not None:
+        if execution_binding.task_id != TASK_ID or execution_binding.contract_id != CONTRACT_ID:
+            raise ValueError("M6 execution binding does not match the Permit task and contract")
+        if now >= execution_binding.expires_at:
+            raise ValueError("M6 execution binding is stale before Permit issuance")
+        remaining_seconds = int((execution_binding.expires_at - now).total_seconds())
+        if remaining_seconds < 1:
+            raise ValueError("M6 execution binding has no remaining Permit lifetime")
+        permit_ttl_seconds = min(permit_ttl_seconds, remaining_seconds)
+        pending_action_expires_at = min(pending_action_expires_at, execution_binding.expires_at)
+    evidence_refs = [f"skyvern://scrape/{RUN_ID}/{action.element_id}"]
+    if execution_binding is not None:
+        evidence_refs.append(f"agentpact://m6-execution-binding/{execution_binding.binding_digest}")
     profile = ExecutionProfile(
         mechanism=ExecutionMechanism.LOCATOR,
         fallback_rank=0,
-        evidence_refs=[f"skyvern://scrape/{RUN_ID}/{action.element_id}"],
+        evidence_refs=evidence_refs,
     )
     decision = PolicyDecision(
         decision_id="decision-m4-synthetic-governed-browser",
@@ -922,12 +982,15 @@ async def issue_exact_permit(
                     "intent_id": decision.intent_id,
                     "operation": "synthetic.payment.submit",
                     "effect": ExecutionEffect.EXTERNAL_WRITE.value,
+                    "m6_execution_binding": (
+                        execution_binding.model_dump(mode="json") if execution_binding is not None else None
+                    ),
                 },
                 decision_payload=decision.model_dump(mode="json"),
                 approval_id="approval-m4-synthetic-governed-browser",
                 status="approved",
                 row_version=1,
-                expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+                expires_at=pending_action_expires_at,
             )
         )
         permit = await issue_permit(
@@ -940,7 +1003,7 @@ async def issue_exact_permit(
             decision=decision,
             effect=ExecutionEffect.EXTERNAL_WRITE,
             execution_profile=profile,
-            ttl_seconds=300,
+            ttl_seconds=permit_ttl_seconds,
         )
         await session.commit()
     return (
