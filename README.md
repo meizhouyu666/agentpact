@@ -96,20 +96,26 @@ CUA 和缓存动作等 fallback 也属于治理范围，不能成为绕过授权
 | M3 参考 Pack | 已完成 | `synthetic.payment` 参考实现、有效/无效 Pack 夹具和隔离测试 |
 | M4 受治理 E2E | 已完成 | 真实 Chromium 副作用、持久化 `EXECUTING/UNKNOWN`、禁止重放、独立探针与完整清理 |
 | M5 开发者体验 | 已完成 | 跨平台 CLI、版本锁定、机器可读报告、Ubuntu CI 与 Windows smoke 路径 |
+| M6 受约束 Agent Runtime | 已完成 | 从 Domain Pack 安装、身份/租户/RBAC 与 CapabilityGrant 投影，到 BusinessPlan 和 ExecutionWorkOrder 的确定性编译 |
+| M7 原生 Agent 闭环 | 已完成 | 真实 ForgeAgent/Chromium 执行、原生 Task/Step 绑定、Permit/Attempt 闸门、UNKNOWN 探针恢复与单次副作用证明 |
+| M8 治理式多步骤 Loop | 已完成 | 顺序多步骤 BusinessPlan、不可变已完成前缀、受限 L3 后缀 Replan、哈希链 Journal 与崩溃恢复 |
 
-这些成果构成一条可运行的合成垂直链路，而不是生产部署声明。
+M6-M8 已将这条链路推进为可运行的合成 Agent Runtime：Planner 负责业务计划，
+Skyvern Agent Loop 负责页面感知，Governance Kernel 负责确定性执行闸门和恢复。
+当前仍是合成数据、回环控制台和本地 PostgreSQL/Chromium 证明，不是生产部署声明。
 
 ## 未来蓝图
 
 以下内容是演进方向，不代表当前已经实现或具备生产可用性。
 
-### 1. 接通受约束 Agent Runtime
+### 1. 从合成 Runtime 走向可复用 Runtime
 
-- 引入租户级 `DomainPackInstallation` 和只加载已安装 Pack 的 Active Registry。
-- 将安装后的 Capability 投影为 Planner 可见的结构化工具。
-- 接通 `BusinessPlan -> ExecutionWorkOrder -> Skyvern Task/Step` 适配器。
-- 将 Governor、Permit、Attempt 与 Result Probe 接入完整 Agent 主链，而不是仅在合成
-  Harness 中证明关键语义。
+- 将当前 synthetic-only 的多步骤协调器抽象为可复用的 Runtime 接口，并保持治理闸门
+  位于所有浏览器副作用之前。
+- 引入租户级 `DomainPackInstallation` 与只加载已安装 Pack 的 Active Registry，
+  再把 Capability 投影为 Planner 可见的结构化工具。
+- 在第二个小型 Domain Pack 上复用 `BusinessPlan -> ExecutionWorkOrder ->
+  Skyvern Task/Step` 与 Journal/Probe 契约。
 
 ### 2. 验证领域扩展能力
 
@@ -182,7 +188,8 @@ M4 验证会在浏览器产生外部效果前持久化记录 `EXECUTING`，将�
 
 - 不包含真实支付数据、凭据、生产 API 调用或生产 Domain Pack。
 - 不包含部署、软件包发布、迁移、租户安装或生产运行路径。
-- 未接入 Active Registry，也未启用 Planner/ForgeAgent 运行时连线。
+- 仅在合成 payment Domain Pack、回环控制台、本地 PostgreSQL/Chromium E2E 中接入
+  Planner/ForgeAgent；生产 Active Registry、真实站点和真实凭据仍未接入。
 - 全局 `GOVERNANCE_MODE=enforce` 仍会被配置校验拒绝。
 - 本仓库是开发参考实现和证据验证工具，不是可运营的金融系统。
 
