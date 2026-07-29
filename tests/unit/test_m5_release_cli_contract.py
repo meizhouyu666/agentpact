@@ -189,14 +189,27 @@ def test_supported_setup_blocks_never_fall_back_to_ambient_python(path: Path) ->
             assert line.startswith('"$VENV_PYTHON" ')
 
 
-def test_release_readme_is_concise_synthetic_only_and_non_production() -> None:
+def test_release_readme_presents_product_and_roadmap_before_setup() -> None:
     readme = README.read_text(encoding="utf-8")
     lowered = readme.casefold()
-    assert len(readme.splitlines()) < 120
+    assert len(readme.splitlines()) < 220
     assert not readme.isascii()
     assert "仅使用合成数据" in readme
     assert "不面向生产环境" in readme
     assert "不包含部署" in readme
+    headings = (
+        "## 为什么需要 AgentPact",
+        "## 工作方式",
+        "## 核心能力",
+        "## 当前能力",
+        "## 未来蓝图",
+        "## 运行合成验证",
+    )
+    assert all(heading in readme for heading in headings)
+    assert [readme.index(heading) for heading in headings] == sorted(readme.index(heading) for heading in headings)
+    assert "以下内容是演进方向，不代表当前已经实现或具备生产可用性" in readme
+    assert "DomainPackInstallation" in readme
+    assert "Active Registry" in readme
     forbidden = (
         "make dev-prod",
         "default credentials",
