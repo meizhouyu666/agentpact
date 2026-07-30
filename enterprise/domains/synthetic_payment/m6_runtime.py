@@ -41,13 +41,43 @@ from enterprise.governance.domain_pack_installations import (
     DomainPackInstallationStatus,
     build_active_domain_pack_set,
 )
-from enterprise.governance.pack_conformance import StaticConformanceReport
+from enterprise.governance.pack_conformance import ConformanceStatus, StaticConformanceReport
+from enterprise.governance.pack_runtime import PackRuntimeContract
 
-from .constants import CAPABILITY_ID, PACK_ID, PACK_VERSION, POLICY_VERSION, RESULT_PROBE_REF
+from .constants import (
+    CAPABILITY_ID,
+    PACK_CAPABILITY_IDS,
+    PACK_CONFORMANCE_MANIFEST_DIGEST,
+    PACK_DISPLAY_NAME,
+    PACK_ID,
+    PACK_VERSION,
+    POLICY_VERSION,
+    RESULT_PROBE_REF,
+)
 from .definition import build_manifest
 from .models import PaymentFacts
 
 SYNTHETIC_ADAPTER_REF = "synthetic.payment.skyvern-locator-adapter.v1"
+SYNTHETIC_RUNTIME_CONTRACT = PackRuntimeContract(
+    pack_id=PACK_ID,
+    pack_version=PACK_VERSION,
+    display_name=PACK_DISPLAY_NAME,
+    capability_ids=PACK_CAPABILITY_IDS,
+    manifest_digest=PACK_CONFORMANCE_MANIFEST_DIGEST,
+)
+
+
+def build_synthetic_conformance_attestation() -> StaticConformanceReport:
+    """Return the M6-authorized fixed attestation for the accepted offline contract."""
+
+    return StaticConformanceReport(
+        candidate_pack_id=PACK_ID,
+        candidate_pack_version=PACK_VERSION,
+        manifest_digest=PACK_CONFORMANCE_MANIFEST_DIGEST,
+        status=ConformanceStatus.PASS,
+        checks=(),
+        violations=(),
+    )
 
 
 class M6TraceStage(StrEnum):

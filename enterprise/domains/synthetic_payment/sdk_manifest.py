@@ -20,8 +20,10 @@ from enterprise.governance.pack_sdk import (
 
 from .constants import (
     CAPABILITY_ID,
+    PACK_DISPLAY_NAME,
     PACK_ID,
     PACK_VERSION,
+    READ_CAPABILITY_ID,
     RESULT_PROBE_REF,
     RISK_POLICY_REF,
 )
@@ -32,7 +34,6 @@ __all__ = ["build_pack_sdk_manifest"]
 _AUTHORITATIVE_READ_EVIDENCE_ID = "synthetic.payment.authoritative-read.v1"
 _AUTHORITATIVE_SOURCE_REF = "synthetic.payment.store/v1"
 _LIFECYCLE_ID = "synthetic.payment.lifecycle.v1"
-_READ_CAPABILITY_ID = "synthetic.payment.read"
 _SUBMIT_TRANSITION_ID = "synthetic.payment.submit.transition.v1"
 _FACT_FIELD_NAMES = (*PaymentFacts.model_fields, "status")
 
@@ -79,7 +80,7 @@ def build_pack_sdk_manifest() -> PackSdkManifest:
     )
     capabilities = (
         PackCapability(
-            capability_id=_READ_CAPABILITY_ID,
+            capability_id=READ_CAPABILITY_ID,
             pack_version=PACK_VERSION,
             display_name="Read synthetic payment",
             effect_class=PackEffectClass.READ_ONLY,
@@ -117,7 +118,7 @@ def build_pack_sdk_manifest() -> PackSdkManifest:
         pack_id=PACK_ID,
         pack_version=PACK_VERSION,
         kind=PackContractKind.SYNTHETIC_REFERENCE,
-        display_name="Synthetic Payment Reference Pack",
+        display_name=PACK_DISPLAY_NAME,
         owner_refs=tuple(
             ContractOwnerReference(
                 role=role,

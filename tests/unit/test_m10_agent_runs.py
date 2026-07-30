@@ -29,6 +29,7 @@ from enterprise.domains.synthetic_payment.m10_runtime import (
     SyntheticPaymentRuntimeAdapter,
     derive_agent_run_id,
 )
+from enterprise.domains.synthetic_payment.m6_runtime import SYNTHETIC_RUNTIME_CONTRACT
 from enterprise.domains.synthetic_payment.sdk_manifest import build_pack_sdk_manifest
 from enterprise.governance.contracts import ActionIntent, DecisionOutcome, ExecutionEffect, PolicyDecision
 from enterprise.governance.pack_runtime import PackRuntimeBinding, PackRuntimeRegistry
@@ -75,7 +76,7 @@ def _adapter() -> SyntheticPaymentRuntimeAdapter:
 
 def test_runtime_adapter_exactly_conforms_to_static_manifest_without_sdk_wiring() -> None:
     manifest = build_pack_sdk_manifest()
-    registry = PackRuntimeRegistry([manifest])
+    registry = PackRuntimeRegistry([SYNTHETIC_RUNTIME_CONTRACT])
     adapter = _adapter()
     registry.register(adapter)
 
@@ -85,7 +86,14 @@ def test_runtime_adapter_exactly_conforms_to_static_manifest_without_sdk_wiring(
         "pack_version": "1.0.0",
         "display_name": "Synthetic Payment Reference Pack",
     }
-    assert adapter.binding.capability_ids == tuple(item.capability_id for item in manifest.capabilities)
+    assert SYNTHETIC_RUNTIME_CONTRACT.pack_id == manifest.pack_id
+    assert SYNTHETIC_RUNTIME_CONTRACT.pack_version == manifest.pack_version
+    assert SYNTHETIC_RUNTIME_CONTRACT.display_name == manifest.display_name
+    assert SYNTHETIC_RUNTIME_CONTRACT.capability_ids == tuple(
+        item.capability_id for item in manifest.capabilities
+    )
+    assert SYNTHETIC_RUNTIME_CONTRACT.manifest_digest == manifest.manifest_digest
+    assert adapter.binding.capability_ids == SYNTHETIC_RUNTIME_CONTRACT.capability_ids
     assert manifest.contract_catalog_only is True
     assert manifest.runtime_wiring_eligible is False
     assert "adapter" not in manifest.model_dump(mode="json")
@@ -114,7 +122,7 @@ def test_runtime_adapter_exactly_conforms_to_static_manifest_without_sdk_wiring(
             return prepared, trusted_inputs
 
     with pytest.raises(ValueError):
-        PackRuntimeRegistry([manifest]).register(ForgedAdapter())
+        PackRuntimeRegistry([SYNTHETIC_RUNTIME_CONTRACT]).register(ForgedAdapter())
 
 
 def test_preparation_is_deterministic_and_model_boundary_uses_only_intent_token() -> None:

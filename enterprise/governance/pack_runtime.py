@@ -7,8 +7,6 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .pack_sdk import PackSdkManifest
-
 
 class PackRuntimeBinding(BaseModel):
     """Implementation identity that can be matched to one immutable manifest."""
@@ -19,6 +17,18 @@ class PackRuntimeBinding(BaseModel):
     pack_version: str = Field(min_length=1)
     capability_ids: tuple[str, ...] = Field(min_length=1)
     adapter_id: str = Field(min_length=1)
+
+
+class PackRuntimeContract(BaseModel):
+    """Runtime-safe identity pinned to one offline-conformant Pack contract."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    pack_id: str = Field(min_length=1)
+    pack_version: str = Field(min_length=1)
+    display_name: str = Field(min_length=1)
+    capability_ids: tuple[str, ...] = Field(min_length=1)
+    manifest_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class ModelSafeRuntimeProjection(BaseModel):
@@ -66,22 +76,22 @@ class PackRuntimeAdapter(Protocol):
 
 
 class PackRuntimeRegistry:
-    """Boot-time exact adapter/manifest conformance registry."""
+    """Boot-time exact adapter/runtime-contract registry."""
 
-    def __init__(self, manifests: Iterable[PackSdkManifest]) -> None:
-        self._manifests = {(item.pack_id, item.pack_version): item for item in manifests}
+    def __init__(self, contracts: Iterable[PackRuntimeContract]) -> None:
+        self._contracts = {(item.pack_id, item.pack_version): item for item in contracts}
         self._adapters: dict[tuple[str, str], PackRuntimeAdapter] = {}
 
     def register(self, adapter: PackRuntimeAdapter) -> None:
         binding = adapter.binding
         key = (binding.pack_id, binding.pack_version)
-        manifest = self._manifests.get(key)
-        if manifest is None:
-            raise ValueError("Runtime adapter does not match an installed static Pack manifest")
-        expected = tuple(sorted(item.capability_id for item in manifest.capabilities))
+        contract = self._contracts.get(key)
+        if contract is None:
+            raise ValueError("Runtime adapter does not match an installed Pack runtime contract")
+        expected = tuple(sorted(contract.capability_ids))
         actual = tuple(sorted(binding.capability_ids))
         if len(actual) != len(set(actual)) or actual != expected:
-            raise ValueError("Runtime adapter capabilities do not exactly match the static Pack manifest")
+            raise ValueError("Runtime adapter capabilities do not exactly match the Pack runtime contract")
         if key in self._adapters:
             raise ValueError("A runtime adapter is already registered for this Pack version")
         self._adapters[key] = adapter
@@ -95,13 +105,13 @@ class PackRuntimeRegistry:
     def public_metadata(self, *, pack_id: str, pack_version: str) -> PublicPackRuntimeMetadata:
         self.require(pack_id=pack_id, pack_version=pack_version)
         try:
-            manifest = self._manifests[(pack_id, pack_version)]
+            contract = self._contracts[(pack_id, pack_version)]
         except KeyError as exc:
-            raise LookupError("No installed static Pack manifest matches this runtime") from exc
+            raise LookupError("No installed Pack runtime contract matches this runtime") from exc
         return PublicPackRuntimeMetadata(
-            pack_id=manifest.pack_id,
-            pack_version=manifest.pack_version,
-            display_name=manifest.display_name,
+            pack_id=contract.pack_id,
+            pack_version=contract.pack_version,
+            display_name=contract.display_name,
         )
 
     @property

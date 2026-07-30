@@ -35,7 +35,6 @@ from enterprise.governance.models import (
     ExecutionPermitModel,
     GovernedTaskAdmissionModel,
 )
-from enterprise.governance.pack_conformance import evaluate_static_pack_conformance
 from enterprise.governance.pack_runtime import (
     ModelSafeRuntimeProjection,
     PackRuntimeBinding,
@@ -64,7 +63,9 @@ from .constants import (
     POLICY_VERSION,
 )
 from .m6_runtime import (
+    SYNTHETIC_RUNTIME_CONTRACT,
     SyntheticM6TrustedContext,
+    build_synthetic_conformance_attestation,
     build_synthetic_installation,
     compile_synthetic_request,
 )
@@ -99,7 +100,7 @@ from .m9_runtime import (
 )
 from .models import PaymentFacts
 from .policy import require_approval_decision
-from .sdk_manifest import build_pack_sdk_manifest
+
 
 M10_ADAPTER_ID = "synthetic.payment.agent-run-runtime.v1"
 
@@ -613,11 +614,10 @@ class SyntheticPaymentRuntimeAdapter:
 
     @property
     def binding(self) -> PackRuntimeBinding:
-        manifest = build_pack_sdk_manifest()
         return PackRuntimeBinding(
-            pack_id=manifest.pack_id,
-            pack_version=manifest.pack_version,
-            capability_ids=tuple(item.capability_id for item in manifest.capabilities),
+            pack_id=SYNTHETIC_RUNTIME_CONTRACT.pack_id,
+            pack_version=SYNTHETIC_RUNTIME_CONTRACT.pack_version,
+            capability_ids=SYNTHETIC_RUNTIME_CONTRACT.capability_ids,
             adapter_id=M10_ADAPTER_ID,
         )
 
@@ -643,7 +643,6 @@ class SyntheticPaymentRuntimeAdapter:
             raise ValueError("M10 authenticated tenant does not match the trusted adapter context")
         run_id = derive_agent_run_id(tenant_id=user.org_id, request_id=request_id)
         admission_id = derive_admission_id(tenant_id=user.org_id, request_id=request_id)
-        manifest = build_pack_sdk_manifest()
         scope = CapabilityDataScope(
             department_id=PAYMENTS_DEPARTMENT_ID,
             business_line_id=BUSINESS_LINE_ID,
@@ -664,9 +663,9 @@ class SyntheticPaymentRuntimeAdapter:
                 tenant_id=user.org_id,
                 accepted_at=now - timedelta(seconds=1),
                 expires_at=now + timedelta(minutes=20),
-                contract_digest=manifest.manifest_digest,
+                contract_digest=SYNTHETIC_RUNTIME_CONTRACT.manifest_digest,
             ),
-            conformance_report=evaluate_static_pack_conformance(manifest),
+            conformance_report=build_synthetic_conformance_attestation(),
             planner=DeterministicPlanner(facts.model_dump(mode="json")),
         )
         plan_input = build_m9_plan_input(

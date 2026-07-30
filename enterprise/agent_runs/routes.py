@@ -46,10 +46,10 @@ def mount_agent_run_api(
         SyntheticPaymentRuntimeAdapter,
         TrustedSyntheticM10Driver,
     )
-    from enterprise.domains.synthetic_payment.sdk_manifest import build_pack_sdk_manifest
+    from enterprise.domains.synthetic_payment.m6_runtime import SYNTHETIC_RUNTIME_CONTRACT
     from enterprise.governance.pack_runtime import PackRuntimeRegistry
 
-    registry = PackRuntimeRegistry([build_pack_sdk_manifest()])
+    registry = PackRuntimeRegistry([SYNTHETIC_RUNTIME_CONTRACT])
     registry.register(
         SyntheticPaymentRuntimeAdapter(
             session_factory,

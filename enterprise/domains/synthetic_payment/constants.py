@@ -1,6 +1,10 @@
 PACK_ID = "synthetic.payment"
 PACK_VERSION = "1.0.0"
+PACK_DISPLAY_NAME = "Synthetic Payment Reference Pack"
+READ_CAPABILITY_ID = "synthetic.payment.read"
 CAPABILITY_ID = "synthetic.payment.submit"
+PACK_CAPABILITY_IDS = (READ_CAPABILITY_ID, CAPABILITY_ID)
+PACK_CONFORMANCE_MANIFEST_DIGEST = "388542cfe97350b8c83a4e1d147ba74ecd40b9a534965e4750e74f5cc0940946"
 POLICY_VERSION = "synthetic-payment-policy-v1"
 RESULT_PROBE_REF = "synthetic.payment.submit.result-probe.v1"
 WORK_ORDER_REF = "synthetic.payment.submit.work-order.v1"
@@ -11,4 +15,3 @@ TENANT_ID = "synthetic_finance_tenant"
 PAYMENTS_DEPARTMENT_ID = "synthetic_payments"
 COMPLIANCE_DEPARTMENT_ID = "synthetic_compliance"
 BUSINESS_LINE_ID = "synthetic_treasury"
-

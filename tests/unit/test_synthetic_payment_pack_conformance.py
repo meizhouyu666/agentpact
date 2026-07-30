@@ -10,12 +10,19 @@ import pytest
 
 from enterprise.domains.synthetic_payment.constants import (
     CAPABILITY_ID,
+    PACK_CAPABILITY_IDS,
+    PACK_CONFORMANCE_MANIFEST_DIGEST,
+    PACK_DISPLAY_NAME,
     PACK_ID,
     PACK_VERSION,
     RESULT_PROBE_REF,
     RISK_POLICY_REF,
 )
 from enterprise.domains.synthetic_payment.definition import build_manifest
+from enterprise.domains.synthetic_payment.m6_runtime import (
+    SYNTHETIC_RUNTIME_CONTRACT,
+    build_synthetic_conformance_attestation,
+)
 from enterprise.domains.synthetic_payment.models import PaymentFacts, PaymentStatus
 from enterprise.domains.synthetic_payment.sdk_manifest import build_pack_sdk_manifest
 from enterprise.governance.capabilities import AuthorizationDimension
@@ -84,6 +91,26 @@ def test_synthetic_payment_sdk_manifest_passes_deterministically():
     assert json.dumps(from_model.model_dump(mode="json"), sort_keys=True, separators=(",", ":")) == json.dumps(
         from_mapping.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
     )
+
+
+def test_runtime_contract_and_fixed_attestation_match_offline_manifest():
+    manifest = build_pack_sdk_manifest()
+    attestation = build_synthetic_conformance_attestation()
+
+    assert manifest.manifest_digest == PACK_CONFORMANCE_MANIFEST_DIGEST
+    assert SYNTHETIC_RUNTIME_CONTRACT.model_dump() == {
+        "pack_id": PACK_ID,
+        "pack_version": PACK_VERSION,
+        "display_name": PACK_DISPLAY_NAME,
+        "capability_ids": PACK_CAPABILITY_IDS,
+        "manifest_digest": manifest.manifest_digest,
+    }
+    assert attestation.status is ConformanceStatus.PASS
+    assert attestation.candidate_pack_id == manifest.pack_id
+    assert attestation.candidate_pack_version == manifest.pack_version
+    assert attestation.manifest_digest == manifest.manifest_digest
+    assert not attestation.checks
+    assert not attestation.violations
 
 
 def test_sdk_manifest_matches_existing_synthetic_contract_shapes():
