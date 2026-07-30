@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -43,6 +45,20 @@ from enterprise.domains.synthetic_payment.m8_runtime import (
     build_replacement_suffix,
     build_synthetic_m8_compilation,
 )
+from enterprise.domains.synthetic_payment.m9_runtime import (
+    M9PlannerDisposition,
+    M9PlannerEngine,
+    M9ReplanPreconditions,
+    M9StepRole,
+    PlanProposal,
+    RecordedM9Provider,
+    SuffixReplanProposal,
+    build_m9_plan_input,
+    build_m9_replan_input,
+    compile_m9_plan,
+    compile_m9_replan,
+    redact_replan_evidence,
+)
 from enterprise.governance.contracts import ExecutionAttemptStatus, ExecutionAuthorization, ExecutionEffect
 from enterprise.governance.models import (
     ExecutionAttemptModel,
@@ -58,6 +74,7 @@ from skyvern.forge.sdk.schemas.tasks import TaskStatus
 
 RUN_ID = "agentpact-m8-governed-replan-e2e"
 PLAN_RUN_ID = "m8-governed-replan-e2e-plan"
+M9_PLAN_RUN_ID = "m9-model-governed-replan-e2e-plan"
 
 
 async def _persist_m8_admission(
@@ -705,6 +722,178 @@ def test_m8_replans_only_the_suffix_and_executes_replacement_once() -> None:
                             admission_bundle=replacement_admission,
                             target_url=environment.console_url,
                         )
+                    return {
+                        "plan_version": finished.plan_version,
+                        "replan_count": finished.replan_count,
+                        "effect_count": len(runner.execute_urls),
+                        "completed_children": len(finished.completed_prefix),
+                    }
+            finally:
+                await database.engine.dispose()
+
+        evidence = asyncio.run(scenario())
+        assert evidence == {
+            "plan_version": 2,
+            "replan_count": 1,
+            "effect_count": 1,
+            "completed_children": 3,
+        }
+
+
+@pytest.mark.e2e
+def test_m9_recorded_model_plan_and_replan_use_the_existing_native_agent_path() -> None:
+    planning_time = datetime.now(timezone.utc)
+    authority, original_admission = _compile_admission(planning_time)
+    plan_input = build_m9_plan_input(authority)
+    plan_provider = RecordedM9Provider(
+        [
+            {
+                "capability_id": authority.projection[0].capability_id,
+                "input_slots": [item.name for item in plan_input.input_slots],
+                "step_roles": ["precheck", "submit", "confirm"],
+            }
+        ]
+    )
+    plan_decision = M9PlannerEngine(plan_provider).plan(plan_input)
+    assert plan_decision.disposition is M9PlannerDisposition.ACCEPTED
+    assert isinstance(plan_decision.proposal, PlanProposal)
+    compilation = compile_m9_plan(
+        authority,
+        plan_decision.proposal,
+        admission_id=original_admission.admission_id,
+        plan_run_id=M9_PLAN_RUN_ID,
+    )
+    admission = build_m8_admission_bundle(original_admission, compilation)
+    model_request = json.dumps(plan_provider.calls[0].model_dump(mode="json"), sort_keys=True)
+    for value in INPUTS.values():
+        if isinstance(value, str):
+            assert value not in model_request
+
+    with support.isolated_m4_environment() as environment:
+        database = support.M4Database(environment.database_url)
+
+        async def scenario() -> dict[str, object]:
+            try:
+                async with database.Session() as session:
+                    session.add(
+                        OrganizationModel(
+                            organization_id=ORGANIZATION_ID,
+                            organization_name="FinRPA M9 Model-Governed Agent Loop",
+                        )
+                    )
+                    session.add(
+                        GovernedTaskAdmissionModel(
+                            admission_id=admission.admission_id,
+                            organization_id=ORGANIZATION_ID,
+                            request_id=REQUEST_ID,
+                            task_id=admission.task.task_id,
+                            contract_id=admission.contract.contract_id,
+                            bundle_schema_version=admission.schema_version,
+                            admission_fingerprint="m9-governed-admission-e2e",
+                            bundle_fingerprint="m9-governed-bundle-v1-e2e",
+                            bundle_payload=admission.model_dump(mode="json"),
+                            mode="audit",
+                            committed_at=planning_time,
+                        )
+                    )
+                    await session.commit()
+
+                journal = SqlAlchemyGovernedPlanJournal(database.Session)
+                checkpoint = await journal.initialize(
+                    compilation=compilation,
+                    admission_bundle=admission,
+                    target_url=environment.console_url,
+                )
+                async with support.real_chromium(environment.console_url, environment.cleanup) as browser:
+                    runner = _M8NativeRunner(database, browser, environment)
+
+                    def adapter_factory(child: Any, bundle: Any) -> NativeSkyvernWorkOrderAdapter:
+                        return NativeSkyvernWorkOrderAdapter(
+                            SqlAlchemyNativePublicationRepository(database.Session),
+                            compilation=child,
+                            admission_bundle=bundle,
+                            target_url=environment.console_url,
+                            navigation_payload=dict(INPUTS),
+                        )
+
+                    coordinator = GovernedPlanCoordinator(
+                        journal,
+                        adapter_factory=adapter_factory,
+                        runner=runner,
+                    )
+                    paused = await coordinator.run_until_pause(
+                        compilation=compilation,
+                        admission_bundle=admission,
+                        checkpoint=checkpoint,
+                    )
+                    assert paused.state is PlanRunState.REPLAN_REQUIRED
+                    assert len(paused.completed_prefix) == 1
+
+                    token = redact_replan_evidence(
+                        mismatch_code="BUSINESS_STATE_CHANGED",
+                        step_role=M9StepRole.SUBMIT,
+                        raw_evidence={
+                            "native_task_id": runner.mismatched_native_task_id,
+                            "message": "raw browser mismatch is reduced to one digest",
+                            "trusted_business_values": {
+                                "text": INPUTS["payment_id"],
+                                "integer": 700001,
+                                "float": 700002.5,
+                                "boolean": True,
+                                "decimal": Decimal("700003.75"),
+                                "nested": {"reference": INPUTS["reference"]},
+                            },
+                        },
+                    )
+                    replan_input = build_m9_replan_input(
+                        compilation,
+                        completed_prefix_length=1,
+                        remaining_replans=1,
+                        evidence_tokens=(token,),
+                    )
+                    replan_provider = RecordedM9Provider([{"step_roles": ["submit", "confirm"]}])
+                    replan_decision = M9PlannerEngine(replan_provider).replan(
+                        replan_input,
+                        preconditions=M9ReplanPreconditions(remaining_replans=1),
+                    )
+                    assert replan_decision.disposition is M9PlannerDisposition.ACCEPTED
+                    assert isinstance(replan_decision.proposal, SuffixReplanProposal)
+                    replacement = compile_m9_replan(
+                        compilation,
+                        replan_decision.proposal,
+                        completed_prefix_length=1,
+                    )
+                    replacement_admission = build_m8_admission_bundle(admission, replacement)
+                    receipt = await coordinator.apply_replan(
+                        previous=compilation,
+                        proposed=replacement,
+                        checkpoint=paused,
+                        admission_bundle=replacement_admission,
+                    )
+                    assert receipt.checkpoint.completed_prefix == paused.completed_prefix
+
+                    finished = await coordinator.run_until_pause(
+                        compilation=replacement,
+                        admission_bundle=replacement_admission,
+                        checkpoint=receipt.checkpoint,
+                    )
+                    assert finished.state is PlanRunState.COMPLETED
+                    assert len(finished.completed_prefix) == 3
+                    assert len(runner.entered_forge) == 3
+                    assert len(set(runner.entered_forge)) == 3
+                    assert len(runner.execute_urls) == 1
+                    replan_request = json.dumps(
+                        replan_provider.calls[0].model_dump(mode="json"),
+                        sort_keys=True,
+                    )
+                    assert runner.mismatched_native_task_id not in replan_request
+                    assert token.content_digest in replan_request
+                    assert "trusted_business_values" not in replan_request
+                    for value in INPUTS.values():
+                        if isinstance(value, str):
+                            assert value not in replan_request
+                    for canary in ("700001", "700002.5", "700003.75"):
+                        assert canary not in replan_request
                     return {
                         "plan_version": finished.plan_version,
                         "replan_count": finished.replan_count,

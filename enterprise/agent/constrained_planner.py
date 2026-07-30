@@ -105,6 +105,26 @@ class OpenAICompatiblePlanner:
         self._api_key_env = api_key_env
 
     def propose(self, planner_input: ModelSafePlannerInput) -> object:
+        return self.propose_structured(
+            planner_input,
+            response_model=PlannerProposal,
+            schema_name="constrained_planner_proposal",
+            system_prompt=(
+                "Select exactly one supplied capability and return only JSON matching the response schema. "
+                "Never invent governance or browser fields."
+            ),
+        )
+
+    def propose_structured(
+        self,
+        planner_input: BaseModel,
+        *,
+        response_model: type[BaseModel],
+        schema_name: str,
+        system_prompt: str,
+    ) -> object:
+        """Invoke the same injected strict-JSON transport for a model-safe closed schema."""
+
         api_key = os.environ.get(self._api_key_env)
         if not api_key:
             raise PlannerProviderError(f"Planner credential environment variable is not set: {self._api_key_env}")
@@ -113,10 +133,7 @@ class OpenAICompatiblePlanner:
             "messages": [
                 {
                     "role": "system",
-                    "content": (
-                        "Select exactly one supplied capability and return only JSON matching the response schema. "
-                        "Never invent governance or browser fields."
-                    ),
+                    "content": system_prompt,
                 },
                 {
                     "role": "user",
@@ -126,9 +143,9 @@ class OpenAICompatiblePlanner:
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
-                    "name": "constrained_planner_proposal",
+                    "name": schema_name,
                     "strict": True,
-                    "schema": PlannerProposal.model_json_schema(),
+                    "schema": response_model.model_json_schema(),
                 },
             },
         }

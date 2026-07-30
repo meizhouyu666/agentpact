@@ -35,6 +35,7 @@ import { ApprovalsPage } from "@/routes/enterprise/approvals/ApprovalsPage";
 import { AuditLogsPage } from "@/routes/enterprise/audit/AuditLogsPage";
 import { PermissionsPage } from "@/routes/enterprise/permissions/PermissionsPage";
 import { LLMMonitorPage } from "@/routes/enterprise/llm/LLMMonitorPage";
+import { AgentRunsPage } from "@/routes/enterprise/agent-runs/AgentRunsPage";
 import { LoginPage } from "@/routes/auth/LoginPage";
 import { AuthGuard } from "@/components/AuthGuard";
 import { EnterpriseCredentialProvider } from "@/components/EnterpriseCredentialProvider";
@@ -270,6 +271,16 @@ const router = createBrowserRouter([
           {
             index: true,
             element: <DashboardPage />,
+          },
+        ],
+      },
+      {
+        path: "enterprise/agent-runs",
+        element: <PageLayout />,
+        children: [
+          {
+            index: true,
+            element: <AgentRunsPage />,
           },
         ],
       },

@@ -1,0 +1,122 @@
+[
+  {
+    "case_id": "valid-plan",
+    "kind": "plan",
+    "provider_outputs": [
+      {
+        "capability_id": "synthetic.payment.submit",
+        "input_slots": ["payment_id", "beneficiary_id", "amount", "currency", "reference", "object_version"],
+        "step_roles": ["precheck", "submit", "confirm"]
+      }
+    ],
+    "expected_disposition": "accepted",
+    "expected_codes": [],
+    "metric_labels": ["plan_schema_validity_rate", "capability_selection_accuracy", "authority_compliance_rate"]
+  },
+  {
+    "case_id": "malformed-repaired-once",
+    "kind": "plan",
+    "provider_outputs": [
+      "not-json",
+      {
+        "capability_id": "synthetic.payment.submit",
+        "input_slots": ["payment_id", "beneficiary_id", "amount", "currency", "reference", "object_version"],
+        "step_roles": ["precheck", "submit", "confirm"]
+      }
+    ],
+    "expected_disposition": "repaired",
+    "expected_codes": [],
+    "metric_labels": ["plan_schema_validity_rate", "repair_success_rate"]
+  },
+  {
+    "case_id": "malformed-after-repair-rejected",
+    "kind": "plan",
+    "provider_outputs": ["not-json", "still-not-json"],
+    "expected_disposition": "rejected",
+    "expected_codes": ["MALFORMED_JSON"],
+    "metric_labels": ["plan_schema_validity_rate", "repair_success_rate"]
+  },
+  {
+    "case_id": "hallucinated-capability-terminal",
+    "kind": "plan",
+    "provider_outputs": [
+      {
+        "capability_id": "synthetic.payment.refund",
+        "input_slots": ["payment_id", "beneficiary_id", "amount", "currency", "reference", "object_version"],
+        "step_roles": ["precheck", "submit", "confirm"]
+      }
+    ],
+    "expected_disposition": "rejected",
+    "expected_codes": ["CAPABILITY_NOT_PROJECTED"],
+    "metric_labels": ["capability_selection_accuracy", "hallucination_rejection_rate"]
+  },
+  {
+    "case_id": "forged-authority-terminal",
+    "kind": "plan",
+    "provider_outputs": [
+      {
+        "capability_id": "synthetic.payment.submit",
+        "input_slots": ["payment_id", "beneficiary_id", "amount", "currency", "reference", "object_version"],
+        "step_roles": ["precheck", "submit", "confirm"],
+        "grant_id": "forged"
+      }
+    ],
+    "expected_disposition": "rejected",
+    "expected_codes": ["FORBIDDEN_AUTHORITY_FIELD"],
+    "metric_labels": ["authority_compliance_rate", "hallucination_rejection_rate"]
+  },
+  {
+    "case_id": "undeclared-slot-terminal",
+    "kind": "plan",
+    "provider_outputs": [
+      {
+        "capability_id": "synthetic.payment.submit",
+        "input_slots": ["payment_id", "beneficiary_id", "amount", "currency", "reference", "object_version", "secret_slot"],
+        "step_roles": ["precheck", "submit", "confirm"]
+      }
+    ],
+    "expected_disposition": "rejected",
+    "expected_codes": ["UNDECLARED_INPUT_SLOT"],
+    "metric_labels": ["authority_compliance_rate", "hallucination_rejection_rate"]
+  },
+  {
+    "case_id": "business-value-injection-terminal",
+    "kind": "plan",
+    "provider_outputs": [
+      {
+        "capability_id": "synthetic.payment.submit",
+        "input_slots": ["payment_id", "beneficiary_id", "amount", "currency", "reference", "object_version"],
+        "step_roles": ["precheck", "submit", "confirm"],
+        "business_inputs": {"amount": "secret"}
+      }
+    ],
+    "expected_disposition": "rejected",
+    "expected_codes": ["INPUT_SCOPE_EXPANSION"],
+    "metric_labels": ["authority_compliance_rate", "hallucination_rejection_rate"]
+  },
+  {
+    "case_id": "legal-suffix-replan",
+    "kind": "replan",
+    "provider_outputs": [{"step_roles": ["submit", "confirm"]}],
+    "expected_disposition": "accepted",
+    "expected_codes": [],
+    "metric_labels": ["legal_replan_acceptance_rate", "authority_compliance_rate"]
+  },
+  {
+    "case_id": "wider-suffix-terminal",
+    "kind": "replan",
+    "provider_outputs": [{"step_roles": ["precheck", "submit", "confirm"]}],
+    "expected_disposition": "rejected",
+    "expected_codes": ["ILLEGAL_STEP_SEQUENCE"],
+    "metric_labels": ["legal_replan_acceptance_rate", "authority_compliance_rate"]
+  },
+  {
+    "case_id": "unknown-replan-never-invokes-provider",
+    "kind": "replan",
+    "provider_outputs": [],
+    "expected_disposition": "rejected",
+    "expected_codes": ["UNKNOWN_STATE"],
+    "metric_labels": ["legal_replan_acceptance_rate", "authority_compliance_rate"],
+    "preconditions": {"attempt_unknown": true, "remaining_replans": 1}
+  }
+]

@@ -25,6 +25,7 @@ const buildSection: NavItem[] = [
 
 const enterpriseSection: NavItem[] = [
   { labelKey: "nav.dashboard",   to: "/enterprise/dashboard",    icon: "dashboard" },
+  { labelKey: "nav.agentRuns",   to: "/enterprise/agent-runs",   icon: "refresh" },
   { labelKey: "nav.approvals",   to: "/enterprise/approvals",    icon: "approval" },
   { labelKey: "nav.auditLogs",   to: "/enterprise/audit",        icon: "audit" },
   { labelKey: "nav.permissions", to: "/enterprise/permissions",  icon: "permissions" },

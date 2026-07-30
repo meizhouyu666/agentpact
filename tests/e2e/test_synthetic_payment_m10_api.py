@@ -1,0 +1,175 @@
+"""Recorded-provider M10 proof through the mounted application composition."""
+
+# ruff: noqa: E402, I001
+
+from __future__ import annotations
+
+import asyncio
+import json
+
+from tests.e2e import m4_synthetic_support as support
+
+import httpx
+import pytest
+from fastapi import FastAPI, Header
+from sqlalchemy import select
+
+from enterprise.agent_runs.routes import mount_agent_run_api, reset_agent_run_service
+from enterprise.approval.models import ApprovalRequestModel
+from enterprise.auth.dependencies import get_current_user
+from enterprise.auth.models import BusinessLineModel, DepartmentModel
+from enterprise.auth.schemas import DepartmentRole, UserContext
+from enterprise.domains.synthetic_payment.constants import BUSINESS_LINE_ID, PAYMENTS_DEPARTMENT_ID
+from enterprise.governance.models import ExecutionAttemptModel, ExecutionPermitModel, PendingActionModel
+from skyvern.forge.sdk.db.models import OrganizationModel
+
+ORGANIZATION_ID = "org-m10-agent-run-api"
+INPUTS = {
+    "payment_id": "pay-demo-001",
+    "beneficiary_id": "vendor-demo-001",
+    "amount": "5000.00",
+    "currency": "CNY",
+    "reference": "Synthetic invoice 001",
+    "object_version": 1,
+}
+
+
+def _user(role: str) -> UserContext:
+    return UserContext(
+        user_id=f"m10-api-{role}",
+        org_id=ORGANIZATION_ID,
+        department_roles=[
+            DepartmentRole(
+                department_id=PAYMENTS_DEPARTMENT_ID,
+                department_name="Synthetic payments",
+                role=role,
+            )
+        ],
+        business_line_ids=[BUSINESS_LINE_ID],
+    )
+
+
+@pytest.mark.e2e
+def test_m10_recorded_api_uses_boot_driver_reobserves_permits_and_probes_once() -> None:
+    with support.isolated_m4_environment() as environment:
+        database = support.M4Database(environment.database_url)
+
+        async def scenario() -> dict[str, object]:
+            try:
+                async with database.Session() as session:
+                    session.add(OrganizationModel(organization_id=ORGANIZATION_ID, organization_name="M10 API E2E"))
+                    await session.flush()
+                    session.add(
+                        DepartmentModel(
+                            department_id=PAYMENTS_DEPARTMENT_ID,
+                            organization_id=ORGANIZATION_ID,
+                            department_name="Synthetic payments",
+                            department_code="synthetic-payments",
+                        )
+                    )
+                    session.add(
+                        BusinessLineModel(
+                            business_line_id=BUSINESS_LINE_ID,
+                            organization_id=ORGANIZATION_ID,
+                            line_name="Synthetic payments",
+                            line_code="synthetic-payments",
+                        )
+                    )
+                    await session.commit()
+
+                async with support.real_chromium(environment.console_url, environment.cleanup) as browser:
+                    with support.configured_forge_boundary(database, browser.state):
+                        application = FastAPI()
+                        mount_agent_run_api(
+                            application,
+                            session_factory=database.Session,
+                            target_url=environment.console_url,
+                            hmac_secret=support.HMAC_SECRET,
+                            provider_mode="recorded",
+                        )
+
+                        async def current_user(x_test_role: str = Header(default="operator")) -> UserContext:
+                            return _user("approver" if x_test_role == "approver" else "operator")
+
+                        application.dependency_overrides[get_current_user] = current_user
+                        transport = httpx.ASGITransport(app=application)
+                        async with httpx.AsyncClient(transport=transport, base_url="http://m10.local") as client:
+                            request = {
+                                "request_id": "m10-api-e2e-001",
+                                "intent": "Submit the approved synthetic payment",
+                                "business_inputs": INPUTS,
+                            }
+                            created = await client.post("/api/v1/enterprise/agent-runs/", json=request)
+                            assert created.status_code == 200, created.text
+                            assert created.json()["state"] == "AWAITING_APPROVAL"
+                            assert created.json()["legal_actions"] == ["approve", "reject"]
+                            assert created.json()["pack_id"] == "synthetic.payment"
+                            assert created.json()["pack_display_name"] == "Synthetic Payment Reference Pack"
+                            assert created.json()["provider_mode"] == "recorded"
+                            assert all(
+                                value not in json.dumps(created.json(), sort_keys=True)
+                                for value in INPUTS.values()
+                                if isinstance(value, str)
+                            )
+
+                            repeated_create = await client.post("/api/v1/enterprise/agent-runs/", json=request)
+                            assert repeated_create.json() == created.json()
+                            async with database.Session() as session:
+                                assert len(list((await session.scalars(select(ApprovalRequestModel))).all())) == 1
+                                assert len(list((await session.scalars(select(ExecutionPermitModel))).all())) == 0
+                                assert len(list((await session.scalars(select(ExecutionAttemptModel))).all())) == 0
+
+                            run_id = created.json()["run_id"]
+                            approved = await client.post(
+                                f"/api/v1/enterprise/agent-runs/{run_id}/approve",
+                                headers={"x-test-role": "approver"},
+                                json={"operation_key": "m10-api-approve-001"},
+                            )
+                            assert approved.status_code == 200, approved.text
+                            assert approved.json()["state"] == "UNKNOWN"
+                            assert approved.json()["legal_actions"] == ["probe"]
+
+                            probed = await client.post(
+                                f"/api/v1/enterprise/agent-runs/{run_id}/probe",
+                                json={"operation_key": "m10-api-probe-001"},
+                            )
+                            assert probed.status_code == 200, probed.text
+                            assert probed.json()["state"] == "SUCCEEDED"
+                            repeated_probe = await client.post(
+                                f"/api/v1/enterprise/agent-runs/{run_id}/probe",
+                                json={"operation_key": "m10-api-probe-001"},
+                            )
+                            assert repeated_probe.json() == probed.json()
+
+                            report = await client.get(f"/api/v1/enterprise/agent-runs/{run_id}/report")
+                            assert report.status_code == 200, report.text
+                            assert report.json()["projection"]["provider_mode"] == "recorded"
+                            assert all(
+                                value not in json.dumps(report.json(), sort_keys=True)
+                                for value in INPUTS.values()
+                                if isinstance(value, str)
+                            )
+
+                    async with database.Session() as session:
+                        permits = list((await session.scalars(select(ExecutionPermitModel))).all())
+                        attempts = list((await session.scalars(select(ExecutionAttemptModel))).all())
+                        pending = list((await session.scalars(select(PendingActionModel))).all())
+                    return {
+                        "fresh_observation": pending[0].observation_hash != permits[0].observation_hash,
+                        "effect_count": len(attempts),
+                        "permit_statuses": [item.status for item in permits],
+                        "attempt_statuses": [item.status for item in attempts],
+                        "pending_statuses": [item.status for item in pending],
+                    }
+            finally:
+                reset_agent_run_service()
+                await database.engine.dispose()
+
+        evidence = asyncio.run(scenario())
+        assert evidence == {
+            "fresh_observation": True,
+            "effect_count": 1,
+            "permit_statuses": ["consumed"],
+            "attempt_statuses": ["confirmed"],
+            "pending_statuses": ["invalidated"],
+        }

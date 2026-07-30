@@ -17,9 +17,12 @@ from sqlalchemy import select
 from enterprise.agent.work_orders import ExecutionWorkOrder, SkyvernPreparationReceipt
 from enterprise.governance.admission import TaskAdmissionBundle
 from enterprise.governance.contracts import (
+    ActionIntent,
+    DecisionOutcome,
     ExecutionAttemptStatus,
     ExecutionAuthorization,
     ExecutionEffect,
+    PolicyDecision,
 )
 from enterprise.governance.execution_attempt_service import resolve_unknown_execution_attempt
 from enterprise.governance.execution_profiles import ExecutionProfile
@@ -231,20 +234,25 @@ class NativeEffectAuthorizer(Protocol):
     ) -> tuple[ExecutionAuthorization, ExecutionProfile]: ...
 
 
+class NativeApprovalEvaluator(Protocol):
+    async def evaluate(
+        self,
+        *,
+        intent: ActionIntent,
+        observed_business_inputs: dict[str, Any],
+    ) -> PolicyDecision: ...
+
+
 class NativeBusinessInputObserver(Protocol):
     async def observe(self, *, scraped_page: ScrapedPage) -> dict[str, object]: ...
 
 
 def derive_native_task_id(*, admission_id: str, request_id: str, work_order_id: str) -> str:
-    return "tsk_m7_" + _canonical_digest(
-        ["agentpact-m7-task-id/v1", admission_id, request_id, work_order_id]
-    )
+    return "tsk_m7_" + _canonical_digest(["agentpact-m7-task-id/v1", admission_id, request_id, work_order_id])
 
 
 def derive_native_step_id(*, native_task_id: str, order: int = 0, retry_index: int = 0) -> str:
-    return "stp_m7_" + _canonical_digest(
-        ["agentpact-m7-step-id/v1", native_task_id, order, retry_index]
-    )
+    return "stp_m7_" + _canonical_digest(["agentpact-m7-step-id/v1", native_task_id, order, retry_index])
 
 
 class NativeSkyvernWorkOrderAdapter:
@@ -314,10 +322,7 @@ class NativeSkyvernWorkOrderAdapter:
             work_order_id=work_order.work_order_id,
             now=now,
         )
-        if (
-            execution_binding.task_id != native_task_id
-            or execution_binding.contract_id != work_order.contract_id
-        ):
+        if execution_binding.task_id != native_task_id or execution_binding.contract_id != work_order.contract_id:
             raise NativePublicationConflict("M7 compilation cannot authorize the deterministic native Task")
 
         values: dict[str, object] = {
@@ -425,8 +430,18 @@ class SqlAlchemyNativePublicationRepository:
                     target_url=target_url,
                     navigation_goal=navigation_goal,
                     navigation_payload=navigation_payload,
-                    allowed_task_statuses={TaskStatus.created.value, TaskStatus.running.value},
-                    allowed_step_statuses={StepStatus.created.value},
+                    allowed_task_statuses={
+                        TaskStatus.created.value,
+                        TaskStatus.running.value,
+                        TaskStatus.resuming.value,
+                        TaskStatus.pending_result_probe.value,
+                    },
+                    allowed_step_statuses={
+                        StepStatus.created.value,
+                        StepStatus.running.value,
+                        StepStatus.resuming.value,
+                        StepStatus.pending_result_probe.value,
+                    },
                 )
 
         async with self._session_factory() as session:
@@ -453,8 +468,18 @@ class SqlAlchemyNativePublicationRepository:
                     target_url=target_url,
                     navigation_goal=navigation_goal,
                     navigation_payload=navigation_payload,
-                    allowed_task_statuses={TaskStatus.created.value, TaskStatus.running.value},
-                    allowed_step_statuses={StepStatus.created.value},
+                    allowed_task_statuses={
+                        TaskStatus.created.value,
+                        TaskStatus.running.value,
+                        TaskStatus.resuming.value,
+                        TaskStatus.pending_result_probe.value,
+                    },
+                    allowed_step_statuses={
+                        StepStatus.created.value,
+                        StepStatus.running.value,
+                        StepStatus.resuming.value,
+                        StepStatus.pending_result_probe.value,
+                    },
                 )
                 if task.status == TaskStatus.created.value:
                     task.status = TaskStatus.running.value
@@ -475,6 +500,7 @@ class SyntheticNativeActionContextResolver:
         authorizer: NativeEffectAuthorizer,
         business_input_observer: NativeBusinessInputObserver,
         hmac_secret: str,
+        approval_evaluator: NativeApprovalEvaluator | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if not hmac_secret:
@@ -485,6 +511,7 @@ class SyntheticNativeActionContextResolver:
         self._authorizer = authorizer
         self._business_input_observer = business_input_observer
         self._hmac_secret = hmac_secret
+        self._approval_evaluator = approval_evaluator
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     async def resolve(
@@ -498,9 +525,7 @@ class SyntheticNativeActionContextResolver:
         try:
             bound = await self._require_or_prove_unbound(task=task, step=step)
             if not bound:
-                return NativeActionResolution(
-                    disposition=NativeActionDisposition.UNBOUND_COMPATIBILITY
-                )
+                return NativeActionResolution(disposition=NativeActionDisposition.UNBOUND_COMPATIBILITY)
             now = self._clock()
             self._require_live_authority(task=task, step=step, now=now)
             operation, field_name = _synthetic_operation(scraped_page=scraped_page, action=action)
@@ -534,14 +559,6 @@ class SyntheticNativeActionContextResolver:
                 or execution_binding.result_probe_ref != self._binding.result_probe_ref
             ):
                 raise NativeBoundStateDenied("M7 execution binding does not match the native correlation")
-            authorization, profile = await self._authorizer.authorize(
-                task=task,
-                step=step,
-                scraped_page=scraped_page,
-                action=action,
-                binding=self._binding,
-                execution_binding=execution_binding,
-            )
             from enterprise.governance.audit import observation_hash
             from enterprise.governance.classification import action_fingerprint
 
@@ -557,12 +574,48 @@ class SyntheticNativeActionContextResolver:
                 observation_hash=observed_hash,
                 secret=self._hmac_secret,
             )
+            if self._approval_evaluator is not None:
+                intent = ActionIntent(
+                    intent_id=f"m10-intent:{fingerprint}",
+                    task_id=task.task_id,
+                    step_id=step.step_id,
+                    action_fingerprint=fingerprint,
+                    observation_id=observed_hash,
+                    operation=operation,
+                    effect=ExecutionEffect.EXTERNAL_WRITE,
+                    target={"kind": "synthetic-payment-submit"},
+                    confidence=1.0,
+                    evidence=["fresh-native-observation"],
+                )
+                decision = await self._approval_evaluator.evaluate(
+                    intent=intent,
+                    observed_business_inputs=dict(observed_inputs),
+                )
+                if decision.outcome is DecisionOutcome.REQUIRE_APPROVAL:
+                    return NativeActionResolution(
+                        disposition=NativeActionDisposition.APPROVAL_REQUIRED,
+                        operation=operation,
+                        binding_digest=self._binding.binding_digest,
+                        observation_hash=observed_hash,
+                        action_fingerprint=fingerprint,
+                        approval_intent=intent,
+                        approval_decision=decision,
+                    )
+                if decision.outcome is not DecisionOutcome.ALLOW:
+                    raise NativeBoundStateDenied("M7 approval evaluator denied the bound effect")
+            authorization, profile = await self._authorizer.authorize(
+                task=task,
+                step=step,
+                scraped_page=scraped_page,
+                action=action,
+                binding=self._binding,
+                execution_binding=execution_binding,
+            )
             if (
                 authorization.effect is not ExecutionEffect.EXTERNAL_WRITE
                 or authorization.observation_hash != observed_hash
                 or authorization.action_fingerprint != fingerprint
-                or _canonical_digest(authorization.idempotency_key)
-                != execution_binding.idempotency_key_digest
+                or _canonical_digest(authorization.idempotency_key) != execution_binding.idempotency_key_digest
             ):
                 raise NativeBoundStateDenied("M7 authorizer returned mismatched effect authority")
             return NativeActionResolution(
@@ -712,16 +765,8 @@ class SyntheticNativeActionContextResolver:
                     result_probe=evidence_payload,
                     now=now,
                 )
-                task_status = (
-                    TaskStatus.completed
-                    if outcome is NativeProbeOutcome.CONFIRMED
-                    else TaskStatus.failed
-                )
-                step_status = (
-                    StepStatus.completed
-                    if outcome is NativeProbeOutcome.CONFIRMED
-                    else StepStatus.failed
-                )
+                task_status = TaskStatus.completed if outcome is NativeProbeOutcome.CONFIRMED else TaskStatus.failed
+                step_status = StepStatus.completed if outcome is NativeProbeOutcome.CONFIRMED else StepStatus.failed
                 task.status = task_status.value
                 step.status = step_status.value
                 task.finished_at = now
@@ -745,10 +790,7 @@ class SyntheticNativeActionContextResolver:
             task_marked = task_model.application == M7_APPLICATION_MARKER
             step_marked = step_model.created_by == M7_APPLICATION_MARKER
             if not task_marked and not step_marked:
-                if (
-                    task.task_id == self._binding.native_task_id
-                    or step.step_id == self._binding.native_step_id
-                ):
+                if task.task_id == self._binding.native_task_id or step.step_id == self._binding.native_step_id:
                     raise NativeBoundStateDenied("Expected M7 pair lost its binding markers")
                 return False
             if not task_marked or not step_marked:
@@ -760,8 +802,7 @@ class SyntheticNativeActionContextResolver:
                 or step.organization_id != self._binding.organization_id
                 or task_model.status != TaskStatus.running.value
                 or step_model.status != StepStatus.running.value
-                or _canonical_digest(task_model.navigation_payload)
-                != self._binding.navigation_payload_digest
+                or _canonical_digest(task_model.navigation_payload) != self._binding.navigation_payload_digest
             ):
                 raise NativeBoundStateDenied("M7 native Task/Step identity or state mismatch")
             await _load_admission(session, binding=self._binding, lock=False)
@@ -771,9 +812,7 @@ class SyntheticNativeActionContextResolver:
         compilation = self._compilation
         business_step = compilation.business_plan.steps[0]
         expected_plan_task_id = self._binding.plan_task_id or self._binding.native_task_id
-        expected_authority_contract_id = (
-            self._binding.authority_contract_id or self._binding.contract_id
-        )
+        expected_authority_contract_id = self._binding.authority_contract_id or self._binding.contract_id
         if (
             now >= self._binding.expires_at
             or compilation.installation.installation_id != self._binding.installation_id
@@ -786,8 +825,7 @@ class SyntheticNativeActionContextResolver:
             or compilation.task_contract.contract_id != expected_authority_contract_id
             or compilation.task_contract.task_id != expected_plan_task_id
             or compilation.work_order.task_id != task.task_id
-            or (compilation.work_order.plan_task_id or compilation.work_order.task_id)
-            != expected_plan_task_id
+            or (compilation.work_order.plan_task_id or compilation.work_order.task_id) != expected_plan_task_id
             or (compilation.work_order.authority_contract_id or compilation.work_order.contract_id)
             != expected_authority_contract_id
             or compilation.work_order.contract_id != self._binding.contract_id
@@ -874,7 +912,9 @@ def build_redacted_m7_trace(
                 digest=binding.navigation_payload_digest,
             ),
             M7TraceEvent(stage=M7TraceStage.PERMIT, artifact_ref=permit_id, status="consumed"),
-            M7TraceEvent(stage=M7TraceStage.ATTEMPT, artifact_ref=attempt_id, status=probe_receipt.attempt_status.value),
+            M7TraceEvent(
+                stage=M7TraceStage.ATTEMPT, artifact_ref=attempt_id, status=probe_receipt.attempt_status.value
+            ),
             M7TraceEvent(
                 stage=M7TraceStage.BROWSER_EFFECT,
                 artifact_ref=binding.work_order_id,
@@ -897,9 +937,7 @@ async def _load_admission(
     binding: NativeSkyvernBinding,
     lock: bool,
 ) -> GovernedTaskAdmissionModel:
-    query = select(GovernedTaskAdmissionModel).where(
-        GovernedTaskAdmissionModel.admission_id == binding.admission_id
-    )
+    query = select(GovernedTaskAdmissionModel).where(GovernedTaskAdmissionModel.admission_id == binding.admission_id)
     if lock:
         query = query.with_for_update()
     admission = (await session.scalars(query)).first()
@@ -1008,8 +1046,7 @@ def _validate_publication_rows(
         or contract.policy_version != bundle.contract.policy_version
         or (
             binding.authority_contract_id is not None
-            and contract.authorization_snapshot.get("authority_contract_id")
-            != binding.authority_contract_id
+            and contract.authorization_snapshot.get("authority_contract_id") != binding.authority_contract_id
         )
         or (
             binding.plan_task_id is not None

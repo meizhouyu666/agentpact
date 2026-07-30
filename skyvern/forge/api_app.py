@@ -13,6 +13,10 @@ from starlette.requests import HTTPConnection, Request
 from starlette_context.middleware import RawContextMiddleware
 from starlette_context.plugins.base import Plugin
 
+from enterprise.governance.approval_recovery_scheduler import (
+    start_approval_recovery_scheduler,
+    stop_approval_recovery_scheduler,
+)
 from skyvern.config import settings
 from skyvern.exceptions import SkyvernHTTPException
 from skyvern.forge import app as forge_app
@@ -24,10 +28,6 @@ from skyvern.forge.sdk.db.exceptions import NotFoundError
 from skyvern.forge.sdk.routes import internal_auth
 from skyvern.forge.sdk.routes.routers import base_router, legacy_base_router, legacy_v2_router
 from skyvern.services.cleanup_service import start_cleanup_scheduler, stop_cleanup_scheduler
-from enterprise.governance.approval_recovery_scheduler import (
-    start_approval_recovery_scheduler,
-    stop_approval_recovery_scheduler,
-)
 
 try:
     from cloud.observability.otel_setup import OTELSetup
@@ -205,13 +205,22 @@ def create_api_app() -> FastAPI:
     fastapi_app.add_middleware(TenantIsolationMiddleware)
 
     # Enterprise extension routes
-    from enterprise.auth.routes import router as enterprise_auth_router
-    from enterprise.tenant.routes import router as enterprise_tenant_router
+    from enterprise.agent_runs.routes import mount_agent_run_api
     from enterprise.approval.routes import router as enterprise_approval_router
     from enterprise.audit.routes import router as enterprise_audit_router
-    from enterprise.workflows.routes import router as enterprise_workflow_router
+    from enterprise.auth.routes import router as enterprise_auth_router
     from enterprise.dashboard.routes import router as enterprise_dashboard_router
     from enterprise.llm.cache_routes import router as enterprise_cache_router
+    from enterprise.tenant.routes import router as enterprise_tenant_router
+    from enterprise.workflows.routes import router as enterprise_workflow_router
+
+    mount_agent_run_api(
+        fastapi_app,
+        session_factory=forge_app.DATABASE.Session,
+        target_url=settings.SKYVERN_APP_URL,
+        hmac_secret=settings.GOVERNANCE_AUDIT_HMAC_SECRET,
+        provider_mode="recorded",
+    )
 
     fastapi_app.include_router(enterprise_auth_router, prefix="/api/v1")
     fastapi_app.include_router(enterprise_tenant_router, prefix="/api/v1")
@@ -223,6 +232,7 @@ def create_api_app() -> FastAPI:
 
     # Populate enterprise demo data stores so all modules have data on startup
     from enterprise.demo_seed import populate_all_stores
+
     populate_all_stores()
 
     # Bridge enterprise JWT auth into Skyvern's native org auth so that

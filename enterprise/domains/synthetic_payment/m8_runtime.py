@@ -60,10 +60,13 @@ class GovernedPlanError(RuntimeError):
 
 class PlanRunState(StrEnum):
     ACTIVE = "active"
+    APPROVAL_REQUIRED = "approval_required"
     REPLAN_REQUIRED = "replan_required"
     PROBE_BLOCKED = "probe_blocked"
     REAUTHORIZATION_REQUIRED = "reauthorization_required"
     COMPLETED = "completed"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
     FAILED = "failed"
 
 
@@ -86,6 +89,10 @@ class PlanJournalTransition(StrEnum):
     SUFFIX_SUPERSEDED = "suffix_superseded"
     PLAN_COMPLETED = "plan_completed"
     REAUTHORIZATION_REQUIRED = "reauthorization_required"
+    APPROVAL_REQUIRED = "approval_required"
+    APPROVAL_RESUMED = "approval_resumed"
+    APPROVAL_REJECTED = "approval_rejected"
+    RUN_CANCELLED = "run_cancelled"
 
 
 class ReplanDisposition(StrEnum):
@@ -251,22 +258,27 @@ def build_synthetic_m8_compilation(
     *,
     admission_id: str,
     plan_run_id: str,
+    step_roles: tuple[str, ...] | None = None,
 ) -> SyntheticM8Compilation:
-    """Expand one trusted synthetic authority snapshot into three sequential child Work Orders."""
+    """Expand trusted authority into sequential child Work Orders for trusted step roles."""
 
     if len(authority.business_plan.steps) != 1:
         raise ValueError("M8 synthetic compiler requires one trusted M6 authority step")
     root_step = authority.business_plan.steps[0]
-    roles = ("precheck", "submit", "confirm")
+    roles = step_roles or ("precheck", "submit", "confirm")
+    _require_plan_roles(roles)
     steps = tuple(
         root_step.model_copy(
             update={
-                "step_id": _stable_id(plan_run_id, f"step-v1-{role}"),
+                "step_id": _stable_id(
+                    plan_run_id,
+                    f"step-v1-{role}" if step_roles is None else f"step-v1-{index}-{role}",
+                ),
                 "success_criteria": [f"M8 {role} completes within the admitted authority envelope"],
             },
             deep=True,
         )
-        for role in roles
+        for index, role in enumerate(roles)
     )
     plan = authority.business_plan.model_copy(
         update={
@@ -279,14 +291,15 @@ def build_synthetic_m8_compilation(
     )
     work_orders: list[ExecutionWorkOrder] = []
     children: list[SyntheticM6Compilation] = []
-    for role, step in zip(roles, steps, strict=True):
-        work_order_id = _stable_id(plan_run_id, f"work-order-v1-{role}")
+    for index, (role, step) in enumerate(zip(roles, steps, strict=True)):
+        role_key = role if step_roles is None else f"{index}-{role}"
+        work_order_id = _stable_id(plan_run_id, f"work-order-v1-{role_key}")
         native_task_id = derive_native_task_id(
             admission_id=admission_id,
             request_id=authority.trace.request_id,
             work_order_id=work_order_id,
         )
-        native_contract_id = _stable_id(plan_run_id, f"native-contract-v1-{role}")
+        native_contract_id = _stable_id(plan_run_id, f"native-contract-v1-{role_key}")
         work_order = ExecutionWorkOrder(
             work_order_id=work_order_id,
             business_plan_step_id=step.step_id,
@@ -350,6 +363,7 @@ def build_replacement_suffix(
     previous: SyntheticM8Compilation,
     *,
     completed_prefix_length: int,
+    replacement_roles: tuple[str, ...] | None = None,
 ) -> SyntheticM8Compilation:
     """Create a deterministic direct-successor plan with new IDs only in the pending suffix."""
 
@@ -358,6 +372,11 @@ def build_replacement_suffix(
     next_version = previous.business_plan.version + 1
     prefix = list(previous.business_plan.steps[:completed_prefix_length])
     old_suffix = previous.business_plan.steps[completed_prefix_length:]
+    roles = replacement_roles or tuple(
+        _work_order_role(item) for item in previous.work_orders[completed_prefix_length:]
+    )
+    if len(roles) != len(old_suffix) or any(role not in {"precheck", "submit", "confirm"} for role in roles):
+        raise ValueError("M8 replacement roles must exactly cover the pending finite-role suffix")
     suffix = [
         step.model_copy(
             update={"step_id": _stable_id(previous.plan_run_id, f"step-v{next_version}-{index}")},
@@ -384,7 +403,10 @@ def build_replacement_suffix(
     prefix_orders = list(previous.work_orders[:completed_prefix_length])
     orders: list[ExecutionWorkOrder] = prefix_orders
     children: list[SyntheticM6Compilation] = list(previous.child_compilations[:completed_prefix_length])
-    for index, step in enumerate(suffix, start=completed_prefix_length):
+    for index, (step, role) in enumerate(
+        zip(suffix, roles, strict=True),
+        start=completed_prefix_length,
+    ):
         work_order_id = _stable_id(previous.plan_run_id, f"work-order-v{next_version}-{index}")
         native_task_id = derive_native_task_id(
             admission_id=previous.admission_id,
@@ -398,10 +420,14 @@ def build_replacement_suffix(
                 "business_plan_step_id": step.step_id,
                 "task_id": native_task_id,
                 "contract_id": _stable_id(previous.plan_run_id, f"native-contract-v{next_version}-{index}"),
+                "navigation_goal": f"M8 governed {role} for the admitted synthetic payment",
+                "allowed_operations": ({"read"} if role != "submit" else {"read", "input", "select", "submit"}),
             },
             deep=True,
         )
-        validate_work_order(order, plan, step, previous.authority.grants, now=previous.authority.grants.grants[0].resolved_at)
+        validate_work_order(
+            order, plan, step, previous.authority.grants, now=previous.authority.grants.grants[0].resolved_at
+        )
         orders.append(order)
         children.append(
             previous.authority.model_copy(
@@ -476,7 +502,10 @@ class SqlAlchemyGovernedPlanJournal:
                         .with_for_update()
                     )
                 ).first()
-                if admission is None or TaskAdmissionBundle.model_validate(admission.bundle_payload) != admission_bundle:
+                if (
+                    admission is None
+                    or TaskAdmissionBundle.model_validate(admission.bundle_payload) != admission_bundle
+                ):
                     raise GovernedPlanError("M8 requires the exact durable admission before plan activation")
                 root = await _load_task(session, checkpoint.root_task_id, lock=True)
                 if root is None:
@@ -576,9 +605,7 @@ class SqlAlchemyGovernedPlanJournal:
                 )
                 session.add(_event_model(event, admission_bundle.task.organization_id))
                 await session.flush()
-        return checkpoint.model_copy(
-            update={"journal_sequence": event.sequence, "journal_digest": event.event_digest}
-        )
+        return checkpoint.model_copy(update={"journal_sequence": event.sequence, "journal_digest": event.event_digest})
 
     async def append(
         self,
@@ -673,6 +700,65 @@ class SqlAlchemyGovernedPlanJournal:
         return checkpoint.model_copy(
             update={"journal_sequence": event.sequence, "journal_digest": event.event_digest}
         ), tuple(revoked)
+
+
+async def append_m10_transition(
+    session: Any,
+    *,
+    checkpoint: GovernedPlanCheckpoint,
+    transition: PlanJournalTransition,
+    authority_digests: dict[str, str],
+    operation_key: str,
+    created_at: datetime,
+) -> GovernedPlanCheckpoint:
+    """Append one M10 transition inside the caller's root-locked transaction.
+
+    Approval/native rows and the journal event therefore commit together. An
+    exact operation-key retry reads back the one-event-ahead event; conflicting
+    reuse or unrelated stale state fails closed.
+    """
+
+    transition = PlanJournalTransition(transition)
+    if transition not in {
+        PlanJournalTransition.APPROVAL_REQUIRED,
+        PlanJournalTransition.APPROVAL_RESUMED,
+        PlanJournalTransition.APPROVAL_REJECTED,
+        PlanJournalTransition.RUN_CANCELLED,
+    }:
+        raise GovernedPlanError("M10 append accepts only bounded M10 transitions")
+    root = await _load_task(session, checkpoint.root_task_id, lock=True)
+    if root is None or root.application != M8_PLAN_MARKER:
+        raise GovernedPlanError("M10 transition root Task is missing or untrusted")
+    events = await _load_events(session, checkpoint.root_task_id)
+    restored = _replay(events)
+    if restored.journal_sequence != checkpoint.journal_sequence or restored.journal_digest != checkpoint.journal_digest:
+        if restored.journal_sequence == checkpoint.journal_sequence + 1:
+            committed = events[-1]
+            expected_checkpoint = checkpoint.model_copy(
+                update={
+                    "journal_sequence": committed.sequence,
+                    "journal_digest": checkpoint.journal_digest,
+                }
+            )
+            if (
+                committed.transition is transition
+                and committed.reason == operation_key
+                and committed.authority_digests == authority_digests
+                and committed.checkpoint == expected_checkpoint
+            ):
+                return restored
+        raise GovernedPlanError("M10 stale, conflicting, or one-sided transition detected")
+    await _verify_checkpoint_native_state(session, checkpoint, transition=transition)
+    event = _event(
+        checkpoint=checkpoint,
+        transition=transition,
+        authority_digests=authority_digests,
+        reason=operation_key,
+        created_at=created_at,
+    )
+    session.add(_event_model(event, root.organization_id))
+    await session.flush()
+    return checkpoint.model_copy(update={"journal_sequence": event.sequence, "journal_digest": event.event_digest})
 
 
 class GovernedPlanCoordinator:
@@ -1119,6 +1205,8 @@ def _replay(events: list[PlanJournalEvent]) -> GovernedPlanCheckpoint:
         terminal = event.transition in {
             PlanJournalTransition.PLAN_COMPLETED,
             PlanJournalTransition.REAUTHORIZATION_REQUIRED,
+            PlanJournalTransition.APPROVAL_REJECTED,
+            PlanJournalTransition.RUN_CANCELLED,
         }
         previous = event.event_digest
         previous_plan_version = event.plan_version
@@ -1142,12 +1230,21 @@ def _validate_transition_checkpoint(
         PlanJournalTransition.SUFFIX_SUPERSEDED: {PlanRunState.ACTIVE},
         PlanJournalTransition.PLAN_COMPLETED: {PlanRunState.COMPLETED},
         PlanJournalTransition.REAUTHORIZATION_REQUIRED: {PlanRunState.REAUTHORIZATION_REQUIRED},
+        PlanJournalTransition.APPROVAL_REQUIRED: {PlanRunState.APPROVAL_REQUIRED},
+        PlanJournalTransition.APPROVAL_RESUMED: {PlanRunState.ACTIVE},
+        PlanJournalTransition.APPROVAL_REJECTED: {PlanRunState.REJECTED},
+        PlanJournalTransition.RUN_CANCELLED: {PlanRunState.CANCELLED},
     }
     if checkpoint.state not in expected_states[transition]:
         raise GovernedPlanError("M8 journal transition disagrees with checkpoint state")
     if checkpoint.state is PlanRunState.COMPLETED and checkpoint.active_step is not None:
         raise GovernedPlanError("M8 completed checkpoint retains an active child")
-    if checkpoint.state in {PlanRunState.ACTIVE, PlanRunState.REPLAN_REQUIRED, PlanRunState.PROBE_BLOCKED}:
+    if checkpoint.state in {
+        PlanRunState.ACTIVE,
+        PlanRunState.APPROVAL_REQUIRED,
+        PlanRunState.REPLAN_REQUIRED,
+        PlanRunState.PROBE_BLOCKED,
+    }:
         if checkpoint.active_step is None:
             raise GovernedPlanError("M8 nonterminal checkpoint is missing its active child")
 
@@ -1183,9 +1280,7 @@ async def _recover_journal_lag(
             }
         )
         return (
-            checkpoint.model_copy(
-                update={"state": PlanRunState.PROBE_BLOCKED, "active_step": blocked_ref}
-            ),
+            checkpoint.model_copy(update={"state": PlanRunState.PROBE_BLOCKED, "active_step": blocked_ref}),
             PlanJournalTransition.PROBE_BLOCKED,
             "Recovered exact M7 UNKNOWN state before the M8 probe-block event",
         )
@@ -1200,9 +1295,7 @@ async def _recover_journal_lag(
                 }
             )
             return (
-                checkpoint.model_copy(
-                    update={"state": PlanRunState.PROBE_BLOCKED, "active_step": blocked_ref}
-                ),
+                checkpoint.model_copy(update={"state": PlanRunState.PROBE_BLOCKED, "active_step": blocked_ref}),
                 PlanJournalTransition.PROBE_BLOCKED,
                 "Recovered exact M7 probe-finalized state across the missing M8 suspension event",
             )
@@ -1255,9 +1348,7 @@ async def _correlate_probe_state(
 ) -> dict[str, Any] | None:
     task = await _load_task(session, active.native_task_id, lock=True)
     step = (
-        await session.scalars(
-            select(StepModel).where(StepModel.step_id == active.native_step_id).with_for_update()
-        )
+        await session.scalars(select(StepModel).where(StepModel.step_id == active.native_step_id).with_for_update())
     ).first()
     contract = (
         await session.scalars(
@@ -1285,11 +1376,13 @@ async def _correlate_probe_state(
     attempts = list(
         (
             await session.scalars(
-                select(ExecutionAttemptModel).where(
+                select(ExecutionAttemptModel)
+                .where(
                     ExecutionAttemptModel.task_id == active.native_task_id,
                     ExecutionAttemptModel.step_id == active.native_step_id,
                     ExecutionAttemptModel.contract_id == active.native_contract_id,
-                ).with_for_update()
+                )
+                .with_for_update()
             )
         ).all()
     )
@@ -1306,14 +1399,16 @@ async def _correlate_probe_state(
     permits = list(
         (
             await session.scalars(
-                select(ExecutionPermitModel).where(
+                select(ExecutionPermitModel)
+                .where(
                     ExecutionPermitModel.task_id == active.native_task_id,
                     ExecutionPermitModel.step_id == active.native_step_id,
                     ExecutionPermitModel.contract_id == active.native_contract_id,
                     ExecutionPermitModel.action_fingerprint == attempt.action_fingerprint,
                     ExecutionPermitModel.observation_hash == attempt.observation_hash,
                     ExecutionPermitModel.status == "consumed",
-                ).with_for_update()
+                )
+                .with_for_update()
             )
         ).all()
     )
@@ -1323,7 +1418,10 @@ async def _correlate_probe_state(
     probe_ref = active.probe_ref
     if compilation is not None:
         child = compilation.child_for(active.work_order_id)
-        if child.work_order.task_id != active.native_task_id or child.work_order.contract_id != active.native_contract_id:
+        if (
+            child.work_order.task_id != active.native_task_id
+            or child.work_order.contract_id != active.native_contract_id
+        ):
             raise GovernedPlanError("M8 journal lag Work Order/native identity mismatch")
         probe_ref = child.work_order.result_probe_ref
     if active.permit_id is not None and active.permit_id != permit.permit_id:
@@ -1425,6 +1523,10 @@ async def _verify_checkpoint_native_state(
         PlanJournalTransition.CHILD_ACTIVATED,
         PlanJournalTransition.REPLAN_REQUIRED,
         PlanJournalTransition.PROBE_BLOCKED,
+        PlanJournalTransition.APPROVAL_REQUIRED,
+        PlanJournalTransition.APPROVAL_RESUMED,
+        PlanJournalTransition.APPROVAL_REJECTED,
+        PlanJournalTransition.RUN_CANCELLED,
     }
     if (task is None) != (step is None) or (must_exist and task is None):
         raise GovernedPlanError("M8 active native Task/Step state is partial or missing")
@@ -1441,6 +1543,15 @@ async def _verify_checkpoint_native_state(
         ):
             raise GovernedPlanError("M8 probe-blocked checkpoint lacks exact native state")
         await _verify_uncertain_effect_identity(session, active)
+    elif transition is PlanJournalTransition.APPROVAL_REQUIRED:
+        if task.status != TaskStatus.pending_approval.value or step.status != StepStatus.pending_approval.value:
+            raise GovernedPlanError("M10 approval checkpoint lacks exact pending native state")
+    elif transition is PlanJournalTransition.APPROVAL_RESUMED:
+        if task.status != TaskStatus.resuming.value or step.status != StepStatus.resuming.value:
+            raise GovernedPlanError("M10 resume checkpoint lacks exact resuming native state")
+    elif transition in {PlanJournalTransition.APPROVAL_REJECTED, PlanJournalTransition.RUN_CANCELLED}:
+        if task.status != TaskStatus.canceled.value or step.status != StepStatus.canceled.value:
+            raise GovernedPlanError("M10 terminal non-effect checkpoint lacks exact cancelled native state")
     elif task.status not in {TaskStatus.created.value, TaskStatus.running.value} or step.status not in {
         StepStatus.created.value,
         StepStatus.running.value,
@@ -1454,14 +1565,10 @@ async def _verify_completed_effect_identity(session: Any, item: GovernedPlanStep
     if item.attempt_id is None or item.permit_id is None:
         raise GovernedPlanError("M8 completed effect has partial Permit/Attempt identity")
     attempt = (
-        await session.scalars(
-            select(ExecutionAttemptModel).where(ExecutionAttemptModel.attempt_id == item.attempt_id)
-        )
+        await session.scalars(select(ExecutionAttemptModel).where(ExecutionAttemptModel.attempt_id == item.attempt_id))
     ).first()
     permit = (
-        await session.scalars(
-            select(ExecutionPermitModel).where(ExecutionPermitModel.permit_id == item.permit_id)
-        )
+        await session.scalars(select(ExecutionPermitModel).where(ExecutionPermitModel.permit_id == item.permit_id))
     ).first()
     if (
         attempt is None
@@ -1481,14 +1588,10 @@ async def _verify_completed_effect_identity(session: Any, item: GovernedPlanStep
 async def _verify_uncertain_effect_identity(session: Any, item: GovernedPlanStepRef) -> None:
     assert item.attempt_id is not None and item.permit_id is not None
     attempt = (
-        await session.scalars(
-            select(ExecutionAttemptModel).where(ExecutionAttemptModel.attempt_id == item.attempt_id)
-        )
+        await session.scalars(select(ExecutionAttemptModel).where(ExecutionAttemptModel.attempt_id == item.attempt_id))
     ).first()
     permit = (
-        await session.scalars(
-            select(ExecutionPermitModel).where(ExecutionPermitModel.permit_id == item.permit_id)
-        )
+        await session.scalars(select(ExecutionPermitModel).where(ExecutionPermitModel.permit_id == item.permit_id))
     ).first()
     if (
         attempt is None
@@ -1508,9 +1611,7 @@ async def _verify_uncertain_effect_identity(session: Any, item: GovernedPlanStep
 async def _finalize_completed_native(session: Any, item: GovernedPlanStepRef) -> None:
     task = await _load_task(session, item.native_task_id, lock=True)
     step = (
-        await session.scalars(
-            select(StepModel).where(StepModel.step_id == item.native_step_id).with_for_update()
-        )
+        await session.scalars(select(StepModel).where(StepModel.step_id == item.native_step_id).with_for_update())
     ).first()
     if task is None or step is None:
         raise GovernedPlanError("M8 cannot finalize a missing native child")
@@ -1548,26 +1649,12 @@ async def _reconcile_committed_duplicate_side_effects(
             raise GovernedPlanError("M8 committed duplicate admission readback conflicts")
     revoked: list[str] = []
     if superseded_task_ids:
-        tasks = list(
-            (
-                await session.scalars(
-                    select(TaskModel).where(TaskModel.task_id.in_(superseded_task_ids))
-                )
-            ).all()
-        )
-        steps = list(
-            (
-                await session.scalars(
-                    select(StepModel).where(StepModel.task_id.in_(superseded_task_ids))
-                )
-            ).all()
-        )
+        tasks = list((await session.scalars(select(TaskModel).where(TaskModel.task_id.in_(superseded_task_ids)))).all())
+        steps = list((await session.scalars(select(StepModel).where(StepModel.task_id.in_(superseded_task_ids)))).all())
         permits = list(
             (
                 await session.scalars(
-                    select(ExecutionPermitModel).where(
-                        ExecutionPermitModel.task_id.in_(superseded_task_ids)
-                    )
+                    select(ExecutionPermitModel).where(ExecutionPermitModel.task_id.in_(superseded_task_ids))
                 )
             ).all()
         )
@@ -1584,20 +1671,17 @@ async def _reconcile_committed_duplicate_side_effects(
 
 async def _supersede_unstarted(session: Any, task_ids: tuple[str, ...]) -> list[str]:
     attempts = list(
-        (
-            await session.scalars(
-                select(ExecutionAttemptModel).where(ExecutionAttemptModel.task_id.in_(task_ids))
-            )
-        ).all()
+        (await session.scalars(select(ExecutionAttemptModel).where(ExecutionAttemptModel.task_id.in_(task_ids)))).all()
     )
-    if any(item.status in {ExecutionAttemptStatus.EXECUTING.value, ExecutionAttemptStatus.UNKNOWN.value} for item in attempts):
+    if any(
+        item.status in {ExecutionAttemptStatus.EXECUTING.value, ExecutionAttemptStatus.UNKNOWN.value}
+        for item in attempts
+    ):
         raise GovernedPlanError("M8 cannot supersede a suffix with an uncertain Attempt")
     permits = list(
         (
             await session.scalars(
-                select(ExecutionPermitModel)
-                .where(ExecutionPermitModel.task_id.in_(task_ids))
-                .with_for_update()
+                select(ExecutionPermitModel).where(ExecutionPermitModel.task_id.in_(task_ids)).with_for_update()
             )
         ).all()
     )
@@ -1693,10 +1777,7 @@ def _require_checkpoint_admission(
         or admission.contract.contract_id != checkpoint.authority_contract_id
         or (
             match_plan
-            and (
-                admission.plan.plan_id != checkpoint.plan_id
-                or admission.plan.version != checkpoint.plan_version
-            )
+            and (admission.plan.plan_id != checkpoint.plan_id or admission.plan.version != checkpoint.plan_version)
         )
     ):
         raise GovernedPlanError("M8 checkpoint and admission plan identity disagree")
@@ -1715,14 +1796,17 @@ def _require_checkpoint_compilation(
         or checkpoint.plan_version != compilation.business_plan.version
     ):
         raise GovernedPlanError("M8 checkpoint does not match the compiled plan identity")
-    refs = (*checkpoint.completed_prefix, *((checkpoint.active_step,) if checkpoint.active_step else ()), *checkpoint.remaining_suffix)
+    refs = (
+        *checkpoint.completed_prefix,
+        *((checkpoint.active_step,) if checkpoint.active_step else ()),
+        *checkpoint.remaining_suffix,
+    )
     expected = tuple(
         _step_ref(step, order, PlanStepState.PENDING)
         for step, order in zip(compilation.business_plan.steps, compilation.work_orders, strict=True)
     )
     if len(refs) != len(expected) or any(
-        _ref_identity_payload(left) != _ref_identity_payload(right)
-        for left, right in zip(refs, expected, strict=True)
+        _ref_identity_payload(left) != _ref_identity_payload(right) for left, right in zip(refs, expected, strict=True)
     ):
         raise GovernedPlanError("M8 checkpoint child identity mapping disagrees with compilation")
 
@@ -1766,6 +1850,27 @@ def _work_order_authority_payload(order: ExecutionWorkOrder) -> dict[str, Any]:
         if field in payload:
             payload[field] = sorted(payload[field])
     return payload
+
+
+def _require_plan_roles(roles: tuple[str, ...]) -> None:
+    if not 2 <= len(roles) <= 4:
+        raise ValueError("M8 trusted step roles require two to four sequential steps")
+    if any(role not in {"precheck", "submit", "confirm"} for role in roles):
+        raise ValueError("M8 trusted step roles contain an unsupported role")
+    if roles.count("submit") != 1 or roles[-1] != "confirm":
+        raise ValueError("M8 trusted step roles require exactly one submit and terminal confirm")
+    if any(role != "precheck" for role in roles[: roles.index("submit")]):
+        raise ValueError("M8 trusted step roles before submit must be prechecks")
+    if any(role != "confirm" for role in roles[roles.index("submit") + 1 :]):
+        raise ValueError("M8 trusted step roles after submit must be terminal confirmation")
+
+
+def _work_order_role(order: ExecutionWorkOrder) -> str:
+    marker = "M8 governed "
+    suffix = " for the admitted synthetic payment"
+    if not order.navigation_goal.startswith(marker) or not order.navigation_goal.endswith(suffix):
+        raise ValueError("M8 Work Order does not expose a trusted finite step role")
+    return order.navigation_goal[len(marker) : -len(suffix)]
 
 
 def _trace_ref(item: GovernedPlanStepRef) -> dict[str, Any]:
