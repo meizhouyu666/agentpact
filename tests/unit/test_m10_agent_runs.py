@@ -14,9 +14,11 @@ from enterprise.agent_runs.routes import configure_agent_run_service, reset_agen
 from enterprise.agent_runs.service import (
     AgentRunAction,
     AgentRunCreateRequest,
+    AgentRunPage,
     AgentRunPlanStep,
     AgentRunProjection,
     AgentRunState,
+    AgentRunSummary,
 )
 from enterprise.auth.dependencies import get_current_user
 from enterprise.auth.schemas import DepartmentRole, UserContext
@@ -25,12 +27,15 @@ from enterprise.domains.synthetic_payment.constants import (
     PAYMENTS_DEPARTMENT_ID,
     TENANT_ID,
 )
+from enterprise.domains.synthetic_payment.m6_runtime import SYNTHETIC_RUNTIME_CONTRACT
 from enterprise.domains.synthetic_payment.m10_runtime import (
+    M10PlanningError,
     SyntheticPaymentRuntimeAdapter,
+    build_m10_provider_factory,
     derive_agent_run_id,
 )
-from enterprise.domains.synthetic_payment.m6_runtime import SYNTHETIC_RUNTIME_CONTRACT
 from enterprise.domains.synthetic_payment.sdk_manifest import build_pack_sdk_manifest
+from enterprise.governance.admission import TaskAdmissionBundle
 from enterprise.governance.contracts import ActionIntent, DecisionOutcome, ExecutionEffect, PolicyDecision
 from enterprise.governance.pack_runtime import PackRuntimeBinding, PackRuntimeRegistry
 from skyvern.forge.native_action import NativeActionDisposition, NativeActionResolution
@@ -160,6 +165,130 @@ def test_preparation_is_deterministic_and_model_boundary_uses_only_intent_token(
             assert value not in serialized_projection
 
 
+def test_live_provider_composition_is_explicit_model_safe_and_persisted(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("M11_TEST_PROVIDER_KEY", "credential-canary")
+    requests: list[dict[str, object]] = []
+
+    def transport(*, endpoint: str, api_key: str, payload: dict[str, object]) -> object:
+        assert endpoint == "https://provider.invalid/v1/chat/completions"
+        assert api_key == "credential-canary"
+        requests.append(payload)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "capability_id": "synthetic.payment.submit",
+                                "input_slots": list(INPUTS),
+                                "step_roles": ["precheck", "submit", "confirm"],
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    adapter = SyntheticPaymentRuntimeAdapter(
+        lambda: None,  # type: ignore[arg-type]
+        driver=object(),  # type: ignore[arg-type]
+        provider_mode="live",
+        provider_factory=build_m10_provider_factory(
+            "live",
+            endpoint="https://provider.invalid/v1",
+            model="m11-model",
+            api_key_env="M11_TEST_PROVIDER_KEY",
+            transport=transport,
+        ),
+    )
+    prepared = adapter.prepare_run(
+        user=_user(),
+        tenant_id=TENANT_ID,
+        request_id="m11-live-001",
+        intent_digest="f" * 64,
+        business_inputs=INPUTS,
+        target_url="http://127.0.0.1:18080",
+        now=datetime(2026, 7, 31, 1, 0, tzinfo=timezone.utc),
+    )
+
+    assert prepared.admission_bundle.provider_mode == "live"
+    assert len(requests) == 1
+    encoded = json.dumps(requests, sort_keys=True)
+    for canary in (
+        *(value for value in INPUTS.values() if isinstance(value, str)),
+        TENANT_ID,
+        _user().user_id,
+        "credential-canary",
+    ):
+        assert str(canary) not in encoded
+
+
+def test_live_provider_has_no_incomplete_configuration_or_failure_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("M11_TEST_PROVIDER_KEY", raising=False)
+    with pytest.raises(ValueError, match="configuration is incomplete"):
+        build_m10_provider_factory(
+            "live",
+            endpoint="https://provider.invalid/v1",
+            model="m11-model",
+            api_key_env="M11_TEST_PROVIDER_KEY",
+        )
+
+    monkeypatch.setenv("M11_TEST_PROVIDER_KEY", "test-key")
+
+    def failing_transport(**_kwargs: object) -> object:
+        raise RuntimeError("provider unavailable")
+
+    adapter = SyntheticPaymentRuntimeAdapter(
+        lambda: None,  # type: ignore[arg-type]
+        driver=object(),  # type: ignore[arg-type]
+        provider_mode="live",
+        provider_factory=build_m10_provider_factory(
+            "live",
+            endpoint="https://provider.invalid/v1",
+            model="m11-model",
+            api_key_env="M11_TEST_PROVIDER_KEY",
+            transport=failing_transport,
+        ),
+    )
+    with pytest.raises(M10PlanningError, match="PLANNER_PROVIDER_FAILURE"):
+        adapter.prepare_run(
+            user=_user(),
+            tenant_id=TENANT_ID,
+            request_id="m11-live-failure",
+            intent_digest="e" * 64,
+            business_inputs=INPUTS,
+            target_url="http://127.0.0.1:18080",
+            now=datetime(2026, 7, 31, 1, 0, tzinfo=timezone.utc),
+        )
+
+
+def test_old_admission_defaults_recorded_and_restore_never_calls_provider() -> None:
+    prepared = _adapter().prepare_run(
+        user=_user(),
+        tenant_id=TENANT_ID,
+        request_id="m11-restore-001",
+        intent_digest="d" * 64,
+        business_inputs=INPUTS,
+        target_url="http://127.0.0.1:18080",
+        now=datetime(2026, 7, 31, 1, 0, tzinfo=timezone.utc),
+    )
+    legacy = prepared.admission_bundle.model_dump(mode="json")
+    legacy.pop("provider_mode")
+    bundle = TaskAdmissionBundle.model_validate(legacy)
+    assert bundle.provider_mode == "recorded"
+
+    def forbidden_provider(_planner_input: object) -> object:
+        raise AssertionError("restoration must not invoke a provider")
+
+    restorer = SyntheticPaymentRuntimeAdapter(
+        lambda: None,  # type: ignore[arg-type]
+        driver=object(),  # type: ignore[arg-type]
+        provider_mode="live",
+        provider_factory=forbidden_provider,  # type: ignore[arg-type]
+    )
+    assert restorer.restore_run(bundle, target_url=prepared.target_url).admission_bundle == bundle
+
+
 def test_public_create_schema_forbids_identity_provider_authority_and_browser_fields() -> None:
     AgentRunCreateRequest(request_id="req-1", intent="Submit", business_inputs=INPUTS)
     for forbidden in (
@@ -230,6 +359,25 @@ class _RouteService:
             total_steps=1,
         )
 
+    async def list_runs(self, *, user, cursor=None, limit=20):
+        del user, cursor, limit
+        return AgentRunPage(
+            items=(
+                AgentRunSummary(
+                    run_id="run_m10_route",
+                    pack_id="synthetic.payment",
+                    pack_version="1.0.0",
+                    pack_display_name="Synthetic Payment Reference Pack",
+                    provider_mode="recorded",
+                    state=AgentRunState.AWAITING_APPROVAL,
+                    completed_steps=0,
+                    total_steps=1,
+                    created_at=datetime(2026, 7, 31, 1, 0, tzinfo=timezone.utc),
+                    modified_at=datetime(2026, 7, 31, 1, 1, tzinfo=timezone.utc),
+                ),
+            )
+        )
+
 
 def test_http_create_returns_only_redacted_projection_and_rejects_extra_authority() -> None:
     app = FastAPI()
@@ -261,5 +409,11 @@ def test_http_create_returns_only_redacted_projection_and_rejects_extra_authorit
             },
         )
         assert forbidden.status_code == 422
+
+        listed = client.get("/api/v1/enterprise/agent-runs/")
+        assert listed.status_code == 200
+        assert listed.json()["items"][0]["run_id"] == "run_m10_route"
+        assert "legal_actions" not in listed.json()["items"][0]
+        assert "plan" not in listed.json()["items"][0]
     finally:
         reset_agent_run_service()

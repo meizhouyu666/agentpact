@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import Counter
+from unittest.mock import patch
 
 from tests.e2e import m4_synthetic_support as support
 
@@ -20,6 +22,7 @@ from enterprise.auth.dependencies import get_current_user
 from enterprise.auth.models import BusinessLineModel, DepartmentModel
 from enterprise.auth.schemas import DepartmentRole, UserContext
 from enterprise.domains.synthetic_payment.constants import BUSINESS_LINE_ID, PAYMENTS_DEPARTMENT_ID
+from enterprise.domains.synthetic_payment.m10_runtime import SyntheticPaymentRuntimeAdapter
 from enterprise.governance.models import ExecutionAttemptModel, ExecutionPermitModel, PendingActionModel
 from skyvern.forge.sdk.db.models import OrganizationModel
 
@@ -53,6 +56,12 @@ def _user(role: str) -> UserContext:
 def test_m10_recorded_api_uses_boot_driver_reobserves_permits_and_probes_once() -> None:
     with support.isolated_m4_environment() as environment:
         database = support.M4Database(environment.database_url)
+        proposal_calls: list[str] = []
+        original_prepare = SyntheticPaymentRuntimeAdapter.prepare_run
+
+        def counted_prepare(self: SyntheticPaymentRuntimeAdapter, **trusted_inputs: object):
+            proposal_calls.append(str(trusted_inputs["request_id"]))
+            return original_prepare(self, **trusted_inputs)
 
         async def scenario() -> dict[str, object]:
             try:
@@ -99,7 +108,13 @@ def test_m10_recorded_api_uses_boot_driver_reobserves_permits_and_probes_once() 
                                 "intent": "Submit the approved synthetic payment",
                                 "business_inputs": INPUTS,
                             }
-                            created = await client.post("/api/v1/enterprise/agent-runs/", json=request)
+                            concurrent_create = await asyncio.gather(
+                                client.post("/api/v1/enterprise/agent-runs/", json=request),
+                                client.post("/api/v1/enterprise/agent-runs/", json=request),
+                            )
+                            assert [item.status_code for item in concurrent_create] == [200, 200]
+                            assert concurrent_create[0].json() == concurrent_create[1].json()
+                            created = concurrent_create[0]
                             assert created.status_code == 200, created.text
                             assert created.json()["state"] == "AWAITING_APPROVAL"
                             assert created.json()["legal_actions"] == ["approve", "reject"]
@@ -114,12 +129,46 @@ def test_m10_recorded_api_uses_boot_driver_reobserves_permits_and_probes_once() 
 
                             repeated_create = await client.post("/api/v1/enterprise/agent-runs/", json=request)
                             assert repeated_create.json() == created.json()
+                            conflicting = await client.post(
+                                "/api/v1/enterprise/agent-runs/",
+                                json={**request, "intent": "A different use of the same request id"},
+                            )
+                            assert conflicting.status_code == 409
+                            assert conflicting.json() == {"detail": {"code": "IDEMPOTENCY_CONFLICT"}}
+                            listed = await client.get("/api/v1/enterprise/agent-runs/?limit=20")
+                            assert listed.status_code == 200, listed.text
+                            assert listed.json()["items"][0]["run_id"] == created.json()["run_id"]
+                            assert listed.json()["items"][0]["provider_mode"] == "recorded"
+                            assert "legal_actions" not in listed.json()["items"][0]
+                            assert "plan" not in listed.json()["items"][0]
                             async with database.Session() as session:
                                 assert len(list((await session.scalars(select(ApprovalRequestModel))).all())) == 1
                                 assert len(list((await session.scalars(select(ExecutionPermitModel))).all())) == 0
                                 assert len(list((await session.scalars(select(ExecutionAttemptModel))).all())) == 0
 
                             run_id = created.json()["run_id"]
+                            restart_application = FastAPI()
+                            mount_agent_run_api(
+                                restart_application,
+                                session_factory=database.Session,
+                                target_url=environment.console_url,
+                                hmac_secret=support.HMAC_SECRET,
+                                provider_mode="recorded",
+                            )
+                            restarted = await client.get(f"/api/v1/enterprise/agent-runs/{run_id}")
+                            assert restarted.status_code == 200, restarted.text
+                            assert restarted.json() == created.json()
+
+                            invalid_request = {
+                                **request,
+                                "request_id": "m11-api-lock-release",
+                                "business_inputs": {**INPUTS, "amount": "not-a-decimal"},
+                            }
+                            for _ in range(2):
+                                invalid = await client.post("/api/v1/enterprise/agent-runs/", json=invalid_request)
+                                assert invalid.status_code == 422
+                                assert invalid.json() == {"detail": {"code": "PLANNER_REJECTED"}}
+
                             approved = await client.post(
                                 f"/api/v1/enterprise/agent-runs/{run_id}/approve",
                                 headers={"x-test-role": "approver"},
@@ -165,7 +214,12 @@ def test_m10_recorded_api_uses_boot_driver_reobserves_permits_and_probes_once() 
                 reset_agent_run_service()
                 await database.engine.dispose()
 
-        evidence = asyncio.run(scenario())
+        with patch.object(SyntheticPaymentRuntimeAdapter, "prepare_run", counted_prepare):
+            evidence = asyncio.run(scenario())
+        assert Counter(proposal_calls) == {
+            "m10-api-e2e-001": 1,
+            "m11-api-lock-release": 2,
+        }
         assert evidence == {
             "fresh_observation": True,
             "effect_count": 1,

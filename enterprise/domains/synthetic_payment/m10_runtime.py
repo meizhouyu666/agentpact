@@ -4,18 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timedelta, timezone
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import httpx
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 
-from enterprise.agent.constrained_planner import DeterministicPlanner
+from enterprise.agent.constrained_planner import DeterministicPlanner, OpenAICompatiblePlanner, PlannerTransport
 from enterprise.agent.interactions import CapabilityRequest, CapabilityRequestKind, EntryMode
-from enterprise.auth.schemas import UserContext
+from enterprise.auth.schemas import DepartmentRole, UserContext
 from enterprise.governance.admission import AdmissionAuditRecord, GovernedTaskDraft, TaskAdmissionBundle
 from enterprise.governance.audit import observation_hash
 from enterprise.governance.capabilities import CapabilityDataScope
@@ -89,10 +90,15 @@ from .m8_runtime import (
     _authority_digests,
     _complete_active,
     build_m8_admission_bundle,
+    build_synthetic_m8_compilation,
 )
 from .m9_runtime import (
+    M9PlanInput,
     M9PlannerDisposition,
     M9PlannerEngine,
+    M9PlannerProvider,
+    M9StepRole,
+    OpenAICompatibleM9Provider,
     PlanProposal,
     RecordedM9Provider,
     build_m9_plan_input,
@@ -101,8 +107,51 @@ from .m9_runtime import (
 from .models import PaymentFacts
 from .policy import require_approval_decision
 
-
 M10_ADAPTER_ID = "synthetic.payment.agent-run-runtime.v1"
+M9ProviderFactory = Callable[[M9PlanInput], M9PlannerProvider]
+
+
+class M10PlanningError(ValueError):
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+def build_m10_provider_factory(
+    provider_mode: Literal["recorded", "live"],
+    *,
+    endpoint: str | None = None,
+    model: str | None = None,
+    api_key_env: str = "OPENAI_COMPATIBLE_API_KEY",
+    transport: PlannerTransport | None = None,
+) -> M9ProviderFactory:
+    """Build one explicit provider composition; live mode never falls back."""
+
+    if provider_mode == "recorded":
+        return _recorded_provider
+    if provider_mode != "live":
+        raise ValueError("Agent Run provider mode must be recorded or live")
+    if not endpoint or not model or not api_key_env or not os.environ.get(api_key_env):
+        raise ValueError("Live Agent Run provider configuration is incomplete")
+    planner = OpenAICompatiblePlanner(
+        endpoint=endpoint,
+        model=model,
+        api_key_env=api_key_env,
+        transport=transport,
+    )
+    return lambda _planner_input: OpenAICompatibleM9Provider(planner)
+
+
+def _recorded_provider(planner_input: M9PlanInput) -> M9PlannerProvider:
+    return RecordedM9Provider(
+        [
+            {
+                "capability_id": CAPABILITY_ID,
+                "input_slots": [item.name for item in planner_input.input_slots],
+                "step_roles": ["precheck", "submit", "confirm"],
+            }
+        ]
+    )
 
 
 def derive_agent_run_id(*, tenant_id: str, request_id: str) -> str:
@@ -606,11 +655,19 @@ class SyntheticPaymentRuntimeAdapter:
         session_factory: Callable[[], AbstractAsyncContextManager[Any]],
         *,
         driver: SyntheticM10NativeDriver,
+        provider_mode: Literal["recorded", "live"] = "recorded",
+        provider_factory: M9ProviderFactory | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._driver = driver
+        self._provider_mode = provider_mode
+        self._provider_factory = provider_factory or build_m10_provider_factory(provider_mode)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+
+    @property
+    def provider_mode(self) -> Literal["recorded", "live"]:
+        return self._provider_mode
 
     @property
     def binding(self) -> PackRuntimeBinding:
@@ -643,47 +700,23 @@ class SyntheticPaymentRuntimeAdapter:
             raise ValueError("M10 authenticated tenant does not match the trusted adapter context")
         run_id = derive_agent_run_id(tenant_id=user.org_id, request_id=request_id)
         admission_id = derive_admission_id(tenant_id=user.org_id, request_id=request_id)
-        scope = CapabilityDataScope(
-            department_id=PAYMENTS_DEPARTMENT_ID,
-            business_line_id=BUSINESS_LINE_ID,
-            resource_ids={facts.payment_id},
-        )
-        authority = compile_synthetic_request(
-            natural_language_request=f"Process one authorized synthetic payment intent token {intent_digest}",
-            context=SyntheticM6TrustedContext(
-                request_id=request_id,
-                task_id=run_id,
-                contract_id="contract_m10_" + _digest([run_id, "root-contract"]),
-                tenant_id=user.org_id,
-                user=user,
-                data_scope=scope,
-                resolved_at=now,
-            ),
-            installation=build_synthetic_installation(
-                tenant_id=user.org_id,
-                accepted_at=now - timedelta(seconds=1),
-                expires_at=now + timedelta(minutes=20),
-                contract_digest=SYNTHETIC_RUNTIME_CONTRACT.manifest_digest,
-            ),
-            conformance_report=build_synthetic_conformance_attestation(),
-            planner=DeterministicPlanner(facts.model_dump(mode="json")),
+        authority = _compile_authority(
+            user=user,
+            request_id=request_id,
+            run_id=run_id,
+            intent_digest=intent_digest,
+            facts=facts,
+            now=now,
         )
         plan_input = build_m9_plan_input(
             authority,
             intent_summary=f"Execute the authorized synthetic capability for intent token {intent_digest}",
         )
-        provider = RecordedM9Provider(
-            [
-                {
-                    "capability_id": CAPABILITY_ID,
-                    "input_slots": [item.name for item in plan_input.input_slots],
-                    "step_roles": ["precheck", "submit", "confirm"],
-                }
-            ]
-        )
+        provider = self._provider_factory(plan_input)
         decision = M9PlannerEngine(provider).plan(plan_input)
         if decision.disposition is not M9PlannerDisposition.ACCEPTED or not isinstance(decision.proposal, PlanProposal):
-            raise ValueError("M10 recorded constrained Planner did not produce an accepted proposal")
+            code = "PLANNER_PROVIDER_FAILURE" if any(item.value == "PROVIDER_FAILURE" for item in decision.codes) else "PLANNER_REJECTED"
+            raise M10PlanningError(code)
         compilation = compile_m9_plan(
             authority,
             decision.proposal,
@@ -696,6 +729,7 @@ class SyntheticPaymentRuntimeAdapter:
             authority=authority,
             admission_id=admission_id,
             intent_digest=intent_digest,
+            provider_mode=self._provider_mode,
             now=now,
         )
         admission = build_m8_admission_bundle(original, compilation)
@@ -706,6 +740,70 @@ class SyntheticPaymentRuntimeAdapter:
             business_inputs=facts.model_dump(mode="json"),
             compilation=compilation,
             admission_bundle=admission,
+            target_url=target_url,
+        )
+
+    def restore_run(self, bundle: TaskAdmissionBundle, *, target_url: str) -> SyntheticM10PreparedRun:
+        """Rebuild trusted execution state from admission without invoking a provider."""
+
+        facts = PaymentFacts.model_validate(bundle.request.typed_inputs)
+        user = UserContext(
+            user_id=bundle.request.principal_ref,
+            org_id=bundle.request.tenant_id,
+            department_roles=[
+                DepartmentRole(
+                    department_id=PAYMENTS_DEPARTMENT_ID,
+                    department_name="Synthetic payments",
+                    role="operator",
+                )
+            ],
+            business_line_ids=[BUSINESS_LINE_ID],
+        )
+        token = bundle.request.user_intent_summary.rsplit(" ", 1)[-1]
+        authority = _compile_authority(
+            user=user,
+            request_id=bundle.request.request_id,
+            run_id=bundle.task.task_id,
+            intent_digest=token,
+            facts=facts,
+            now=bundle.request.submitted_at,
+        )
+        roles: list[str] = []
+        for work_order in bundle.work_orders:
+            matching = [
+                role.value
+                for role in M9StepRole
+                if work_order.navigation_goal == f"M8 governed {role.value} for the admitted synthetic payment"
+            ]
+            if len(matching) != 1:
+                raise ValueError("Stored Agent Run has an invalid trusted step role")
+            roles.append(matching[0])
+        compilation = build_synthetic_m8_compilation(
+            authority,
+            admission_id=bundle.admission_id,
+            plan_run_id=bundle.task.task_id,
+            step_roles=tuple(roles),
+        )
+        if build_m8_admission_bundle(
+            _admission_bundle(
+                user=user,
+                facts=facts,
+                authority=authority,
+                admission_id=bundle.admission_id,
+                intent_digest=token,
+                provider_mode=bundle.provider_mode,
+                now=bundle.request.submitted_at,
+            ),
+            compilation,
+        ) != bundle:
+            raise ValueError("Stored Agent Run admission does not match trusted reconstruction")
+        return SyntheticM10PreparedRun(
+            run_id=bundle.task.task_id,
+            intent_digest=token,
+            business_inputs_digest=_digest(facts.model_dump(mode="json")),
+            business_inputs=facts.model_dump(mode="json"),
+            compilation=compilation,
+            admission_bundle=bundle,
             target_url=target_url,
         )
 
@@ -882,6 +980,42 @@ class SyntheticPaymentRuntimeAdapter:
         )
 
 
+def _compile_authority(
+    *,
+    user: UserContext,
+    request_id: str,
+    run_id: str,
+    intent_digest: str,
+    facts: PaymentFacts,
+    now: datetime,
+) -> object:
+    scope = CapabilityDataScope(
+        department_id=PAYMENTS_DEPARTMENT_ID,
+        business_line_id=BUSINESS_LINE_ID,
+        resource_ids={facts.payment_id},
+    )
+    return compile_synthetic_request(
+        natural_language_request=f"Process one authorized synthetic payment intent token {intent_digest}",
+        context=SyntheticM6TrustedContext(
+            request_id=request_id,
+            task_id=run_id,
+            contract_id="contract_m10_" + _digest([run_id, "root-contract"]),
+            tenant_id=user.org_id,
+            user=user,
+            data_scope=scope,
+            resolved_at=now,
+        ),
+        installation=build_synthetic_installation(
+            tenant_id=user.org_id,
+            accepted_at=now - timedelta(seconds=1),
+            expires_at=now + timedelta(minutes=20),
+            contract_digest=SYNTHETIC_RUNTIME_CONTRACT.manifest_digest,
+        ),
+        conformance_report=build_synthetic_conformance_attestation(),
+        planner=DeterministicPlanner(facts.model_dump(mode="json")),
+    )
+
+
 def _admission_bundle(
     *,
     user: UserContext,
@@ -889,6 +1023,7 @@ def _admission_bundle(
     authority: object,
     admission_id: str,
     intent_digest: str,
+    provider_mode: Literal["recorded", "live"],
     now: datetime,
 ) -> TaskAdmissionBundle:
     grant = authority.grants.grants[0]
@@ -940,6 +1075,7 @@ def _admission_bundle(
         created_at=now,
     )
     return TaskAdmissionBundle(
+        provider_mode=provider_mode,
         admission_id=admission_id,
         task=GovernedTaskDraft(
             task_id=authority.business_plan.task_id,

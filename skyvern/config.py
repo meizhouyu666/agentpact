@@ -111,6 +111,8 @@ class Settings(BaseSettings):
     ENABLE_GOVERNANCE_RECOVERY_EXECUTION: bool = False
     GOVERNANCE_RECOVERY_INTERVAL_SECONDS: int = 30
     GOVERNANCE_RECOVERY_BATCH_SIZE: int = 20
+    AGENT_RUN_PROVIDER_MODE: str = "recorded"
+    AGENT_RUN_PROVIDER_TIMEOUT_SECONDS: float = 30.0
 
     @field_validator("GOVERNANCE_MODE")
     @classmethod
@@ -127,6 +129,21 @@ class Settings(BaseSettings):
                 "Use audit to collect governance evidence."
             )
         return mode
+
+    @field_validator("AGENT_RUN_PROVIDER_MODE")
+    @classmethod
+    def validate_agent_run_provider_mode(cls, value: str) -> str:
+        mode = value.lower().strip()
+        if mode not in {"recorded", "live"}:
+            raise ValueError("AGENT_RUN_PROVIDER_MODE must be recorded or live")
+        return mode
+
+    @field_validator("AGENT_RUN_PROVIDER_TIMEOUT_SECONDS")
+    @classmethod
+    def validate_agent_run_provider_timeout(cls, value: float) -> float:
+        if value <= 0 or value > 120:
+            raise ValueError("AGENT_RUN_PROVIDER_TIMEOUT_SECONDS must be greater than 0 and at most 120")
+        return value
 
     @field_validator("GOVERNANCE_RECOVERY_INTERVAL_SECONDS", "GOVERNANCE_RECOVERY_BATCH_SIZE")
     @classmethod

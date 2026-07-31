@@ -6,7 +6,7 @@ from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from typing import Any, Literal
 
-from fastapi import APIRouter, FastAPI, HTTPException, Response, status
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Response, status
 
 from enterprise.auth.dependencies import CurrentUser
 
@@ -14,6 +14,7 @@ from .service import (
     AgentRunCommandRequest,
     AgentRunCreateRequest,
     AgentRunError,
+    AgentRunPage,
     AgentRunProjection,
     AgentRunReport,
     AgentRunService,
@@ -38,18 +39,29 @@ def mount_agent_run_api(
     target_url: str,
     hmac_secret: str | None,
     provider_mode: Literal["recorded", "live"] = "recorded",
+    provider_endpoint: str | None = None,
+    provider_model: str | None = None,
+    provider_api_key_env: str = "OPENAI_COMPATIBLE_API_KEY",
+    provider_timeout_seconds: float = 30.0,
     prefix: str = "/api/v1",
 ) -> AgentRunService:
     """Install the exact trusted M10 composition used by the application boot."""
 
+    from enterprise.domains.synthetic_payment.m6_runtime import SYNTHETIC_RUNTIME_CONTRACT
     from enterprise.domains.synthetic_payment.m10_runtime import (
         SyntheticPaymentRuntimeAdapter,
         TrustedSyntheticM10Driver,
+        build_m10_provider_factory,
     )
-    from enterprise.domains.synthetic_payment.m6_runtime import SYNTHETIC_RUNTIME_CONTRACT
     from enterprise.governance.pack_runtime import PackRuntimeRegistry
 
     registry = PackRuntimeRegistry([SYNTHETIC_RUNTIME_CONTRACT])
+    provider_factory = build_m10_provider_factory(
+        provider_mode,
+        endpoint=provider_endpoint,
+        model=provider_model,
+        api_key_env=provider_api_key_env,
+    )
     registry.register(
         SyntheticPaymentRuntimeAdapter(
             session_factory,
@@ -58,13 +70,15 @@ def mount_agent_run_api(
                 target_url=target_url,
                 hmac_secret=hmac_secret,
             ),
+            provider_mode=provider_mode,
+            provider_factory=provider_factory,
         )
     )
     service = AgentRunService(
         session_factory,
         runtime_registry=registry,
         target_url=target_url,
-        provider_mode=provider_mode,
+        provider_timeout_seconds=provider_timeout_seconds,
     )
     configure_agent_run_service(service)
     application.include_router(router, prefix=prefix)
@@ -95,6 +109,18 @@ def _raise_http(exc: AgentRunError) -> None:
 async def create_agent_run(body: AgentRunCreateRequest, user: CurrentUser) -> AgentRunProjection:
     try:
         return await _configured_service().create(body, user=user)
+    except AgentRunError as exc:
+        _raise_http(exc)
+
+
+@router.get("/", response_model=AgentRunPage)
+async def list_agent_runs(
+    user: CurrentUser,
+    cursor: str | None = None,
+    limit: int = Query(default=20, ge=1, le=50),
+) -> AgentRunPage:
+    try:
+        return await _configured_service().list_runs(user=user, cursor=cursor, limit=limit)
     except AgentRunError as exc:
         _raise_http(exc)
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -65,6 +65,7 @@ class TaskAdmissionBundle(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: str = "phase2-task-admission-bundle-v1"
+    provider_mode: Literal["recorded", "live"] = "recorded"
     admission_id: str
     task: GovernedTaskDraft
     creation_snapshot: TrustedTaskCreationSnapshot
