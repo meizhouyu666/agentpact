@@ -5,16 +5,22 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from collections.abc import Mapping
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum, StrEnum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from enterprise.agent.constrained_planner import OpenAICompatiblePlanner, PlannerProviderError
+from enterprise.agent.constrained_planner import (
+    OpenAICompatiblePlanner,
+    PlannerObservation,
+    PlannerProviderError,
+    PlannerUsage,
+)
 from enterprise.agent.work_orders import RecoveryLevel
 from enterprise.domains.synthetic_payment.m6_runtime import SyntheticM6Compilation
 from enterprise.domains.synthetic_payment.m8_runtime import (
@@ -143,6 +149,13 @@ class M9ProviderRequest(BaseModel):
     repair: M9RepairRequest | None = None
 
 
+class M9ProviderResponse(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid", frozen=True)
+
+    output: Any
+    usage: PlannerUsage | None = None
+
+
 class M9PlannerDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -151,6 +164,7 @@ class M9PlannerDecision(BaseModel):
     proposal: PlanProposal | SuffixReplanProposal | None = None
     provider_calls: int = Field(ge=0, le=2)
     repair_count: int = Field(ge=0, le=1)
+    observation: PlannerObservation
 
 
 class M9ReplanPreconditions(BaseModel):
@@ -175,10 +189,25 @@ class AgentEvalCase(BaseModel):
     preconditions: M9ReplanPreconditions | None = None
 
 
+class AgentEvalCaseResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    case_id: str
+    kind: Literal["plan", "replan"]
+    expected_disposition: M9PlannerDisposition
+    actual_disposition: M9PlannerDisposition
+    expected_codes: tuple[M9PlannerCode, ...] = ()
+    actual_codes: tuple[M9PlannerCode, ...] = ()
+    provider_calls: int = Field(ge=0, le=2)
+    repair_count: int = Field(ge=0, le=1)
+    trusted_compile_result: Literal["accepted", "rejected", "not_applicable", "not_exercised"]
+    passed: bool
+
+
 class AgentEvalReport(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: str = "agentpact-m9-agent-eval/v1"
+    schema_version: Literal["agentpact-agent-eval/v2"] = "agentpact-agent-eval/v2"
     case_count: int = Field(ge=1)
     passed_case_count: int = Field(ge=0)
     rejected_case_count: int = Field(ge=0)
@@ -188,6 +217,9 @@ class AgentEvalReport(BaseModel):
     legal_replan_acceptance_rate: float = Field(ge=0, le=1)
     hallucination_rejection_rate: float = Field(ge=0, le=1)
     repair_success_rate: float = Field(ge=0, le=1)
+    cases: tuple[AgentEvalCaseResult, ...]
+    limitations: tuple[str, ...]
+    report_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class M9PlannerProvider(Protocol):
@@ -240,7 +272,8 @@ class OpenAICompatibleM9Provider:
             safe_input=planner_input.model_dump(mode="json"),
             repair=repair,
         )
-        return self._planner.propose_structured(
+        usage: list[PlannerUsage] = []
+        output = self._planner.propose_structured(
             request,
             response_model=response_model,
             schema_name=(
@@ -252,14 +285,22 @@ class OpenAICompatibleM9Provider:
                 "Return only the requested finite capability/input-slot/step-role shape. "
                 "Never emit business values, authority identifiers, policy fields, browser fields, or raw evidence."
             ),
+            usage_callback=usage.append,
         )
+        return M9ProviderResponse(output=output, usage=usage[0] if usage else None)
 
 
 class M9PlannerEngine:
     """Apply terminal-first validation and at most one structural repair."""
 
-    def __init__(self, provider: M9PlannerProvider) -> None:
+    def __init__(
+        self,
+        provider: M9PlannerProvider,
+        *,
+        provider_mode: Literal["recorded", "live"] = "recorded",
+    ) -> None:
         self._provider = provider
+        self._provider_mode = provider_mode
 
     def plan(self, planner_input: M9PlanInput) -> M9PlannerDecision:
         return self._run(planner_input, PlanProposal)
@@ -272,12 +313,7 @@ class M9PlannerEngine:
     ) -> M9PlannerDecision:
         denial = _replan_precondition_denial(planner_input, preconditions)
         if denial is not None:
-            return M9PlannerDecision(
-                disposition=M9PlannerDisposition.REJECTED,
-                codes=(denial,),
-                provider_calls=0,
-                repair_count=0,
-            )
+            return self._decision(M9PlannerDisposition.REJECTED, codes=(denial,))
         return self._run(planner_input, SuffixReplanProposal)
 
     def _run(
@@ -285,33 +321,63 @@ class M9PlannerEngine:
         planner_input: M9PlanInput | M9ReplanInput,
         response_model: type[PlanProposal] | type[SuffixReplanProposal],
     ) -> M9PlannerDecision:
+        started = time.monotonic()
+        provider_duration = 0.0
         calls = 0
-        try:
+        usage = PlannerUsage()
+
+        def invoke(*, repair: M9RepairRequest | None) -> object:
+            nonlocal calls, provider_duration, usage
             calls += 1
-            raw = self._provider.propose(planner_input, repair=None, response_model=response_model)
+            provider_started = time.monotonic()
+            try:
+                response = self._provider.propose(planner_input, repair=repair, response_model=response_model)
+            finally:
+                provider_duration += time.monotonic() - provider_started
+            if isinstance(response, M9ProviderResponse):
+                usage = _merge_usage(usage, response.usage)
+                return response.output
+            return response
+
+        def decision(
+            disposition: M9PlannerDisposition,
+            *,
+            codes: tuple[M9PlannerCode, ...] = (),
+            proposal: PlanProposal | SuffixReplanProposal | None = None,
+            repair_count: int = 0,
+        ) -> M9PlannerDecision:
+            duration = time.monotonic() - started
+            return self._decision(
+                disposition,
+                codes=codes,
+                proposal=proposal,
+                provider_calls=calls,
+                repair_count=repair_count,
+                duration_ms=duration * 1000,
+                provider_duration_ms=provider_duration * 1000,
+                usage=usage,
+            )
+
+        try:
+            raw = invoke(repair=None)
         except Exception:
-            return _rejected(M9PlannerCode.PROVIDER_FAILURE, provider_calls=calls)
+            return decision(M9PlannerDisposition.REJECTED, codes=(M9PlannerCode.PROVIDER_FAILURE,))
         try:
             proposal = _validate_candidate(raw, response_model=response_model, planner_input=planner_input)
         except _ValidationFailure as first:
             if not first.repairable:
-                return _rejected(first.code, provider_calls=calls)
+                return decision(M9PlannerDisposition.REJECTED, codes=(first.code,))
             repair = M9RepairRequest(
                 safe_input=planner_input.model_dump(mode="json"),
                 expected_response_schema=response_model.model_json_schema(),
                 structural_codes=(first.code,),
             )
             try:
-                calls += 1
-                raw = self._provider.propose(
-                    planner_input,
-                    repair=repair,
-                    response_model=response_model,
-                )
+                raw = invoke(repair=repair)
             except Exception:
-                return _rejected(
-                    M9PlannerCode.PROVIDER_FAILURE,
-                    provider_calls=calls,
+                return decision(
+                    M9PlannerDisposition.REJECTED,
+                    codes=(M9PlannerCode.PROVIDER_FAILURE,),
                     repair_count=1,
                 )
             try:
@@ -321,18 +387,45 @@ class M9PlannerEngine:
                     planner_input=planner_input,
                 )
             except _ValidationFailure as second:
-                return _rejected(second.code, provider_calls=calls, repair_count=1)
-            return M9PlannerDecision(
-                disposition=M9PlannerDisposition.REPAIRED,
+                return decision(M9PlannerDisposition.REJECTED, codes=(second.code,), repair_count=1)
+            return decision(
+                M9PlannerDisposition.REPAIRED,
                 proposal=proposal,
-                provider_calls=calls,
                 repair_count=1,
             )
+        return decision(M9PlannerDisposition.ACCEPTED, proposal=proposal)
+
+    def _decision(
+        self,
+        disposition: M9PlannerDisposition,
+        *,
+        codes: tuple[M9PlannerCode, ...] = (),
+        proposal: PlanProposal | SuffixReplanProposal | None = None,
+        provider_calls: int = 0,
+        repair_count: int = 0,
+        duration_ms: float = 0.0,
+        provider_duration_ms: float = 0.0,
+        usage: PlannerUsage | None = None,
+    ) -> M9PlannerDecision:
+        live = self._provider_mode == "live"
+        recorded_usage = usage if usage and any(value is not None for value in usage.model_dump().values()) else None
+        observation = PlannerObservation(
+            provider_mode=self._provider_mode,
+            disposition=disposition.value,
+            codes=tuple(item.value for item in codes),
+            provider_calls=provider_calls,
+            repair_count=repair_count,
+            duration_ms=duration_ms if live else None,
+            provider_duration_ms=provider_duration_ms if live else None,
+            usage=recorded_usage,
+        )
         return M9PlannerDecision(
-            disposition=M9PlannerDisposition.ACCEPTED,
+            disposition=disposition,
+            codes=codes,
             proposal=proposal,
-            provider_calls=calls,
-            repair_count=0,
+            provider_calls=provider_calls,
+            repair_count=repair_count,
+            observation=observation,
         )
 
 
@@ -584,17 +677,19 @@ def _replan_precondition_denial(
     return None
 
 
-def _rejected(
-    code: M9PlannerCode,
-    *,
-    provider_calls: int,
-    repair_count: int = 0,
-) -> M9PlannerDecision:
-    return M9PlannerDecision(
-        disposition=M9PlannerDisposition.REJECTED,
-        codes=(code,),
-        provider_calls=provider_calls,
-        repair_count=repair_count,
+def _merge_usage(current: PlannerUsage, update: PlannerUsage | None) -> PlannerUsage:
+    if update is None:
+        return current
+
+    def add(left: int | None, right: int | None) -> int | None:
+        if left is None and right is None:
+            return None
+        return (left or 0) + (right or 0)
+
+    return PlannerUsage(
+        prompt_tokens=add(current.prompt_tokens, update.prompt_tokens),
+        completion_tokens=add(current.completion_tokens, update.completion_tokens),
+        total_tokens=add(current.total_tokens, update.total_tokens),
     )
 
 
@@ -707,14 +802,19 @@ def run_agent_eval(
     *,
     plan_input: M9PlanInput,
     replan_input: M9ReplanInput,
+    authority: SyntheticM6Compilation | None = None,
+    previous: SyntheticM8Compilation | None = None,
+    provider_factory: Any | None = None,
+    provider_mode: Literal["recorded", "live"] = "recorded",
 ) -> AgentEvalReport:
     metric_totals = {item: 0 for item in AgentEvalMetric}
     metric_passes = {item: 0 for item in AgentEvalMetric}
     passed = 0
     rejected = 0
+    results: list[AgentEvalCaseResult] = []
     for case in cases:
-        provider = RecordedM9Provider(case.provider_outputs)
-        engine = M9PlannerEngine(provider)
+        provider = provider_factory(case) if provider_factory is not None else RecordedM9Provider(case.provider_outputs)
+        engine = M9PlannerEngine(provider, provider_mode=provider_mode)
         if case.kind == "plan":
             decision = engine.plan(plan_input)
         else:
@@ -722,12 +822,46 @@ def run_agent_eval(
                 replan_input,
                 preconditions=case.preconditions or M9ReplanPreconditions(),
             )
-        matched = (
-            decision.disposition is case.expected_disposition
-            and decision.codes == case.expected_codes
-        )
+        compile_result: Literal["accepted", "rejected", "not_applicable", "not_exercised"] = "not_applicable"
+        if decision.disposition is not M9PlannerDisposition.REJECTED:
+            if case.kind == "plan" and authority is not None and isinstance(decision.proposal, PlanProposal):
+                try:
+                    compile_m9_plan(
+                        authority,
+                        decision.proposal,
+                        admission_id=f"eval-{case.case_id}",
+                        plan_run_id=f"eval-{case.case_id}",
+                    )
+                    compile_result = "accepted"
+                except ValueError:
+                    compile_result = "rejected"
+            elif case.kind == "replan" and previous is not None and isinstance(decision.proposal, SuffixReplanProposal):
+                try:
+                    compile_m9_replan(previous, decision.proposal, completed_prefix_length=1)
+                    compile_result = "accepted"
+                except ValueError:
+                    compile_result = "rejected"
+            else:
+                compile_result = "not_exercised"
+        matched = decision.disposition is case.expected_disposition and decision.codes == case.expected_codes
+        if decision.disposition is not M9PlannerDisposition.REJECTED and compile_result == "rejected":
+            matched = False
         passed += int(matched)
         rejected += int(decision.disposition is M9PlannerDisposition.REJECTED)
+        results.append(
+            AgentEvalCaseResult(
+                case_id=case.case_id,
+                kind=case.kind,
+                expected_disposition=case.expected_disposition,
+                actual_disposition=decision.disposition,
+                expected_codes=case.expected_codes,
+                actual_codes=decision.codes,
+                provider_calls=decision.provider_calls,
+                repair_count=decision.repair_count,
+                trusted_compile_result=compile_result,
+                passed=matched,
+            )
+        )
         for metric in case.metric_labels:
             metric_totals[metric] += 1
             metric_passes[metric] += int(matched)
@@ -735,17 +869,26 @@ def run_agent_eval(
         metric: (metric_passes[metric] / metric_totals[metric] if metric_totals[metric] else 0.0)
         for metric in AgentEvalMetric
     }
-    return AgentEvalReport(
-        case_count=len(cases),
-        passed_case_count=passed,
-        rejected_case_count=rejected,
-        plan_schema_validity_rate=rates[AgentEvalMetric.PLAN_SCHEMA_VALIDITY],
-        capability_selection_accuracy=rates[AgentEvalMetric.CAPABILITY_SELECTION_ACCURACY],
-        authority_compliance_rate=rates[AgentEvalMetric.AUTHORITY_COMPLIANCE],
-        legal_replan_acceptance_rate=rates[AgentEvalMetric.LEGAL_REPLAN_ACCEPTANCE],
-        hallucination_rejection_rate=rates[AgentEvalMetric.HALLUCINATION_REJECTION],
-        repair_success_rate=rates[AgentEvalMetric.REPAIR_SUCCESS],
+    limitations = (
+        "Evaluation covers only the synthetic.payment reference Pack.",
+        "Recorded results are deterministic governance checks, not production task-success claims.",
+        "Live mode is planning-only and creates no Task, database record, interactive session, or business effect.",
     )
+    payload = {
+        "schema_version": "agentpact-agent-eval/v2",
+        "case_count": len(cases),
+        "passed_case_count": passed,
+        "rejected_case_count": rejected,
+        "plan_schema_validity_rate": rates[AgentEvalMetric.PLAN_SCHEMA_VALIDITY],
+        "capability_selection_accuracy": rates[AgentEvalMetric.CAPABILITY_SELECTION_ACCURACY],
+        "authority_compliance_rate": rates[AgentEvalMetric.AUTHORITY_COMPLIANCE],
+        "legal_replan_acceptance_rate": rates[AgentEvalMetric.LEGAL_REPLAN_ACCEPTANCE],
+        "hallucination_rejection_rate": rates[AgentEvalMetric.HALLUCINATION_REJECTION],
+        "repair_success_rate": rates[AgentEvalMetric.REPAIR_SUCCESS],
+        "cases": [item.model_dump(mode="json") for item in results],
+        "limitations": list(limitations),
+    }
+    return AgentEvalReport(**payload, report_digest=_digest(payload))
 
 
 def _payment_slot_metadata() -> tuple[InputSlotMetadata, ...]:

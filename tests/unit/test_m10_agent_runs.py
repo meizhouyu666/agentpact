@@ -14,6 +14,8 @@ from enterprise.agent_runs.routes import configure_agent_run_service, reset_agen
 from enterprise.agent_runs.service import (
     AgentRunAction,
     AgentRunCreateRequest,
+    AgentRunDecisionTrace,
+    AgentRunDecisionTraceStage,
     AgentRunPage,
     AgentRunPlanStep,
     AgentRunProjection,
@@ -274,8 +276,10 @@ def test_old_admission_defaults_recorded_and_restore_never_calls_provider() -> N
     )
     legacy = prepared.admission_bundle.model_dump(mode="json")
     legacy.pop("provider_mode")
+    legacy.pop("planner_observation")
     bundle = TaskAdmissionBundle.model_validate(legacy)
     assert bundle.provider_mode == "recorded"
+    assert bundle.planner_observation is None
 
     def forbidden_provider(_planner_input: object) -> object:
         raise AssertionError("restoration must not invoke a provider")
@@ -287,6 +291,43 @@ def test_old_admission_defaults_recorded_and_restore_never_calls_provider() -> N
         provider_factory=forbidden_provider,  # type: ignore[arg-type]
     )
     assert restorer.restore_run(bundle, target_url=prepared.target_url).admission_bundle == bundle
+
+
+def test_structurally_repaired_plan_uses_the_same_trusted_compiler() -> None:
+    def repaired_provider(planner_input):
+        from enterprise.domains.synthetic_payment.m9_runtime import RecordedM9Provider
+
+        return RecordedM9Provider(
+            [
+                "not-json",
+                {
+                    "capability_id": "synthetic.payment.submit",
+                    "input_slots": [item.name for item in planner_input.input_slots],
+                    "step_roles": ["precheck", "submit", "confirm"],
+                },
+            ]
+        )
+
+    adapter = SyntheticPaymentRuntimeAdapter(
+        lambda: None,  # type: ignore[arg-type]
+        driver=object(),  # type: ignore[arg-type]
+        provider_factory=repaired_provider,
+    )
+    prepared = adapter.prepare_run(
+        user=_user(),
+        tenant_id=TENANT_ID,
+        request_id="m12-repaired-plan",
+        intent_digest="9" * 64,
+        business_inputs=INPUTS,
+        target_url="http://127.0.0.1:18080",
+        now=datetime(2026, 8, 2, tzinfo=timezone.utc),
+    )
+    observation = prepared.admission_bundle.planner_observation
+    assert observation is not None
+    assert observation.disposition == "repaired"
+    assert observation.provider_calls == 2
+    assert observation.repair_count == 1
+    assert len(prepared.compilation.work_orders) == 3
 
 
 def test_public_create_schema_forbids_identity_provider_authority_and_browser_fields() -> None:
@@ -378,6 +419,16 @@ class _RouteService:
             )
         )
 
+    async def decision_trace(self, run_id, *, user):
+        del user
+        return AgentRunDecisionTrace(
+            run_id=run_id,
+            stages=tuple(
+                AgentRunDecisionTraceStage(stage=stage, status="completed", reason_code="SAFE")
+                for stage in ("provider", "validation", "compilation", "admission", "approval", "execution", "recovery")
+            ),
+        )
+
 
 def test_http_create_returns_only_redacted_projection_and_rejects_extra_authority() -> None:
     app = FastAPI()
@@ -415,5 +466,19 @@ def test_http_create_returns_only_redacted_projection_and_rejects_extra_authorit
         assert listed.json()["items"][0]["run_id"] == "run_m10_route"
         assert "legal_actions" not in listed.json()["items"][0]
         assert "plan" not in listed.json()["items"][0]
+
+        trace = client.get("/api/v1/enterprise/agent-runs/run_m10_route/decision-trace")
+        assert trace.status_code == 200
+        assert trace.json()["non_authoritative"] is True
+        assert "legal_actions" not in trace.text
+        assert [item["stage"] for item in trace.json()["stages"]] == [
+            "provider",
+            "validation",
+            "compilation",
+            "admission",
+            "approval",
+            "execution",
+            "recovery",
+        ]
     finally:
         reset_agent_run_service()

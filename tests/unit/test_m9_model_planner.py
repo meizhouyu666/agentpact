@@ -1,6 +1,7 @@
 """M9 authority-minimized Planner, trusted compilation, repair, and eval tests."""
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from pathlib import Path
 
@@ -419,18 +420,21 @@ def test_recorded_eval_corpus_is_deterministic_and_report_is_redacted():
     assert first == second
     assert first.case_count == 10
     assert first.passed_case_count == 10
-    assert first.model_dump(mode="json") == {
-        "schema_version": "agentpact-m9-agent-eval/v1",
-        "case_count": 10,
-        "passed_case_count": 10,
-        "rejected_case_count": 7,
-        "plan_schema_validity_rate": 1.0,
-        "capability_selection_accuracy": 1.0,
-        "authority_compliance_rate": 1.0,
-        "legal_replan_acceptance_rate": 1.0,
-        "hallucination_rejection_rate": 1.0,
-        "repair_success_rate": 1.0,
-    }
+    assert first.schema_version == "agentpact-agent-eval/v2"
+    assert first.rejected_case_count == 7
+    assert all(item.passed for item in first.cases)
+    assert len(first.report_digest) == 64
+    assert all(
+        getattr(first, field) == 1.0
+        for field in (
+            "plan_schema_validity_rate",
+            "capability_selection_accuracy",
+            "authority_compliance_rate",
+            "legal_replan_acceptance_rate",
+            "hallucination_rejection_rate",
+            "repair_success_rate",
+        )
+    )
     report_json = json.dumps(first.model_dump(mode="json"), sort_keys=True)
     for value in INPUTS.values():
         if isinstance(value, str):
@@ -441,3 +445,57 @@ def test_recorded_eval_corpus_is_deterministic_and_report_is_redacted():
     for artifact in (fixture_json, report_json):
         for token in ("nested-secret", "700001", "700002.5", "700003.75", "secret_bool"):
             assert token not in artifact
+
+
+def test_openai_usage_is_invocation_local_under_concurrency(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("M12_USAGE_KEY", "credential-canary")
+    _authority, base_input, _previous = _compiled_m9()
+
+    def transport(*, endpoint, api_key, payload):
+        del endpoint
+        assert api_key == "credential-canary"
+        safe_input = json.loads(payload["messages"][1]["content"])["safe_input"]
+        token_count = int(safe_input["intent_summary"].rsplit("-", 1)[-1])
+        return {
+            "choices": [{"message": {"content": json.dumps(_valid_plan_payload(base_input))}}],
+            "usage": {"input_tokens": token_count, "output_tokens": 2, "total_tokens": token_count + 2},
+        }
+
+    planner = OpenAICompatiblePlanner(
+        endpoint="https://provider.invalid/v1",
+        model="m12-model",
+        api_key_env="M12_USAGE_KEY",
+        transport=transport,
+    )
+
+    def invoke(token_count: int):
+        planner_input = base_input.model_copy(update={"intent_summary": f"safe-intent-{token_count}"})
+        return M9PlannerEngine(OpenAICompatibleM9Provider(planner), provider_mode="live").plan(planner_input)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        decisions = list(pool.map(invoke, (11, 29)))
+
+    assert [item.observation.usage.prompt_tokens for item in decisions if item.observation.usage] == [11, 29]
+    assert all(item.observation.duration_ms is not None for item in decisions)
+
+
+def test_openai_usage_rejects_malformed_counts(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("M12_USAGE_KEY", "credential-canary")
+    _authority, planner_input, _previous = _compiled_m9()
+
+    def transport(**_kwargs):
+        return {
+            "choices": [{"message": {"content": json.dumps(_valid_plan_payload(planner_input))}}],
+            "usage": {"prompt_tokens": -1},
+        }
+
+    planner = OpenAICompatiblePlanner(
+        endpoint="https://provider.invalid/v1",
+        model="m12-model",
+        api_key_env="M12_USAGE_KEY",
+        transport=transport,
+    )
+    decision = M9PlannerEngine(OpenAICompatibleM9Provider(planner), provider_mode="live").plan(planner_input)
+    assert decision.disposition is M9PlannerDisposition.REJECTED
+    assert decision.codes == (M9PlannerCode.PROVIDER_FAILURE,)
+    assert decision.observation.usage is None

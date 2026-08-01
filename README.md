@@ -100,6 +100,18 @@ M11 将 M10 入口扩展为可恢复的操作工作台：
 - 租户隔离的历史接口使用稳定游标返回脱敏摘要，不包含 `legal_actions`；跨租户记录与不存在记录不可区分。
 - React 工作台用 `?run=<id>` 恢复所选 Run，只轮询当前可见且未终止的详情，并只渲染 root-locked 权威详情返回的 `legal_actions`。
 
+### M12 Agent 评估与决策轨迹
+
+M12 在既有 M9-M11 治理链上增加只读证据面，不引入新的执行权限：
+
+- 每次 Planner 调用生成局部、封闭的安全观察，只记录 `recorded|live` 模式、有限 disposition/code、调用与 repair 次数，以及 Provider 可选返回的非负耗时和 token 计数；不保存 endpoint、model、凭据、prompt、response、业务值或权限句柄。
+- 一次结构 repair 成功后的 proposal 会进入与首次接受相同的可信编译路径；权限、浏览器字段和语义越权仍然终止并 fail closed。
+- Agent Run 提供租户隔离、root-locked 的非权威 Decision trace，有限阶段为 provider、validation、compilation、admission、approval、execution 和 recovery。轨迹只用于解释与导航，不包含 `legal_actions`，也不参与审批、Permit、Attempt、Replan 或 Probe 判断。
+- 下载报告升级为包含同一脱敏轨迹的版本化安全投影；旧 Admission 没有历史 Planner 观察时明确显示 `not_recorded`，不会伪造调用、耗时或 token 数据。
+- `python scripts/agentpact_eval.py recorded` 运行确定性、无凭据、无副作用的逐案例评估，并在 `artifacts/m12/` 写入版本化 JSON/Markdown。CI 只在主 Python 版本运行一次 recorded 模式。
+- `python scripts/agentpact_eval.py live` 是显式手工、planning-only 的信息性模式；配置不完整时失败，且不会创建 Task、数据库记录、审批、Permit、Attempt、交互会话或业务副作用。
+- 操作工作台仅为所选 Run 加载紧凑 Decision trace，并继续只依据权威详情的 `legal_actions` 渲染命令。
+
 ## 当前能力
 
 | 里程碑 | 状态 | 已交付能力 |
@@ -115,6 +127,7 @@ M11 将 M10 入口扩展为可恢复的操作工作台：
 | M9 模型安全 Planner | 已完成 | 值隔离、终止优先拒绝、单次结构修复和确定性评估边界 |
 | M10 Agent Run API | 已完成 | 受治理创建、审批/取消/Probe 命令、安全投影和操作员入口 |
 | M11 操作工作台 | 已完成 | recorded/live 服务器组合、advisory-lock 幂等、持久 provenance、租户历史和 URL 恢复 |
+| M12 评估与决策轨迹 | 已完成 | 安全 Planner 观察、非权威 Decision trace、确定性 recorded 评估和手工 planning-only live 模式 |
 
 ## 演进方向
 
@@ -140,6 +153,7 @@ $VenvPython = (Resolve-Path .venv\Scripts\python.exe).Path
 & $VenvPython -m playwright install chromium
 & $VenvPython scripts\finrpa_release.py doctor
 & $VenvPython scripts\finrpa_release.py conformance
+& $VenvPython scripts\agentpact_eval.py recorded
 & $VenvPython scripts\finrpa_release.py demo
 & $VenvPython scripts\finrpa_release.py report
 ```
@@ -153,6 +167,7 @@ VENV_PYTHON="$(pwd)/.venv/bin/python"
 "$VENV_PYTHON" -m playwright install chromium
 "$VENV_PYTHON" scripts/finrpa_release.py doctor
 "$VENV_PYTHON" scripts/finrpa_release.py conformance
+"$VENV_PYTHON" scripts/agentpact_eval.py recorded
 "$VENV_PYTHON" scripts/finrpa_release.py demo
 "$VENV_PYTHON" scripts/finrpa_release.py report
 ```

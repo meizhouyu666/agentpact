@@ -14,6 +14,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from enterprise.agent.constrained_planner import PlannerObservation
 from enterprise.agent.interactions import (
     CapabilityInputValidator,
     CapabilityRequest,
@@ -66,6 +67,7 @@ class TaskAdmissionBundle(BaseModel):
 
     schema_version: str = "phase2-task-admission-bundle-v1"
     provider_mode: Literal["recorded", "live"] = "recorded"
+    planner_observation: PlannerObservation | None = None
     admission_id: str
     task: GovernedTaskDraft
     creation_snapshot: TrustedTaskCreationSnapshot

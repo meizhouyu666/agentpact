@@ -14,7 +14,12 @@ import httpx
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 
-from enterprise.agent.constrained_planner import DeterministicPlanner, OpenAICompatiblePlanner, PlannerTransport
+from enterprise.agent.constrained_planner import (
+    DeterministicPlanner,
+    OpenAICompatiblePlanner,
+    PlannerObservation,
+    PlannerTransport,
+)
 from enterprise.agent.interactions import CapabilityRequest, CapabilityRequestKind, EntryMode
 from enterprise.auth.schemas import DepartmentRole, UserContext
 from enterprise.governance.admission import AdmissionAuditRecord, GovernedTaskDraft, TaskAdmissionBundle
@@ -713,8 +718,10 @@ class SyntheticPaymentRuntimeAdapter:
             intent_summary=f"Execute the authorized synthetic capability for intent token {intent_digest}",
         )
         provider = self._provider_factory(plan_input)
-        decision = M9PlannerEngine(provider).plan(plan_input)
-        if decision.disposition is not M9PlannerDisposition.ACCEPTED or not isinstance(decision.proposal, PlanProposal):
+        decision = M9PlannerEngine(provider, provider_mode=self._provider_mode).plan(plan_input)
+        if decision.disposition not in {M9PlannerDisposition.ACCEPTED, M9PlannerDisposition.REPAIRED} or not isinstance(
+            decision.proposal, PlanProposal
+        ):
             code = "PLANNER_PROVIDER_FAILURE" if any(item.value == "PROVIDER_FAILURE" for item in decision.codes) else "PLANNER_REJECTED"
             raise M10PlanningError(code)
         compilation = compile_m9_plan(
@@ -730,6 +737,7 @@ class SyntheticPaymentRuntimeAdapter:
             admission_id=admission_id,
             intent_digest=intent_digest,
             provider_mode=self._provider_mode,
+            planner_observation=decision.observation,
             now=now,
         )
         admission = build_m8_admission_bundle(original, compilation)
@@ -792,6 +800,7 @@ class SyntheticPaymentRuntimeAdapter:
                 admission_id=bundle.admission_id,
                 intent_digest=token,
                 provider_mode=bundle.provider_mode,
+                planner_observation=bundle.planner_observation,
                 now=bundle.request.submitted_at,
             ),
             compilation,
@@ -1024,6 +1033,7 @@ def _admission_bundle(
     admission_id: str,
     intent_digest: str,
     provider_mode: Literal["recorded", "live"],
+    planner_observation: PlannerObservation | None,
     now: datetime,
 ) -> TaskAdmissionBundle:
     grant = authority.grants.grants[0]
@@ -1076,6 +1086,7 @@ def _admission_bundle(
     )
     return TaskAdmissionBundle(
         provider_mode=provider_mode,
+        planner_observation=planner_observation,
         admission_id=admission_id,
         task=GovernedTaskDraft(
             task_id=authority.business_plan.task_id,

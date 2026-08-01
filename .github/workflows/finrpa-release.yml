@@ -29,11 +29,20 @@ jobs:
         run: python -m pip install --disable-pip-version-check -e . -r requirements-m5-demo.lock
       - name: Run canonical conformance
         run: python scripts/finrpa_release.py conformance
+      - name: Run deterministic recorded Agent evaluation
+        if: matrix.python-version == '3.11'
+        run: python scripts/agentpact_eval.py recorded
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: finrpa-conformance-${{ matrix.python-version }}
           path: artifacts/m5/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.python-version == '3.11'
+        with:
+          name: agentpact-m12-recorded-eval
+          path: artifacts/m12/*
           if-no-files-found: error
 
   synthetic-demo:

@@ -13,6 +13,7 @@ from enterprise.auth.dependencies import CurrentUser
 from .service import (
     AgentRunCommandRequest,
     AgentRunCreateRequest,
+    AgentRunDecisionTrace,
     AgentRunError,
     AgentRunPage,
     AgentRunProjection,
@@ -137,6 +138,14 @@ async def get_agent_run(run_id: str, user: CurrentUser) -> AgentRunProjection:
 async def get_agent_run_events(run_id: str, user: CurrentUser) -> tuple[AgentRunTimelineEvent, ...]:
     try:
         return await _configured_service().events(run_id, user=user)
+    except AgentRunError as exc:
+        _raise_http(exc)
+
+
+@router.get("/{run_id}/decision-trace", response_model=AgentRunDecisionTrace)
+async def get_agent_run_decision_trace(run_id: str, user: CurrentUser) -> AgentRunDecisionTrace:
+    try:
+        return await _configured_service().decision_trace(run_id, user=user)
     except AgentRunError as exc:
         _raise_http(exc)
 

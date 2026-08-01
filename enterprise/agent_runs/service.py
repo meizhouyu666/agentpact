@@ -129,12 +129,49 @@ class AgentRunTimelineEvent(BaseModel):
     reason_code: str | None = None
 
 
+DecisionTraceStageName = Literal[
+    "provider",
+    "validation",
+    "compilation",
+    "admission",
+    "approval",
+    "execution",
+    "recovery",
+]
+DecisionTraceStatus = Literal["not_recorded", "pending", "active", "completed", "blocked", "failed"]
+
+
+class AgentRunDecisionTraceStage(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    stage: DecisionTraceStageName
+    status: DecisionTraceStatus
+    reason_code: str | None = None
+    timestamp: datetime | None = None
+    duration_ms: float | None = Field(default=None, ge=0, le=3_600_000)
+    provider_calls: int | None = Field(default=None, ge=0, le=2)
+    repair_count: int | None = Field(default=None, ge=0, le=1)
+    prompt_tokens: int | None = Field(default=None, ge=0)
+    completion_tokens: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+
+
+class AgentRunDecisionTrace(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["agentpact-agent-run-decision-trace/v1"] = "agentpact-agent-run-decision-trace/v1"
+    run_id: str
+    non_authoritative: Literal[True] = True
+    stages: tuple[AgentRunDecisionTraceStage, ...] = Field(min_length=7, max_length=7)
+
+
 class AgentRunReport(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["agentpact-agent-run-report/v1"] = "agentpact-agent-run-report/v1"
+    schema_version: Literal["agentpact-agent-run-report/v2"] = "agentpact-agent-run-report/v2"
     projection: AgentRunProjection
     events: tuple[AgentRunTimelineEvent, ...]
+    decision_trace: AgentRunDecisionTrace
     report_digest: str
 
 
@@ -349,15 +386,32 @@ class AgentRunService:
                 await self._project_locked(session, locked)
                 return tuple(_timeline_event(item) for item in locked.events)
 
+    async def decision_trace(self, run_id: str, *, user: UserContext) -> AgentRunDecisionTrace:
+        async with self._session_factory() as session:
+            async with session.begin():
+                locked = await self._load_locked(session, run_id=run_id, user=user)
+                projection = await self._project_locked(session, locked)
+                return _decision_trace(locked, projection)
+
     async def report(self, run_id: str, *, user: UserContext) -> AgentRunReport:
-        projection = await self.get(run_id, user=user)
-        events = await self.events(run_id, user=user)
-        payload = {
-            "schema_version": "agentpact-agent-run-report/v1",
-            "projection": projection.model_dump(mode="json"),
-            "events": [item.model_dump(mode="json") for item in events],
-        }
-        return AgentRunReport(projection=projection, events=events, report_digest=_digest(payload))
+        async with self._session_factory() as session:
+            async with session.begin():
+                locked = await self._load_locked(session, run_id=run_id, user=user)
+                projection = await self._project_locked(session, locked)
+                events = tuple(_timeline_event(item) for item in locked.events)
+                trace = _decision_trace(locked, projection)
+                payload = {
+                    "schema_version": "agentpact-agent-run-report/v2",
+                    "projection": projection.model_dump(mode="json"),
+                    "events": [item.model_dump(mode="json") for item in events],
+                    "decision_trace": trace.model_dump(mode="json"),
+                }
+                return AgentRunReport(
+                    projection=projection,
+                    events=events,
+                    decision_trace=trace,
+                    report_digest=_digest(payload),
+                )
 
     async def approve(
         self,
@@ -1070,6 +1124,141 @@ def _timeline_event(event: PlanJournalEvent) -> AgentRunTimelineEvent:
         PlanJournalTransition.REAUTHORIZATION_REQUIRED: "REAUTHORIZATION_REQUIRED",
     }.get(event.transition)
     return AgentRunTimelineEvent(sequence=event.sequence, stage=event.transition.value, state=state, reason_code=reason)
+
+
+def _decision_trace(locked: _LockedRun, projection: AgentRunProjection) -> AgentRunDecisionTrace:
+    observation = locked.bundle.planner_observation
+    first_event = locked.events[0]
+    latest_event = locked.events[-1]
+    transitions = {item.transition for item in locked.events}
+    if observation is None:
+        provider = AgentRunDecisionTraceStage(
+            stage="provider",
+            status="not_recorded",
+            reason_code="PLANNER_OBSERVATION_NOT_RECORDED",
+        )
+        validation = AgentRunDecisionTraceStage(
+            stage="validation",
+            status="not_recorded",
+            reason_code="PLANNER_OBSERVATION_NOT_RECORDED",
+        )
+    else:
+        failed = observation.disposition == "rejected"
+        reason = observation.codes[0] if observation.codes else observation.disposition.upper()
+        usage = observation.usage
+        provider = AgentRunDecisionTraceStage(
+            stage="provider",
+            status="failed" if failed else "completed",
+            reason_code=reason,
+            duration_ms=observation.provider_duration_ms,
+            provider_calls=observation.provider_calls,
+            repair_count=observation.repair_count,
+            prompt_tokens=usage.prompt_tokens if usage else None,
+            completion_tokens=usage.completion_tokens if usage else None,
+            total_tokens=usage.total_tokens if usage else None,
+        )
+        validation = AgentRunDecisionTraceStage(
+            stage="validation",
+            status="failed" if failed else "completed",
+            reason_code=reason,
+            duration_ms=observation.duration_ms,
+            provider_calls=observation.provider_calls,
+            repair_count=observation.repair_count,
+        )
+
+    approval_status: DecisionTraceStatus = "pending"
+    approval_reason = "APPROVAL_NOT_REACHED"
+    approval_timestamp: datetime | None = None
+    if PlanJournalTransition.APPROVAL_REJECTED in transitions:
+        approval_status, approval_reason = "failed", "APPROVAL_REJECTED"
+    elif PlanJournalTransition.APPROVAL_RESUMED in transitions:
+        approval_status, approval_reason = "completed", "APPROVAL_RESUMED"
+    elif PlanJournalTransition.APPROVAL_REQUIRED in transitions:
+        approval_status, approval_reason = "active", "APPROVAL_REQUIRED"
+    approval_event = next(
+        (
+            item
+            for item in reversed(locked.events)
+            if item.transition
+            in {
+                PlanJournalTransition.APPROVAL_REQUIRED,
+                PlanJournalTransition.APPROVAL_RESUMED,
+                PlanJournalTransition.APPROVAL_REJECTED,
+            }
+        ),
+        None,
+    )
+    if approval_event is not None:
+        approval_timestamp = _as_utc(approval_event.created_at)
+
+    execution_status: DecisionTraceStatus = {
+        AgentRunState.PLANNING: "pending",
+        AgentRunState.AWAITING_APPROVAL: "pending",
+        AgentRunState.RUNNING: "active",
+        AgentRunState.UNKNOWN: "blocked",
+        AgentRunState.SUCCEEDED: "completed",
+        AgentRunState.REJECTED: "failed",
+        AgentRunState.CANCELLED: "failed",
+        AgentRunState.FAILED: "failed",
+    }[projection.state]
+    execution_reason = projection.reason_code or projection.state.value
+
+    if PlanJournalTransition.PROBE_BLOCKED not in transitions:
+        recovery_status: DecisionTraceStatus = "pending"
+        recovery_reason = "RECOVERY_NOT_REQUIRED"
+        recovery_timestamp = None
+    elif PlanJournalTransition.PROBE_RESOLVED in transitions:
+        recovery_status, recovery_reason = "completed", "PROBE_RESOLVED"
+        recovery_timestamp = next(
+            _as_utc(item.created_at)
+            for item in reversed(locked.events)
+            if item.transition is PlanJournalTransition.PROBE_RESOLVED
+        )
+    else:
+        recovery_status, recovery_reason = "blocked", "PROBE_REQUIRED"
+        recovery_timestamp = next(
+            _as_utc(item.created_at)
+            for item in reversed(locked.events)
+            if item.transition is PlanJournalTransition.PROBE_BLOCKED
+        )
+
+    return AgentRunDecisionTrace(
+        run_id=projection.run_id,
+        stages=(
+            provider,
+            validation,
+            AgentRunDecisionTraceStage(
+                stage="compilation",
+                status="completed",
+                reason_code="TRUSTED_COMPILATION_ACCEPTED",
+                timestamp=_as_utc(first_event.created_at),
+            ),
+            AgentRunDecisionTraceStage(
+                stage="admission",
+                status="completed",
+                reason_code="ADMITTED",
+                timestamp=_as_utc(first_event.created_at),
+            ),
+            AgentRunDecisionTraceStage(
+                stage="approval",
+                status=approval_status,
+                reason_code=approval_reason,
+                timestamp=approval_timestamp,
+            ),
+            AgentRunDecisionTraceStage(
+                stage="execution",
+                status=execution_status,
+                reason_code=execution_reason,
+                timestamp=_as_utc(latest_event.created_at),
+            ),
+            AgentRunDecisionTraceStage(
+                stage="recovery",
+                status=recovery_status,
+                reason_code=recovery_reason,
+                timestamp=recovery_timestamp,
+            ),
+        ),
+    )
 
 
 def _encode_cursor(created_at: datetime, run_id: str) -> str:

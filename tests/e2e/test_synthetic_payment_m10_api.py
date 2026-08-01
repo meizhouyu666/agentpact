@@ -147,6 +147,16 @@ def test_m10_recorded_api_uses_boot_driver_reobserves_permits_and_probes_once() 
                                 assert len(list((await session.scalars(select(ExecutionAttemptModel))).all())) == 0
 
                             run_id = created.json()["run_id"]
+                            initial_trace = await client.get(
+                                f"/api/v1/enterprise/agent-runs/{run_id}/decision-trace"
+                            )
+                            assert initial_trace.status_code == 200, initial_trace.text
+                            assert initial_trace.json()["non_authoritative"] is True
+                            assert "legal_actions" not in initial_trace.text
+                            initial_stages = {item["stage"]: item for item in initial_trace.json()["stages"]}
+                            assert initial_stages["provider"]["status"] == "completed"
+                            assert initial_stages["provider"]["provider_calls"] == 1
+                            assert initial_stages["approval"]["status"] == "active"
                             restart_application = FastAPI()
                             mount_agent_run_api(
                                 restart_application,
@@ -177,6 +187,13 @@ def test_m10_recorded_api_uses_boot_driver_reobserves_permits_and_probes_once() 
                             assert approved.status_code == 200, approved.text
                             assert approved.json()["state"] == "UNKNOWN"
                             assert approved.json()["legal_actions"] == ["probe"]
+                            unknown_trace = await client.get(
+                                f"/api/v1/enterprise/agent-runs/{run_id}/decision-trace"
+                            )
+                            unknown_stages = {item["stage"]: item for item in unknown_trace.json()["stages"]}
+                            assert unknown_stages["approval"]["status"] == "completed"
+                            assert unknown_stages["execution"]["status"] == "blocked"
+                            assert unknown_stages["recovery"]["status"] == "blocked"
 
                             probed = await client.post(
                                 f"/api/v1/enterprise/agent-runs/{run_id}/probe",
@@ -189,10 +206,20 @@ def test_m10_recorded_api_uses_boot_driver_reobserves_permits_and_probes_once() 
                                 json={"operation_key": "m10-api-probe-001"},
                             )
                             assert repeated_probe.json() == probed.json()
+                            completed_trace = await client.get(
+                                f"/api/v1/enterprise/agent-runs/{run_id}/decision-trace"
+                            )
+                            completed_stages = {
+                                item["stage"]: item for item in completed_trace.json()["stages"]
+                            }
+                            assert completed_stages["execution"]["status"] == "completed"
+                            assert completed_stages["recovery"]["status"] == "completed"
 
                             report = await client.get(f"/api/v1/enterprise/agent-runs/{run_id}/report")
                             assert report.status_code == 200, report.text
+                            assert report.json()["schema_version"] == "agentpact-agent-run-report/v2"
                             assert report.json()["projection"]["provider_mode"] == "recorded"
+                            assert report.json()["decision_trace"] == completed_trace.json()
                             assert all(
                                 value not in json.dumps(report.json(), sort_keys=True)
                                 for value in INPUTS.values()

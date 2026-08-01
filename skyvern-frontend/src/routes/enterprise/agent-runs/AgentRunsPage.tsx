@@ -51,7 +51,45 @@ type TimelineEvent = {
   reason_code?: string | null;
 };
 
-const TERMINAL = new Set<RunState>(["SUCCEEDED", "REJECTED", "CANCELLED", "FAILED"]);
+type DecisionTraceStage = {
+  stage:
+    | "provider"
+    | "validation"
+    | "compilation"
+    | "admission"
+    | "approval"
+    | "execution"
+    | "recovery";
+  status:
+    | "not_recorded"
+    | "pending"
+    | "active"
+    | "completed"
+    | "blocked"
+    | "failed";
+  reason_code?: string | null;
+  timestamp?: string | null;
+  duration_ms?: number | null;
+  provider_calls?: number | null;
+  repair_count?: number | null;
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  total_tokens?: number | null;
+};
+
+type DecisionTrace = {
+  schema_version: "agentpact-agent-run-decision-trace/v1";
+  run_id: string;
+  non_authoritative: true;
+  stages: DecisionTraceStage[];
+};
+
+const TERMINAL = new Set<RunState>([
+  "SUCCEEDED",
+  "REJECTED",
+  "CANCELLED",
+  "FAILED",
+]);
 
 function operationKey(action: string): string {
   const suffix = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}`;
@@ -70,7 +108,11 @@ async function redactedError(response: Response): Promise<string> {
 function replaceRunQuery(runId: string) {
   const url = new URL(window.location.href);
   url.searchParams.set("run", runId);
-  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  window.history.replaceState(
+    null,
+    "",
+    `${url.pathname}${url.search}${url.hash}`,
+  );
 }
 
 export function AgentRunsPage() {
@@ -81,6 +123,9 @@ export function AgentRunsPage() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [run, setRun] = useState<AgentRun | null>(null);
   const [events, setEvents] = useState<TimelineEvent[]>([]);
+  const [decisionTrace, setDecisionTrace] = useState<DecisionTrace | null>(
+    null,
+  );
   const [errorCode, setErrorCode] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -88,32 +133,51 @@ export function AgentRunsPage() {
     setSelectedRunId(runId);
     setRun(null);
     setEvents([]);
+    setDecisionTrace(null);
     replaceRunQuery(runId);
   }, []);
 
   const loadRun = useCallback(async (runId: string) => {
-    const [runResponse, eventsResponse] = await Promise.all([
+    const [runResponse, eventsResponse, traceResponse] = await Promise.all([
       authFetch(`/api/v1/enterprise/agent-runs/${runId}`),
       authFetch(`/api/v1/enterprise/agent-runs/${runId}/events`),
+      authFetch(`/api/v1/enterprise/agent-runs/${runId}/decision-trace`),
     ]);
-    if (!runResponse.ok || !eventsResponse.ok) {
-      throw new Error(await redactedError(!runResponse.ok ? runResponse : eventsResponse));
+    if (!runResponse.ok || !eventsResponse.ok || !traceResponse.ok) {
+      const failed = !runResponse.ok
+        ? runResponse
+        : !eventsResponse.ok
+          ? eventsResponse
+          : traceResponse;
+      throw new Error(await redactedError(failed));
     }
     const nextRun = (await runResponse.json()) as AgentRun;
     setRun(nextRun);
     setEvents((await eventsResponse.json()) as TimelineEvent[]);
+    setDecisionTrace((await traceResponse.json()) as DecisionTrace);
     return nextRun;
   }, []);
 
-  const loadHistory = useCallback(async (preferredRunId?: string) => {
-    const response = await authFetch("/api/v1/enterprise/agent-runs/?limit=20");
-    if (!response.ok) throw new Error(await redactedError(response));
-    const page = (await response.json()) as AgentRunPage;
-    setHistory(page.items);
-    const requested = preferredRunId ?? new URLSearchParams(window.location.search).get("run") ?? undefined;
-    const visible = requested && page.items.some((item) => item.run_id === requested) ? requested : page.items[0]?.run_id;
-    if (visible) selectRun(visible);
-  }, [selectRun]);
+  const loadHistory = useCallback(
+    async (preferredRunId?: string) => {
+      const response = await authFetch(
+        "/api/v1/enterprise/agent-runs/?limit=20",
+      );
+      if (!response.ok) throw new Error(await redactedError(response));
+      const page = (await response.json()) as AgentRunPage;
+      setHistory(page.items);
+      const requested =
+        preferredRunId ??
+        new URLSearchParams(window.location.search).get("run") ??
+        undefined;
+      const visible =
+        requested && page.items.some((item) => item.run_id === requested)
+          ? requested
+          : page.items[0]?.run_id;
+      if (visible) selectRun(visible);
+    },
+    [selectRun],
+  );
 
   useEffect(() => {
     void loadHistory().catch((error: Error) => setErrorCode(error.message));
@@ -121,7 +185,9 @@ export function AgentRunsPage() {
 
   useEffect(() => {
     if (!selectedRunId) return;
-    void loadRun(selectedRunId).catch((error: Error) => setErrorCode(error.message));
+    void loadRun(selectedRunId).catch((error: Error) =>
+      setErrorCode(error.message),
+    );
   }, [loadRun, selectedRunId]);
 
   useEffect(() => {
@@ -132,7 +198,9 @@ export function AgentRunsPage() {
       timer = undefined;
       if (document.visibilityState === "visible") {
         timer = window.setInterval(() => {
-          void loadRun(run.run_id).catch((error: Error) => setErrorCode(error.message));
+          void loadRun(run.run_id).catch((error: Error) =>
+            setErrorCode(error.message),
+          );
         }, 2000);
       }
     };
@@ -156,7 +224,11 @@ export function AgentRunsPage() {
       const response = await authFetch("/api/v1/enterprise/agent-runs/", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ request_id: requestId, intent, business_inputs: parsed }),
+        body: JSON.stringify({
+          request_id: requestId,
+          intent,
+          business_inputs: parsed,
+        }),
       });
       if (!response.ok) throw new Error(await redactedError(response));
       const created = (await response.json()) as AgentRun;
@@ -176,11 +248,14 @@ export function AgentRunsPage() {
     setBusy(true);
     setErrorCode(null);
     try {
-      const response = await authFetch(`/api/v1/enterprise/agent-runs/${run.run_id}/${action}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ operation_key: operationKey(action) }),
-      });
+      const response = await authFetch(
+        `/api/v1/enterprise/agent-runs/${run.run_id}/${action}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ operation_key: operationKey(action) }),
+        },
+      );
       if (!response.ok) throw new Error(await redactedError(response));
       await loadRun(run.run_id);
       await loadHistory(run.run_id);
@@ -204,7 +279,11 @@ export function AgentRunsPage() {
             disabled={busy}
             title="Refresh run history"
             type="button"
-            onClick={() => void loadHistory(selectedRunId ?? undefined).catch((error: Error) => setErrorCode(error.message))}
+            onClick={() =>
+              void loadHistory(selectedRunId ?? undefined).catch(
+                (error: Error) => setErrorCode(error.message),
+              )
+            }
           >
             <ReloadIcon className="size-4" />
           </button>
@@ -212,7 +291,10 @@ export function AgentRunsPage() {
       </header>
 
       {errorCode && (
-        <p role="alert" className="border-b border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700 sm:px-6">
+        <p
+          role="alert"
+          className="border-b border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700 sm:px-6"
+        >
           {errorCode}
         </p>
       )}
@@ -222,7 +304,10 @@ export function AgentRunsPage() {
           <div className="border-b border-slate-200 px-4 py-3 text-xs font-semibold uppercase text-slate-500">
             Run history
           </div>
-          <ol aria-label="Run history" className="max-h-64 overflow-y-auto md:max-h-[calc(100vh-7rem)]">
+          <ol
+            aria-label="Run history"
+            className="max-h-64 overflow-y-auto md:max-h-[calc(100vh-7rem)]"
+          >
             {history.map((item) => (
               <li key={item.run_id}>
                 <button
@@ -232,7 +317,9 @@ export function AgentRunsPage() {
                   type="button"
                   onClick={() => selectRun(item.run_id)}
                 >
-                  <span className="block truncate text-sm font-medium">{item.run_id}</span>
+                  <span className="block truncate text-sm font-medium">
+                    {item.run_id}
+                  </span>
                   <span className="mt-1 flex items-center justify-between gap-2 text-xs text-slate-500">
                     <span>{item.state}</span>
                     <span>{item.provider_mode}</span>
@@ -245,7 +332,10 @@ export function AgentRunsPage() {
 
         <main className="min-w-0">
           <section className="border-b border-slate-200 bg-white px-4 py-4 sm:px-6">
-            <form className="grid gap-3 lg:grid-cols-[12rem_minmax(14rem,1fr)_minmax(14rem,1fr)_auto]" onSubmit={submit}>
+            <form
+              className="grid gap-3 lg:grid-cols-[12rem_minmax(14rem,1fr)_minmax(14rem,1fr)_auto]"
+              onSubmit={submit}
+            >
               <label className="grid gap-1 text-xs font-medium text-slate-600">
                 Request ID
                 <input
@@ -276,7 +366,10 @@ export function AgentRunsPage() {
                   onChange={(event) => setBusinessInputs(event.target.value)}
                 />
               </label>
-              <button className="self-end rounded bg-blue-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40" disabled={busy}>
+              <button
+                className="self-end rounded bg-blue-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40"
+                disabled={busy}
+              >
                 Create run
               </button>
             </form>
@@ -287,14 +380,29 @@ export function AgentRunsPage() {
               <section className="min-w-0 border-b border-slate-200 px-4 py-5 sm:px-6 xl:border-b-0 xl:border-r">
                 <div className="flex flex-wrap items-start justify-between gap-4">
                   <div>
-                    <p className="text-xs font-semibold uppercase text-slate-500">Current state</p>
-                    <h2 className="mt-1 text-xl font-semibold" data-testid="run-state">{run.state}</h2>
-                    <p className="mt-1 text-sm text-slate-600">
-                      <span className="font-medium">{run.pack_display_name}</span>
-                      {` (${run.pack_id} v${run.pack_version})`}
-                      <span className="ml-2 rounded border border-slate-300 px-2 py-0.5 text-xs uppercase">{run.provider_mode}</span>
+                    <p className="text-xs font-semibold uppercase text-slate-500">
+                      Current state
                     </p>
-                    {run.reason_code && <p className="mt-1 text-sm text-slate-500">{run.reason_code}</p>}
+                    <h2
+                      className="mt-1 text-xl font-semibold"
+                      data-testid="run-state"
+                    >
+                      {run.state}
+                    </h2>
+                    <p className="mt-1 text-sm text-slate-600">
+                      <span className="font-medium">
+                        {run.pack_display_name}
+                      </span>
+                      {` (${run.pack_id} v${run.pack_version})`}
+                      <span className="ml-2 rounded border border-slate-300 px-2 py-0.5 text-xs uppercase">
+                        {run.provider_mode}
+                      </span>
+                    </p>
+                    {run.reason_code && (
+                      <p className="mt-1 text-sm text-slate-500">
+                        {run.reason_code}
+                      </p>
+                    )}
                   </div>
                   <div className="flex flex-wrap gap-2">
                     {legalActions.map((action) => (
@@ -310,11 +418,21 @@ export function AgentRunsPage() {
                     ))}
                   </div>
                 </div>
-                <ol className="mt-6 divide-y divide-slate-200 border-y border-slate-200" aria-label="Governed plan">
+                <ol
+                  className="mt-6 divide-y divide-slate-200 border-y border-slate-200"
+                  aria-label="Governed plan"
+                >
                   {run.plan.map((step) => (
-                    <li key={step.sequence} className="flex items-center justify-between gap-3 py-3 text-sm">
-                      <span>{step.sequence}. {step.role}</span>
-                      <span className="font-medium uppercase text-slate-500">{step.state}</span>
+                    <li
+                      key={step.sequence}
+                      className="flex items-center justify-between gap-3 py-3 text-sm"
+                    >
+                      <span>
+                        {step.sequence}. {step.role}
+                      </span>
+                      <span className="font-medium uppercase text-slate-500">
+                        {step.state}
+                      </span>
                     </li>
                   ))}
                 </ol>
@@ -342,6 +460,55 @@ export function AgentRunsPage() {
                     </li>
                   ))}
                 </ol>
+                {decisionTrace && (
+                  <div className="mt-6 border-t border-slate-200 pt-4">
+                    <h2 className="text-sm font-semibold">Decision trace</h2>
+                    <p className="mt-1 text-xs text-slate-500">
+                      Non-authoritative evidence; actions come only from
+                      legal_actions.
+                    </p>
+                    <ol className="mt-3 space-y-2" aria-label="Decision trace">
+                      {decisionTrace.stages.map((stage) => (
+                        <li
+                          key={stage.stage}
+                          className="rounded border border-slate-200 px-3 py-2 text-xs text-slate-700"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-medium capitalize">
+                              {stage.stage}
+                            </span>
+                            <span className="uppercase text-slate-500">
+                              {stage.status}
+                            </span>
+                          </div>
+                          {stage.reason_code && (
+                            <div className="mt-1 text-slate-500">
+                              {stage.reason_code}
+                            </div>
+                          )}
+                          {(stage.provider_calls != null ||
+                            stage.repair_count != null) && (
+                            <div className="mt-1 text-slate-500">
+                              Calls {stage.provider_calls ?? 0} · Repairs{" "}
+                              {stage.repair_count ?? 0}
+                            </div>
+                          )}
+                          {(stage.duration_ms != null ||
+                            stage.total_tokens != null) && (
+                            <div className="mt-1 text-slate-500">
+                              {stage.duration_ms != null
+                                ? `${stage.duration_ms.toFixed(1)} ms`
+                                : "Timing not recorded"}
+                              {stage.total_tokens != null
+                                ? ` · ${stage.total_tokens} tokens`
+                                : ""}
+                            </div>
+                          )}
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+                )}
               </section>
             </div>
           )}

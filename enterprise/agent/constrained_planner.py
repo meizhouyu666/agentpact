@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Mapping
-from typing import Any, Protocol
+from collections.abc import Callable, Mapping
+from typing import Any, Literal, Protocol
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -46,6 +46,30 @@ class PlannerOutputError(ValueError):
 
 class PlannerProviderError(RuntimeError):
     pass
+
+
+class PlannerUsage(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    prompt_tokens: int | None = Field(default=None, ge=0)
+    completion_tokens: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+
+
+class PlannerObservation(BaseModel):
+    """Closed trusted-code observation; never contains provider or business payloads."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["agentpact.planner-observation/v1"] = "agentpact.planner-observation/v1"
+    provider_mode: Literal["recorded", "live"]
+    disposition: Literal["accepted", "repaired", "rejected"]
+    codes: tuple[str, ...] = ()
+    provider_calls: int = Field(ge=0, le=2)
+    repair_count: int = Field(ge=0, le=1)
+    duration_ms: float | None = Field(default=None, ge=0, le=3_600_000)
+    provider_duration_ms: float | None = Field(default=None, ge=0, le=3_600_000)
+    usage: PlannerUsage | None = None
 
 
 class ConstrainedPlanner(Protocol):
@@ -122,6 +146,7 @@ class OpenAICompatiblePlanner:
         response_model: type[BaseModel],
         schema_name: str,
         system_prompt: str,
+        usage_callback: Callable[[PlannerUsage], None] | None = None,
     ) -> object:
         """Invoke the same injected strict-JSON transport for a model-safe closed schema."""
 
@@ -151,6 +176,9 @@ class OpenAICompatiblePlanner:
         }
         try:
             response = self._transport(endpoint=self._endpoint, api_key=api_key, payload=payload)
+            usage = _extract_openai_usage(response)
+            if usage is not None and usage_callback is not None:
+                usage_callback(usage)
             return _extract_openai_content(response)
         except PlannerProviderError:
             raise
@@ -217,3 +245,26 @@ def _extract_openai_content(response: object) -> object:
         return content
     except (KeyError, IndexError, TypeError) as exc:
         raise PlannerProviderError("OpenAI-compatible Planner response was malformed") from exc
+
+
+def _extract_openai_usage(response: object) -> PlannerUsage | None:
+    if not isinstance(response, Mapping) or "usage" not in response:
+        return None
+    usage = response["usage"]
+    if not isinstance(usage, Mapping):
+        raise PlannerProviderError("OpenAI-compatible Planner usage was malformed")
+
+    def optional_count(*names: str) -> int | None:
+        value = next((usage[name] for name in names if name in usage), None)
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise PlannerProviderError("OpenAI-compatible Planner usage was malformed")
+        return value
+
+    parsed = PlannerUsage(
+        prompt_tokens=optional_count("prompt_tokens", "input_tokens"),
+        completion_tokens=optional_count("completion_tokens", "output_tokens"),
+        total_tokens=optional_count("total_tokens"),
+    )
+    return parsed if any(value is not None for value in parsed.model_dump().values()) else None

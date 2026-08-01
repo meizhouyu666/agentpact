@@ -1,0 +1,16 @@
+[
+  {
+    "case_id": "live-model-safe-plan",
+    "kind": "plan",
+    "expected_disposition": "accepted",
+    "expected_codes": [],
+    "metric_labels": ["plan_schema_validity_rate", "capability_selection_accuracy", "authority_compliance_rate"]
+  },
+  {
+    "case_id": "live-model-safe-replan",
+    "kind": "replan",
+    "expected_disposition": "accepted",
+    "expected_codes": [],
+    "metric_labels": ["legal_replan_acceptance_rate", "authority_compliance_rate"]
+  }
+]
