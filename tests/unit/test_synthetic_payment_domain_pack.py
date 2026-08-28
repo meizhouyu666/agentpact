@@ -16,7 +16,6 @@ from enterprise.domains.synthetic_payment import (
 from enterprise.domains.synthetic_payment.constants import CAPABILITY_ID
 from enterprise.governance.domain_packs import DomainPackKind, DomainPackRegistry
 
-
 NOW = datetime(2026, 7, 23, 8, 0, tzinfo=timezone.utc)
 
 
@@ -201,8 +200,15 @@ def test_authorization_is_revalidated_before_execution():
 
 def test_domain_pack_has_no_browser_or_skyvern_imports():
     root = Path(__file__).parents[2] / "enterprise" / "domains" / "synthetic_payment"
+    # M7+ runtime bridges are the one authorized boundary that adapts Skyvern
+    # into the governed kernel (NativeSkyvernBinding and the M10 driver).
+    # Every other module — including all offline contract modules — must stay
+    # free of browser and Skyvern imports.
+    authorized_runtime_bridges = {"m7_runtime.py", "m8_runtime.py", "m10_runtime.py"}
     imported_roots = set()
     for source_path in root.glob("*.py"):
+        if source_path.name in authorized_runtime_bridges:
+            continue
         tree = ast.parse(source_path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):

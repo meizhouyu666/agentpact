@@ -1,4 +1,4 @@
-"""Enterprise planning contracts and unconnected orchestration prototypes."""
+"""Planning contracts used by the governed browser-agent runtime."""
 
 from .interactions import (
     CapabilityInputValidator,

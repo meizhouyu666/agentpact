@@ -199,11 +199,11 @@ def test_release_readme_presents_product_and_roadmap_before_setup() -> None:
     assert "不包含部署" in readme
     headings = (
         "## 为什么需要 AgentPact",
-        "## 工作方式",
-        "## 核心能力",
+        "## 架构",
+        "## 核心设计",
         "## 当前能力",
-        "## 未来蓝图",
-        "## 运行合成验证",
+        "## 演进方向",
+        "## 安装与运行合成验证",
     )
     assert all(heading in readme for heading in headings)
     assert [readme.index(heading) for heading in headings] == sorted(readme.index(heading) for heading in headings)

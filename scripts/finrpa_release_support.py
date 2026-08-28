@@ -24,7 +24,6 @@ LATEST_MARKDOWN = "latest.md"
 CONFORMANCE_TESTS = (
     "tests/unit/test_pack_sdk_static_conformance.py",
     "tests/unit/test_synthetic_payment_pack_conformance.py",
-    "tests/unit/test_payment_operations_contract.py",
 )
 DEMO_TEST = "tests/e2e/test_synthetic_payment_governed_browser.py"
 REQUIRED_DEMO_PACKAGES = ("alembic", "asyncpg", "fastapi", "playwright", "pytest", "sqlalchemy", "uvicorn")

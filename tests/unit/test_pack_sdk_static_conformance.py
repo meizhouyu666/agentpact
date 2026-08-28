@@ -24,14 +24,18 @@ NEW_MODULES = {
     ROOT / "enterprise" / "governance" / "pack_conformance.py",
 }
 # M6 is the first approved runtime bridge that consumes the offline
-# conformance result. Keep these two adapters explicit so the static guard
+# conformance result. Keep these adapters explicit so the static guard
 # still rejects accidental imports everywhere else in enterprise/ and skyvern/.
 AUTHORIZED_RUNTIME_CONSUMERS = {
     ROOT / "enterprise" / "domains" / "synthetic_payment" / "m6_runtime.py",
+    ROOT / "enterprise" / "domains" / "stripe_payment" / "m6_runtime.py",
     ROOT / "enterprise" / "governance" / "domain_pack_installations.py",
 }
 SYNTHETIC_REFERENCE_ADAPTER = (
     ROOT / "enterprise" / "domains" / "synthetic_payment" / "sdk_manifest.py"
+)
+STRIPE_REFERENCE_ADAPTER = (
+    ROOT / "enterprise" / "domains" / "stripe_payment" / "sdk_manifest.py"
 )
 
 
@@ -243,6 +247,7 @@ def test_enterprise_and_skyvern_do_not_import_the_new_offline_modules():
                 path in NEW_MODULES
                 or path in AUTHORIZED_RUNTIME_CONSUMERS
                 or path == SYNTHETIC_REFERENCE_ADAPTER
+                or path == STRIPE_REFERENCE_ADAPTER
             ):
                 continue
             violations.extend(

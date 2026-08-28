@@ -7,7 +7,7 @@
 
 当前项目已经完成了 Phase 2 的治理底座：`TaskContract`、`ActionIntent`、`PolicyDecision`、`ExecutionPermit`、`ExecutionAttempt`、`PendingAction`、审批持久化、审批后重新感知恢复、以及 `audit` 模式的 Action 候选记录。
 
-Skyvern 仍是唯一浏览器执行器：它负责页面感知、页面内决策、Playwright 操作和页面级重试。`enterprise/agent` 中的 Planner / Executor / Coordinator 目前是未接入主链的原型，不能作为第二套浏览器执行循环。
+Skyvern 仍是唯一浏览器执行器：它负责页面感知、页面内决策、Playwright 操作和页面级重试。仓库曾有一组未接入主链的 Planner / Executor / Coordinator 原型，现已移除；当前只保留受约束的规划契约和 Work Order 边界，不能形成第二套浏览器执行循环。
 
 下一阶段的明确推荐是：
 

@@ -283,11 +283,10 @@ business-owner inputs and an unresolved-result path.
 
 #### A.1 Contract-freeze boundary
 
-This package freezes the shape of a future Payment Operations Pack, not its
-production values. The provisional design namespace is `payment.operations`;
-it is not an installed Pack ID, does not make a Pack production-eligible, and
-must not appear in a live Capability Registry before a separately recorded
-approval.
+This section freezes the shape of a future external Domain Pack, not its
+production values. No domain-specific Pack namespace is installed in this
+repository; any future Pack ID must not appear in a live Capability Registry
+before a separately recorded approval.
 
 The current offline `DomainPackManifest`, `CapabilityDefinition`,
 `BusinessSemanticResolver`, and `BusinessResultProbe` interfaces are reference
@@ -695,7 +694,7 @@ replace the current resolver, issue a live Grant, or enable enforcement.
 
 ### C. Planning and interaction contract
 
-The current free-form Planner and the separate Coordinator/Executor prototype
+The former free-form Planner and separate Coordinator/Executor prototype
 are not candidates for direct connection to governed execution. The target
 Planner produces a proposal over an active Grant projection; it never creates
 browser subtasks, selectors, Playwright calls, permissions, or a second
@@ -842,7 +841,7 @@ Package C is reviewable only when:
    confirmation are represented as distinct records;
 5. recovery/Replan tests prove stale Plans, confirmations, approvals, Work
    Orders, Permits, and Actions cannot be reused;
-6. the Planner/Coordinator/Executor prototypes cannot become a second browser
+6. the removed free-form orchestration prototypes cannot become a second browser
    executor or bypass the Package D admission path;
 7. duplicate submission, timeout, stale response, denial, pause, resume, and
    UNKNOWN propagate consistently through UI/chat/API/Harness records without
@@ -1567,9 +1566,9 @@ actually occurs.
 
 Only after the named review resolves Q10 and all safety dependencies for an
 external Pack or runtime scope may this document status change to Approved. As
-of the date at the top of this document, the narrow interface slices and the
-separately recorded source-free `payment.operations` Contract Catalog skeleton
-are authorized. The production-owner record remains unresolved. The status
-therefore remains **Draft / Discussion**, the runtime remains off/audit as
-documented, and no Installation, external data access, rehearsal, deployment,
-migration, state-changing capability, or enforce slice is authorized.
+of the date at the top of this document, only the narrow framework interface
+slices are authorized. The production-owner record remains unresolved. The
+status therefore remains **Draft / Discussion**, the runtime remains off/audit
+as documented, and no Installation, external data access, rehearsal,
+deployment, migration, state-changing capability, or enforce slice is
+authorized.

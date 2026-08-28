@@ -1,10 +1,11 @@
 # AgentPact
-
 > Governed Browser-Agent Harness, Domain Pack SDK & Conformance Kit
+
+默认离线验证仅使用合成数据；显式 Stripe smoke 使用 test-mode 数据，不面向生产环境，也不包含部署。
 
 AgentPact 是一个面向高风险浏览器任务的 Agentic RPA 执行与恢复框架。它关注的不只是 Agent 能否完成任务，还包括：Agent 是否有权执行、外部副作用是否经过确定性授权、结果不确定时能否安全停止，以及如何通过独立证据确认真实业务状态。
 
-项目基于 [Skyvern](https://github.com/Skyvern-AI/skyvern) 的浏览器 Agent Loop 构建，在模型决策与 Playwright 副作用之间加入类型化领域契约、确定性授权、一次性执行许可、持久化尝试状态和分级恢复机制。当前实现仅面向 `synthetic.payment` 合成场景，不是生产系统。
+项目基于 [Skyvern](https://github.com/Skyvern-AI/skyvern) 的浏览器 Agent Loop 构建，在模型决策与 Playwright 副作用之间加入类型化领域契约、确定性授权、一次性执行许可、持久化尝试状态和分级恢复机制。当前包含 `synthetic.payment` 离线参考路径，以及显式手工触发的 `stripe.payment` Stripe test-mode hosted Checkout 路径；两者都不是生产系统，不包含部署。
 
 ## 为什么需要 AgentPact
 
@@ -51,9 +52,21 @@ flowchart LR
 
 ### Domain Pack SDK 与 Conformance Kit
 
-Domain Pack SDK 使用版本化、类型化契约描述 Agent 可调用能力、业务事实、效果分类、状态机、证据要求和 Result Probe。离线 Contract Catalog 与活动运行时注册严格隔离；运行时代码不能把离线 SDK 清单当作动态执行入口。
+Domain Pack SDK 使用版本化、类型化契约描述 Agent 可调用能力、业务事实、效果分类、状态机、证据要求和 Result Probe。离线 Contract Catalog 与活动运行时注册（Active Registry）严格隔离；运行时代码不能把离线 SDK 清单当作动态执行入口。
 
-Conformance Kit 使用确定性检查验证 Pack 来源、所有者、版本、Capability、证据和安全语义。当前只有 `synthetic.payment` 参考 Pack 通过这条边界。
+Conformance Kit 使用确定性检查验证 Pack 来源、所有者、版本、Capability、证据和安全语义。`synthetic.payment` 是离线参考 Pack；`stripe.payment` 另有真实 test-mode API Probe 和 hosted Checkout adapter，但仍不是生产安装。`DomainPackInstallation` 与 Active Registry 仍是后续接入边界。
+
+### Stripe test-mode hosted Checkout
+`app.py`/`store.py` 是仅供 recorded 的自建 loopback checkout；`live_browser.py` 才会调用 Stripe API、访问真实
+`https://checkout.stripe.com/c/...`、使用 4242 测试卡，并由独立 `StripeApiResultProbe` GET PaymentIntent。
+缺少 `STRIPE_SECRET_KEY=sk_test_*`、认证失败、未知页面或 Probe 不确定时均 fail closed；`UNKNOWN` 不会重放。
+该 hosted flow 只可由显式 smoke 命令触发，尚未接入 M10 的持久 Attempt/Permit runtime：
+
+```powershell
+$env:STRIPE_SECRET_KEY = "sk_test_..."
+& .venv\Scripts\python.exe scripts\stripe_live_smoke.py --hosted-checkout
+```
+默认测试、recorded E2E 和 conformance 不联网，也不能伪造 live E2E 通过。
 
 ### 模型安全的受约束 Planner
 
@@ -116,22 +129,22 @@ M12 在既有 M9-M11 治理链上增加只读证据面，不引入新的执行�
 
 | 里程碑 | 状态 | 已交付能力 |
 |---|---|---|
-| M1 契约边界 | 已完成 | 不可变离线 Contract Catalog；未安装 Pack 默认不可执行 |
-| M2 Pack SDK | 已完成 | 类型化契约、效果、证据、版本规则与确定性 Conformance Kit |
-| M3 参考 Pack | 已完成 | `synthetic.payment` 参考实现和有效/无效 Conformance 夹具 |
-| M4 治理 E2E | 已完成 | Chromium 副作用、持久化 Attempt、`UNKNOWN`、禁止重放与独立 Probe |
-| M5 开发者体验 | 已完成 | 跨平台 CLI、版本锁定、机器可读报告和发布前检查入口 |
-| M6 受约束 Runtime | 已完成 | 安装、身份、租户/RBAC、CapabilityGrant 投影和可信编译 |
-| M7 原生 Agent 闭环 | 已完成 | ForgeAgent/Chromium、原生 Task/Step、Permit/Attempt 和 Probe 关联 |
-| M8 顺序 Agent Loop | 已完成 | 多步骤计划、不可变完成前缀、有界后缀 Replan 和持久 Journal |
-| M9 模型安全 Planner | 已完成 | 值隔离、终止优先拒绝、单次结构修复和确定性评估边界 |
-| M10 Agent Run API | 已完成 | 受治理创建、审批/取消/Probe 命令、安全投影和操作员入口 |
-| M11 操作工作台 | 已完成 | recorded/live 服务器组合、advisory-lock 幂等、持久 provenance、租户历史和 URL 恢复 |
-| M12 评估与决策轨迹 | 已完成 | 安全 Planner 观察、非权威 Decision trace、确定性 recorded 评估和手工 planning-only live 模式 |
+| M1 契约边界 | Offline | 不可变离线 Contract Catalog；未安装 Pack 默认不可执行 |
+| M2 Pack SDK | Offline | 类型化契约、效果、证据、版本规则与确定性 Conformance Kit |
+| M3 参考 Pack | Offline | `synthetic.payment` 参考实现和有效/无效 Conformance 夹具 |
+| M4 治理 E2E | Offline | loopback Chromium、持久化 Attempt、`UNKNOWN`、禁止重放与独立 recorded Probe |
+| M5 开发者体验 | Offline | 跨平台 CLI、版本锁定、机器可读报告和发布前检查入口 |
+| M6 受约束 Runtime | Interface-only | 安装、身份、租户/RBAC、CapabilityGrant 投影和可信编译接口 |
+| M7 原生 Agent 闭环 | Interface-only | ForgeAgent/Chromium、原生 Task/Step、Permit/Attempt 和 Probe 关联接口 |
+| M8 顺序 Agent Loop | Interface-only | 多步骤计划、不可变完成前缀、有界后缀 Replan 和持久 Journal 接口 |
+| M9 模型安全 Planner | Offline | 值隔离、终止优先拒绝、单次结构修复和确定性评估边界 |
+| M10 Agent Run API | Active runtime | recorded 默认适配器；Stripe hosted Checkout 仍是显式 smoke，未接入 M10 governed runtime |
+| M11 操作工作台 | Interface-only | recorded/live 服务器组合和安全投影接口；不打开生产 enforce |
+| M12 评估与决策轨迹 | Offline | 安全 Planner 观察、非权威 Decision trace 和确定性 recorded 评估 |
 
 ## 演进方向
 
-以下内容是后续工程方向，不表示当前已经实现或具备生产可用性：
+以下内容是演进方向，不代表当前已经实现或具备生产可用性：
 
 - 将合成参考 Runtime 的接口与生命周期进一步抽象，同时保持 Governance Kernel 位于所有浏览器副作用之前。
 - 补齐真实 Domain Pack 安装、升级、失效、连接器和权威业务数据源接入流程。
@@ -145,7 +158,6 @@ M12 在既有 M9-M11 治理链上增加只读证据面，不引入新的执行�
 支持 Python 3.11、3.12 和 3.13。PostgreSQL 14+ 需要在 `PATH` 中提供 `initdb`、`pg_ctl`、`createdb` 和 `pg_isready`。以下命令均在仓库根目录执行，并使用虚拟环境中的 Python；统一入口为 `scripts/finrpa_release.py`。
 
 ### Windows PowerShell
-
 ```powershell
 py -3.11 -m venv .venv
 $VenvPython = (Resolve-Path .venv\Scripts\python.exe).Path
@@ -157,9 +169,7 @@ $VenvPython = (Resolve-Path .venv\Scripts\python.exe).Path
 & $VenvPython scripts\finrpa_release.py demo
 & $VenvPython scripts\finrpa_release.py report
 ```
-
 ### Linux/WSL
-
 ```bash
 python3.11 -m venv .venv
 VENV_PYTHON="$(pwd)/.venv/bin/python"
@@ -171,7 +181,6 @@ VENV_PYTHON="$(pwd)/.venv/bin/python"
 "$VENV_PYTHON" scripts/finrpa_release.py demo
 "$VENV_PYTHON" scripts/finrpa_release.py report
 ```
-
 macOS 仅提供尽力支持，不作为发布门禁。自动发现不可用时，可将 `FINRPA_POSTGRES_BIN` 指向 PostgreSQL 二进制目录，或将 `FINRPA_CHROMIUM_EXECUTABLE` 指向已安装的 Chromium 可执行文件。这些配置项只接受可执行路径，不用于传递凭据。
 
 命令成功时返回 `0`；缺少前置条件、条件不安全或证据无效时返回 `2`；`conformance` 或 `demo` 检查失败时返回 `3`。生成的 `finrpa.release-report/v1` JSON/Markdown 证据写入已忽略的 `artifacts/m5/` 目录。

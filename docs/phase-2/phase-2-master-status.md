@@ -1,7 +1,7 @@
 # AgentPact Phase 2 Master Status
 
 > Status: authoritative working status
-> Updated: 2026-07-29
+> Updated: 2026-08-28
 > Scope: Phase 2 governance foundation, audit hardening, and the controlled path to future enforce
 
 This document is the single operational entry point for Phase 2 work. Read it
@@ -34,8 +34,8 @@ forbidden:
 - enabling approval-recovery execution or a browser retry driven by Phase 2;
 - treating a synthetic policy outcome as a live authorization decision.
 
-Skyvern remains the sole browser executor. Planner, Coordinator, and domain
-logic must never become a second browser automation loop.
+Skyvern remains the sole browser executor. Constrained planning contracts and
+domain logic must never become a second browser automation loop.
 
 The isolated synthetic application may also persist an audit-only admission
 aggregate and redacted pending outbox when an allowlisted repository is
@@ -56,14 +56,34 @@ call a browser/business transition.
 | Observation / fallback policy | Dormant handler integration | Observation evidence remains offline; ExecutionProfile now constrains the future governed ActionHandler branch without changing normal `off/audit` execution. |
 | Execution-entry sealing | 6 of 6 known families sealed | Handler/CUA mechanisms require profile, authorization, fresh evidence, and Attempt ordering; governed scripts reject enforce; cached/speculative state is not reused in enforce; SDK/direct callers have route-or-reject proof. |
 | Governed dry-run | Offline only | Validates Contract, Grant, BusinessPlan, WorkOrder, Domain-Pack business binding, observation, and typed Action policy into redacted evidence; it has no executor callback and cannot issue a Permit. |
-| Domain Pack Contract Catalog | Offline reference only | Holds immutable source-free SDK contracts outside the active `DomainPackRegistry`; `payment.operations@0.1.0-draft.1` is uninstalled, has only discover/read shapes, and fails closed for Installation. |
+| Domain Pack Contract Catalog | Offline reference only | Holds immutable SDK contracts outside the active `DomainPackRegistry`; no external or domain-specific contract is installed, discoverable, or executable. |
 | Pack SDK and static Conformance Kit | Offline complete | M2 provides immutable SDK authoring shapes, deterministic versioned reports, invalid-Pack fixtures, complete fact/evidence binding checks, and static runtime-import exclusion. It has no runtime caller. |
 | Synthetic browser audit collector | Active, audit-only | Reads the isolated synthetic page's semantic DOM and screenshot, then emits a redacted test manifest; it never executes an Action. |
 | PendingAction / approval state | Persistence foundation | Models, state services, and round-history tests exist; no browser execution path invokes them. |
 | Permit / Attempt / UNKNOWN | Dormant handler boundary | The authorization path persists Attempt state around a browser call, but no runtime caller can issue and pass it to ActionHandler. |
 | M4 governed browser proof | Accepted test evidence | One process-isolated synthetic ActionHandler path proves durable `EXECUTING -> UNKNOWN -> CONFIRMED`, independent probe confirmation, one commit, no replay, and complete cleanup. It is not runtime wiring. |
 | M5 developer/release experience | Implemented for review; now DONE/PASS locally | One cross-platform Python CLI, canonical release-report schema, Ubuntu CI, manual/release Windows smoke, public guide, and attribution are independently accepted at HEAD `d1c2587b2b03ae107429e1cd131dd5bc5082c390`; final review SHA-256 `d73196352e8f06512d69fc92a86127f19e370c11ffaf31f67183a39c55153707`. Publication has not occurred. |
+| Stripe test-mode hosted Checkout | Explicit smoke only | `live_browser.py` can create a real Stripe test Checkout Session, drive `checkout.stripe.com` with the 4242 test card, and verify the resulting PaymentIntent through the independent API Probe. It requires an environment `sk_test_*`, is not a governed M10 runtime or production Pack, and is never part of default tests. |
 | Enforce | Disabled | Must remain disabled until all future gates in Section 7 are met. |
+
+### Milestone state matrix
+
+The following labels describe implementation state, not product readiness:
+
+| Milestone | State | Boundary |
+|---|---|---|
+| M1 Contract boundary | Offline | Source-free catalog and validation only |
+| M2 Pack SDK | Offline | Type and conformance contracts only |
+| M3 Reference Pack | Offline | `synthetic.payment` recorded reference only |
+| M4 Governed browser proof | Offline | Loopback Chromium evidence, not live Stripe |
+| M5 Developer experience | Offline | Local/release checks and reports |
+| M6 Constrained runtime | Interface-only | Trusted compilation and bindings; no generic production caller |
+| M7 Native Agent loop | Interface-only | Native execution contracts remain isolated |
+| M8 Sequential Agent loop | Interface-only | Journal/recovery contracts; no automatic UNKNOWN replay |
+| M9 Model-safe Planner | Offline | Deterministic proposal validation and fixtures |
+| M10 Agent Run | Active runtime | Recorded adapter only; Stripe hosted Checkout is not wired through durable Attempt/Permit recovery |
+| M11 Operations workbench | Interface-only | Safe projections and provider composition contracts |
+| M12 Evaluation and traces | Offline | Recorded evaluation and redacted, non-authoritative traces |
 
 ## 3. Completed Foundation Work
 
@@ -268,6 +288,7 @@ event IDs and aggregate counts.
 | Fallback policy | Six known families sealed | Keep all closure regressions stable and extend the inventory when a new side-effect caller is discovered. |
 | Evaluation, audit, replay | Synthetic reference harness complete | Extend replay and benchmark coverage; synthetic results are not compliance evidence. |
 | Domain Pack SDK / Contract Catalog | M3 reference conformance complete; M4 accepted as test evidence | Keep `synthetic.payment` outside the active registry/runtime and preserve the accepted no-replay proof. |
+| `stripe.payment` hosted Checkout adapter | Explicit smoke / test mode only | Run only through the explicit smoke command with a test key; preserve recorded mode, redacted evidence, independent PaymentIntent reads, and no-replay UNKNOWN handling. M10 live execution remains fail-closed until durable Attempt/Permit recovery is wired. |
 | External production Domain Pack | None | Installation or runtime use requires adopter-supplied Q1--Q10, conformance evidence, and a separate scoped approval. |
 | Real enforce wiring | Deferred | Requires every Section 7 gate and a separate approval. |
 
@@ -303,6 +324,18 @@ M4 browser-effect proof is complete and independently accepted at fingerprint
 M5 packages that evidence for developers; it does not open a production Pack,
 real enforce wiring, deployment, or publication slice.
 Any future production Pack or real enforce change requires a separate review and approval.
+
+### Stripe live boundary
+
+The repository now distinguishes three different claims. `app.py` plus
+`store.py` is a self-built loopback checkout used only for recorded tests.
+`StripeApiResultProbe` is a real Stripe test API read when supplied a
+`sk_test_*` key. `live_browser.py` is the explicit real hosted Checkout smoke
+adapter and visits `https://checkout.stripe.com/c/...`; it must not be described
+as the loopback E2E or as a governed M10 runtime. The adapter fails closed for missing or rejected
+credentials, unknown page states, transport failures, and non-terminal Stripe
+statuses. It never replays a Checkout after `UNKNOWN`, and its evidence contains
+only redacted digests and state.
 
 The disposable-PostgreSQL `alembic upgrade heads` rehearsal is complete.
 A production Domain Pack, real enforce wiring, runtime Planner/WorkOrder
@@ -897,10 +930,7 @@ real high-risk Action was run, and configuration still rejects
 | 2026-07-26 | M2 Pack SDK and static Conformance Kit | Completed after review remediation and owner acceptance | Closed incomplete fact/evidence binding, undeclared write-probe, read-only result-probe, and relative-import guard gaps inside the frozen repair scope. | Focused `19 passed`; adjacent M1/synthetic/status `27 passed`; governance config `5 passed`; Ruff, compileall, and diff checks passed. Runtime remains audit-only and enforce remains configuration-rejected. |
 | 2026-07-25 | M2 Pack SDK and static Conformance Kit | Implemented; independent-review remediation required | Added offline SDK authoring shapes, deterministic static conformance reports, and deliberately invalid synthetic fixtures only. | The runtime boundary remains unchanged, but independent review reproduced two P1 conformance false-acceptance gaps and a P2 static-import regression-test gap. The repair scope is frozen in `.claude/plans/m2-pack-sdk-static-conformance-review.md`; do not begin M3 until it passes re-review. |
 | 2026-07-25 | Final framework product Charter and delivery policy | Completed as documentation | Fixed the open-source goal as Governed Browser-Agent Harness + Domain Pack SDK + Conformance Kit; recorded release criteria, milestone gates, ownership model, and change control. | M1 Contract Catalog is complete; M2/M3 remain framework work, M4 synthetic governed browser proof requires separate approval, and no production/runtime/enforce authority changed. |
-| 2026-07-25 | Payment Operations source-free Contract Catalog skeleton | Approved and started | Add `domain-pack-contract/v1`, an offline Contract Catalog, and uninstalled discover/read shapes for `payment.operations@0.1.0-draft.1`. | Whitelisted offline contract/tests/docs only; no active registry change, Installation, production fact, tenant, source, credential, API, persistence, migration, model, browser, Planner, admission, outbox, approval, Permit, Attempt, recovery, configuration, deployment, or enforce work. |
-| 2026-07-25 | Payment Operations source-free Contract Catalog skeleton | Completed after strict cross-layer review | Added immutable parameter/owner/capability contracts, stable digest, fail-closed Installation check, offline exact-version catalog, and discover/read-only reference shapes with all production inputs unresolved. | Focused `46 passed`; full unit `823 passed` with one existing FastAPI deprecation warning. Ruff, compileall, Alembic heads, diff/whitespace, forbidden-dependency, active-registry import, and runtime-import checks passed; runtime boundary unchanged. |
-| 2026-07-25 | Framework-first replan | Decision recorded; implementation not yet authorized | Reposition FinRPA as Harness, Domain Pack SDK, and Conformance Kit; Payment Operations is a synthetic/reference validation domain, not an in-repository production Pack. | Q1--Q10 are future external-Pack installation gates, not blockers for source-free framework authoring. No production facts, tenant installation, runtime wiring, rehearsal, deployment, migration, or enforce change is authorized. |
-| 2026-07-25 | Payment Operations source-free read-only contract approval request | Prepared; approval pending | Documentation-only `domain-pack` decision material for an uninstalled, parameterized `payment.operations` contract skeleton. | Q4/Q7/Q8/Q9 are decided for the skeleton; Q1--Q3/Q5--Q6/Q10 are fail-closed installation gates because no production facts, systems, data policy, or owner material exists. It excludes installation, data access, state-changing capabilities, admission/runtime wiring, deployment, migration, rehearsal, and enforce. No runtime boundary changed. |
+| 2026-08-28 | Repository simplification: retired unused domain contract draft | Completed | Removed the uninstalled, source-free domain contract prototype, its dedicated test, approval request, and release conformance entry after confirming there were no runtime, registry, API, browser, or persistence callers. | Current conformance remains covered by the generic SDK and synthetic Pack suites; no active runtime boundary changed. |
 | 2026-07-25 | Admission/runtime baseline consistency | Started | Reconcile the completed admission/rehearsal facts and the enforce-rejection rationale across foundation docs, proposal, configuration, and static regressions. | Interface-only consistency work; no admission transaction, outbox publication, Skyvern caller, browser/payment effect, recovery execution, production Domain Pack, or enforce availability change. |
 | 2026-07-25 | Admission/runtime baseline consistency | Completed after strict cross-layer review | Corrected the foundation to distinguish the sole Skyvern-connected audit path from the isolated synthetic persistence API, recorded the completed `ent_007` rehearsal, removed the resolved Proposal drift note, and replaced the stale entry-sealing rejection rationale while preserving hard `enforce` rejection. | Focused `50 passed`; full unit `817 passed` with one existing FastAPI deprecation warning. Ruff, compileall, Alembic heads, diff/whitespace, forbidden-caller, outbox-consumer, and explicit enforce-rejection checks passed; runtime boundary unchanged. |
 | 2026-07-25 | Audit-only governed Task admission persistence | Started | Add an allowlisted SQLAlchemy repository, atomic redacted outbox, additive migration, and one optional synthetic API caller. | No Skyvern Task publication, outbox publisher, browser/business transition, production caller, or enforce activation. |

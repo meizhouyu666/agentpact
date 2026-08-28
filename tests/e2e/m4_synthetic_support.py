@@ -727,7 +727,10 @@ def is_loopback_port_open(port: int) -> bool:
 
 
 @contextmanager
-def isolated_m4_environment() -> Iterator[IsolatedM4Environment]:
+def isolated_m4_environment(
+    console_module: str = "enterprise.domains.synthetic_payment.app:app",
+    expected_health: dict[str, object] | None = None,
+) -> Iterator[IsolatedM4Environment]:
     repository = repository_root()
     root = Path(tempfile.mkdtemp(prefix="finrpa-m4-"))
     cleanup = CleanupEvidence(temp_root=root)
@@ -814,7 +817,7 @@ def isolated_m4_environment() -> Iterator[IsolatedM4Environment]:
                 sys.executable,
                 "-m",
                 "uvicorn",
-                "enterprise.domains.synthetic_payment.app:app",
+                console_module,
                 "--host",
                 "127.0.0.1",
                 "--port",
@@ -827,7 +830,7 @@ def isolated_m4_environment() -> Iterator[IsolatedM4Environment]:
         )
         cleanup.console_pid = console_process.pid
         console_url = assert_loopback_url(f"http://127.0.0.1:{console_port}/")
-        _wait_for_health(console_url, console_process)
+        _wait_for_health(console_url, console_process, expected_health=expected_health)
 
         yield IsolatedM4Environment(
             repository=repository,
@@ -1237,6 +1240,7 @@ async def issue_exact_permit(
     scraped_page: ScrapedPage,
     idempotency_key: str,
     execution_binding: SyntheticM6ExecutionBinding | None = None,
+    operation: str = "synthetic.payment.submit",
 ) -> tuple[ExecutionAuthorization, ExecutionProfile]:
     from enterprise.governance.audit import observation_hash
     from enterprise.governance.classification import action_fingerprint
@@ -1292,7 +1296,7 @@ async def issue_exact_permit(
                 action_payload=action.model_dump(mode="json", exclude_none=True),
                 intent_payload={
                     "intent_id": decision.intent_id,
-                    "operation": "synthetic.payment.submit",
+                    "operation": operation,
                     "effect": ExecutionEffect.EXTERNAL_WRITE.value,
                     "m6_execution_binding": (
                         execution_binding.model_dump(mode="json") if execution_binding is not None else None
@@ -1338,6 +1342,7 @@ async def install_execute_order_probe(
     observed_statuses: list[str | None],
     observed_urls: list[str],
     task_id: str = TASK_ID,
+    execute_pattern: str = "**/api/challenges/*/execute",
 ) -> None:
     async def capture(route: Route) -> None:
         request_url = route.request.url
@@ -1355,7 +1360,7 @@ async def install_execute_order_probe(
             observed_statuses.append(attempt.status if attempt is not None else None)
         await route.continue_()
 
-    await page.route("**/api/challenges/*/execute", capture)
+    await page.route(execute_pattern, capture)
 
 
 async def execution_attempt(
@@ -1450,15 +1455,24 @@ def _wait_for_port(port: int, *, expected_open: bool, timeout: float = 15.0) -> 
     raise RuntimeError(f"Timed out waiting for 127.0.0.1:{port} open={expected_open}")
 
 
-def _wait_for_health(console_url: str, process: subprocess.Popen[bytes]) -> None:
+def _wait_for_health(
+    console_url: str,
+    process: subprocess.Popen[bytes],
+    expected_health: dict[str, object] | None = None,
+) -> None:
     health_url = console_url.rstrip("/") + "/health"
+    expected = expected_health or {
+        "status": "ready",
+        "domain_pack": "synthetic.payment",
+        "production_eligible": False,
+    }
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"Synthetic console exited early with {process.returncode}")
         try:
             health = http_json(health_url, timeout=1.0)
-            if health == {"status": "ready", "domain_pack": "synthetic.payment", "production_eligible": False}:
+            if health == expected:
                 return
         except (OSError, RuntimeError, ValueError):
             pass

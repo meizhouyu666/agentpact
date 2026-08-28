@@ -20,11 +20,6 @@ M2_REVIEW = (
 M3_HANDOFF = (
     Path(__file__).parents[2] / ".claude" / "plans" / "m3-synthetic-reference-conformance.md"
 ).read_text(encoding="utf-8")
-CONTRACT_APPROVAL = (
-    Path(__file__).parents[2] / "docs" / "phase-2" / "payment-operations-readonly-contract-approval.md"
-).read_text(encoding="utf-8")
-
-
 def test_completed_audit_hardening_is_not_described_as_missing_prompt_or_partial():
     assert "P1: Make Audit Evidence Usable (Completed After Review Remediation)" in STATUS
     assert "it does not yet receive the real Prompt" not in STATUS
@@ -74,21 +69,10 @@ def test_framework_first_contract_slice_is_approved_without_external_pack_author
     assert "not an in-repository production payment" in FRAMEWORK_REPLAN
     assert "Q1--Q10 are no longer blockers for framework authoring" in FRAMEWORK_REPLAN
 
-    assert "Approved for source-free skeleton implementation only" in CONTRACT_APPROVAL
-    assert "schema: `domain-pack-contract/v1`" in CONTRACT_APPROVAL
-    assert "contract: `0.1.0-draft.1`" in CONTRACT_APPROVAL
-    assert "Q1--Q3, Q5--Q6, and Q10 remain unresolved Installation gates" in CONTRACT_APPROVAL
-    assert "must not modify the active `DomainPackRegistry`" in CONTRACT_APPROVAL
-    assert "Implementation outcome: **Completed after strict cross-layer review.**" in CONTRACT_APPROVAL
-    assert "full unit suite passed `823` tests" in CONTRACT_APPROVAL
-    assert "separately recorded source-free `payment.operations` Contract Catalog skeleton" in PROPOSAL
-    assert "no Installation, external data access, rehearsal, deployment" in PROPOSAL
-
     assert "Domain Pack Contract Catalog | Offline reference only" in STATUS
     assert "Domain Pack SDK / Contract Catalog | M3 reference conformance complete" in STATUS
     assert "External production Domain Pack | None" in STATUS
-    assert "Payment Operations source-free Contract Catalog skeleton | Approved and started" in STATUS
-    assert "Payment Operations source-free Contract Catalog skeleton | Completed after strict cross-layer review" in STATUS
+    assert "no external or domain-specific contract is installed" in STATUS
 
 
 def test_m3_completion_keeps_m4_and_runtime_wiring_closed():

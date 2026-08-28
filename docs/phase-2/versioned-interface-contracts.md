@@ -58,8 +58,8 @@ The strict Plan validator binds request ID, the first requested capability and
 exact typed inputs, capability version, Grant, scope, and requested resources.
 It rejects duplicate step IDs and verifies that each full Grant still matches
 the principal, workload, tenant, revocation epoch, scope, version, and expiry
-shown in its projection. It is separate from the existing free-form
-Planner/Coordinator/Executor prototypes and does not call them.
+shown in its projection. It does not depend on an ungoverned second execution
+loop.
 
 ## Capability Grant Expiry
 

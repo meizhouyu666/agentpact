@@ -14,9 +14,8 @@ and Domain Pack Conformance Kit. It is not an in-repository production payment
 product and does not claim ownership of any customer's payment facts, policy,
 source system, or approval process.
 
-`synthetic.payment` remains the reference Pack and fault-injectable test
-system. `payment.operations` is, at most, a source-free reference contract
-skeleton. Neither is a production Pack, tenant installation, integration, or
+`synthetic.payment` remains the sole reference Pack and fault-injectable test
+system. It is not a production Pack, tenant installation, integration, or
 evidence of production readiness.
 
 ## 2. What the project can prove without production material

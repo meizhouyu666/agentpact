@@ -18,9 +18,8 @@ business contracts, authorization, evidence, and recovery rules. It is not an
 in-repository production payment system, a banking integration, a compliance
 certification, or a generic multi-Agent product.
 
-`synthetic.payment` is the reference Pack and fault-injectable synthetic
-system. `payment.operations` is an uninstalled, source-free reference contract
-skeleton. Neither represents production business facts or a customer Pack.
+`synthetic.payment` is the sole reference Pack and fault-injectable synthetic
+system. It does not represent production business facts or a customer Pack.
 
 ## 2. Fixed product boundaries
 
