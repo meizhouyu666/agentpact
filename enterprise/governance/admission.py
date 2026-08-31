@@ -26,6 +26,7 @@ from enterprise.agent.work_orders import BusinessPlan, ExecutionWorkOrder, valid
 from enterprise.governance.capabilities import CapabilityGrant, CapabilityGrantSet, CapabilityRegistry
 from enterprise.governance.contracts import GovernanceMode, TaskContract
 from enterprise.governance.creation_snapshot import TrustedTaskCreationSnapshot
+from enterprise.governance.pack_runtime import PackRuntimeBinding
 
 
 class GovernedTaskDraft(BaseModel):
@@ -67,6 +68,7 @@ class TaskAdmissionBundle(BaseModel):
 
     schema_version: str = "phase2-task-admission-bundle-v1"
     provider_mode: Literal["recorded", "live"] = "recorded"
+    runtime_binding: PackRuntimeBinding | None = None
     planner_observation: PlannerObservation | None = None
     admission_id: str
     task: GovernedTaskDraft

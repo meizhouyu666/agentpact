@@ -41,6 +41,18 @@ class BrowserRuntime(Protocol):
 
 
 @runtime_checkable
+class PreflightBrowserRuntime(BrowserRuntime, Protocol):
+    async def preflight(self, command: AuthorizedAction) -> None: ...
+
+    async def execute_preflighted(self, command: AuthorizedAction) -> BrowserActionResult: ...
+
+
+@runtime_checkable
+class PersistedExecutionPort(Protocol):
+    async def execute(self, command: AuthorizedAction) -> BrowserActionResult: ...
+
+
+@runtime_checkable
 class BrowserActionModel(Protocol):
     async def decide(self, model_input: ModelInput) -> ActionDecision: ...
 

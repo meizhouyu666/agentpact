@@ -25,8 +25,14 @@ from enterprise.domains.stripe_payment.m10_runtime import (
     derive_stripe_agent_run_id,
 )
 from enterprise.governance.pack_runtime import (
+    ApprovalRequestSpecification,
+    PackAdmissionResult,
+    PackAdvanceResult,
+    PackAdvanceStatus,
+    PackRunRequest,
     PackRuntimeBinding,
     PackRuntimeRegistry,
+    PreparedRunReference,
 )
 
 NOW = datetime(2026, 7, 29, 11, 30, tzinfo=timezone.utc)
@@ -66,6 +72,22 @@ def _prepared(adapter: StripePaymentRuntimeAdapter) -> StripeM10PreparedRun:
     )
 
 
+def _typed_prepared(adapter: StripePaymentRuntimeAdapter) -> PreparedRunReference:
+    prepared = adapter.prepare_run(
+        PackRunRequest(
+            tenant_id=TENANT,
+            request_id=REQUEST_ID,
+            intent_digest="c" * 64,
+            business_inputs=INPUTS,
+            target_url="http://127.0.0.1:61000/",
+            principal=_user(),
+            now=NOW,
+        )
+    )
+    assert isinstance(prepared, PreparedRunReference)
+    return prepared
+
+
 def test_registry_accepts_the_stripe_adapter_and_rejects_mismatched_capabilities():
     registry = PackRuntimeRegistry([STRIPE_RUNTIME_CONTRACT])
     adapter = _adapter()
@@ -101,7 +123,7 @@ def test_prepare_run_compiles_one_trusted_plan_with_immutable_digests():
     prepared = _prepared(adapter)
 
     assert prepared.run_id == derive_stripe_agent_run_id(tenant_id=TENANT, request_id=REQUEST_ID)
-    assert prepared.run_id.startswith("run_m10_")
+    assert prepared.run_id.startswith("run_")
     assert prepared.compilation.proposal.capability_id == CAPABILITY_ID
     assert prepared.compilation.work_order.result_probe_ref == "stripe.payment.submit.result-probe.v1"
     assert prepared.business_inputs_digest
@@ -148,6 +170,41 @@ async def test_admit_run_invokes_the_pause_handler_with_verified_context():
     assert str(captured["challenge_id"]).startswith("stripe_challenge_")
 
 
+async def test_typed_lifecycle_returns_only_generic_admission_and_advance_results():
+    adapter = _adapter()
+    prepared = _typed_prepared(adapter)
+    captured: dict[str, object] = {}
+
+    async def approval_handler(
+        reference: PreparedRunReference,
+        approval: ApprovalRequestSpecification,
+        operation_key: str,
+    ) -> object:
+        captured.update(reference=reference, approval=approval, operation_key=operation_key)
+        return {"approval_id": "approval-conformance"}
+
+    admitted = await adapter.admit_run(
+        prepared,
+        approval_handler=approval_handler,
+        operation_key="stripe-admit",
+    )
+    assert isinstance(admitted, PackAdmissionResult)
+    assert admitted.prepared == prepared
+    assert admitted.initial.status is PackAdvanceStatus.AWAITING_APPROVAL
+    assert admitted.initial.approval == captured["approval"]
+    assert captured["reference"] == prepared
+    assert captured["operation_key"] == "stripe-admit"
+
+    advanced = await adapter.advance_run(
+        prepared,
+        approval_handler=approval_handler,
+        operation_key="stripe-advance",
+    )
+    assert isinstance(advanced, PackAdvanceResult)
+    assert advanced.status is PackAdvanceStatus.COMPLETED
+    assert advanced.run_id == prepared.run_id
+
+
 def test_restore_run_rebuilds_identical_trusted_state_from_admission():
     adapter = _adapter()
     prepared = _prepared(adapter)
@@ -189,7 +246,7 @@ async def test_live_mode_advance_and_probe_fail_closed_until_governed_browser_is
         live_browser=object(),  # type: ignore[arg-type]
         clock=lambda: NOW,
     )
-    prepared = _prepared(adapter)
+    prepared = _typed_prepared(adapter)
 
     with pytest.raises(StripeM10NotWired, match="Attempt/Permit"):
         await adapter.advance_run(prepared)

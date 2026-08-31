@@ -11,6 +11,7 @@ from enterprise.governance.audit import observation_hash
 from enterprise.governance.classification import action_fingerprint
 from enterprise.governance.contracts import ExecutionEffect
 from enterprise.governance.execution_profiles import ExecutionProfileRejected, require_allowed_profile
+from enterprise.governance.pack_runtime import ExecutionCheckpoint
 
 from .contracts import (
     ActionDecision,
@@ -232,6 +233,26 @@ class AgentPactBrowserLoop:
                 action_fingerprint=fingerprint,
                 details={"completed": action_result.completed},
             )
+            if action_result.pending_result_probe:
+                state.effect_may_have_started = True
+                # Record the deferred business-verification boundary before
+                # suspending orchestration on the exact persisted checkpoint.
+                await self._verify(
+                    state=state,
+                    before=observation,
+                    after=observation,
+                    decision=decision,
+                    source=source,
+                    action_result=action_result,
+                    authorized_effect=command.authorization.effect,
+                    action_fingerprint=fingerprint,
+                )
+                return await self._terminal(
+                    state,
+                    BrowserLoopStatus.UNKNOWN,
+                    "PENDING_RESULT_PROBE",
+                    execution_checkpoint=action_result.execution_checkpoint,
+                )
             try:
                 after = await self._observe(state)
             except Exception:
@@ -447,6 +468,7 @@ class AgentPactBrowserLoop:
         reason_code: str,
         *,
         approval_ref: str | None = None,
+        execution_checkpoint: ExecutionCheckpoint | None = None,
     ) -> BrowserLoopReport:
         try:
             await self._emit(
@@ -471,6 +493,7 @@ class AgentPactBrowserLoop:
             actions_executed=state.actions_executed,
             last_observation_id=state.last_observation_id,
             approval_ref=approval_ref,
+            execution_checkpoint=execution_checkpoint,
             events=tuple(state.events),
         )
 

@@ -16,12 +16,13 @@ import pytest
 from fastapi import FastAPI, Header
 from sqlalchemy import select
 
-from enterprise.agent_runs.routes import mount_agent_run_api, reset_agent_run_service
+from enterprise.agent_runs.routes import reset_agent_run_service
 from enterprise.approval.models import ApprovalRequestModel
 from enterprise.auth.dependencies import get_current_user
 from enterprise.auth.models import BusinessLineModel, DepartmentModel
 from enterprise.auth.schemas import DepartmentRole, UserContext
 from enterprise.domains.synthetic_payment.constants import BUSINESS_LINE_ID, PAYMENTS_DEPARTMENT_ID
+from enterprise.domains.synthetic_payment.agent_run_composition import mount_synthetic_agent_run_api
 from enterprise.domains.synthetic_payment.m10_runtime import SyntheticPaymentRuntimeAdapter
 from enterprise.governance.models import (
     ExecutionAttemptModel,
@@ -64,9 +65,10 @@ def test_m10_recorded_api_uses_boot_driver_reobserves_permits_and_probes_once() 
         proposal_calls: list[str] = []
         original_prepare = SyntheticPaymentRuntimeAdapter.prepare_run
 
-        def counted_prepare(self: SyntheticPaymentRuntimeAdapter, **trusted_inputs: object):
-            proposal_calls.append(str(trusted_inputs["request_id"]))
-            return original_prepare(self, **trusted_inputs)
+        def counted_prepare(self: SyntheticPaymentRuntimeAdapter, request=None, **trusted_inputs: object):
+            request_id = request.request_id if request is not None else trusted_inputs["request_id"]
+            proposal_calls.append(str(request_id))
+            return original_prepare(self, request, **trusted_inputs)
 
         async def scenario() -> dict[str, object]:
             try:
@@ -94,7 +96,7 @@ def test_m10_recorded_api_uses_boot_driver_reobserves_permits_and_probes_once() 
                 async with support.real_chromium(environment.console_url, environment.cleanup) as browser:
                     with support.configured_forge_boundary(database, browser.state):
                         application = FastAPI()
-                        mount_agent_run_api(
+                        mount_synthetic_agent_run_api(
                             application,
                             session_factory=database.Session,
                             target_url=environment.console_url,
@@ -163,7 +165,7 @@ def test_m10_recorded_api_uses_boot_driver_reobserves_permits_and_probes_once() 
                             assert initial_stages["provider"]["provider_calls"] == 1
                             assert initial_stages["approval"]["status"] == "active"
                             restart_application = FastAPI()
-                            mount_agent_run_api(
+                            mount_synthetic_agent_run_api(
                                 restart_application,
                                 session_factory=database.Session,
                                 target_url=environment.console_url,
@@ -245,13 +247,22 @@ def test_m10_recorded_api_uses_boot_driver_reobserves_permits_and_probes_once() 
                             ).all()
                         )
                     assert Counter(event.event_type for event in browser_events) == {
-                        "browser.loop.observation": 2,
-                        "browser.loop.decision": 2,
-                        "browser.loop.verification": 2,
-                        "browser.loop.terminal": 2,
+                        "browser.loop.observation": 3,
+                        "browser.loop.decision": 3,
+                        "browser.loop.policy": 1,
+                        "browser.loop.action": 2,
+                        "browser.loop.verification": 3,
+                        "browser.loop.terminal": 3,
                     }
-                    assert len({event.task_id for event in browser_events}) == 2
-                    assert all(event.action_fingerprint is None for event in browser_events)
+                    assert len({event.task_id for event in browser_events}) == 3
+                    assert any(
+                        event.event_type == "browser.loop.policy" and event.action_fingerprint
+                        for event in browser_events
+                    )
+                    assert any(
+                        event.event_type == "browser.loop.action" and event.action_fingerprint
+                        for event in browser_events
+                    )
                     return {
                         "fresh_observation": pending[0].observation_hash != permits[0].observation_hash,
                         "effect_count": len(attempts),

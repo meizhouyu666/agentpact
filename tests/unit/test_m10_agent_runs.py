@@ -388,7 +388,7 @@ class _RouteService:
     async def create(self, body, *, user):
         del body, user
         return AgentRunProjection(
-            run_id="run_m10_route",
+                run_id="run_route",
             pack_id="synthetic.payment",
             pack_version="1.0.0",
             pack_display_name="Synthetic Payment Reference Pack",
@@ -405,7 +405,7 @@ class _RouteService:
         return AgentRunPage(
             items=(
                 AgentRunSummary(
-                    run_id="run_m10_route",
+                    run_id="run_route",
                     pack_id="synthetic.payment",
                     pack_version="1.0.0",
                     pack_display_name="Synthetic Payment Reference Pack",
@@ -463,11 +463,11 @@ def test_http_create_returns_only_redacted_projection_and_rejects_extra_authorit
 
         listed = client.get("/api/v1/enterprise/agent-runs/")
         assert listed.status_code == 200
-        assert listed.json()["items"][0]["run_id"] == "run_m10_route"
+        assert listed.json()["items"][0]["run_id"] == "run_route"
         assert "legal_actions" not in listed.json()["items"][0]
         assert "plan" not in listed.json()["items"][0]
 
-        trace = client.get("/api/v1/enterprise/agent-runs/run_m10_route/decision-trace")
+        trace = client.get("/api/v1/enterprise/agent-runs/run_route/decision-trace")
         assert trace.status_code == 200
         assert trace.json()["non_authoritative"] is True
         assert "legal_actions" not in trace.text

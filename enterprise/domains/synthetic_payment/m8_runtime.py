@@ -8,7 +8,7 @@ from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
@@ -22,6 +22,24 @@ from enterprise.agent.work_orders import (
     ReplanReason,
     assess_suffix_replan,
     validate_work_order,
+)
+from enterprise.agent_runs.journal import (
+    PLAN_APPLICATION_MARKER as M8_PLAN_MARKER,
+)
+from enterprise.agent_runs.journal import (
+    PLAN_JOURNAL_SCHEMA as M8_JOURNAL_SCHEMA,
+)
+from enterprise.agent_runs.journal import (
+    GovernedPlanCheckpoint,
+    GovernedPlanError,
+    GovernedPlanStepRef,
+    PlanJournalEvent,
+    PlanJournalTransition,
+    PlanRunState,
+    PlanStepState,
+)
+from enterprise.agent_runs.journal import (
+    replay_plan_journal as _replay,
 )
 from enterprise.governance.admission import TaskAdmissionBundle
 from enterprise.governance.contracts import ExecutionAttemptStatus
@@ -49,51 +67,6 @@ from .m7_runtime import (
     derive_native_task_id,
 )
 
-M8_PLAN_MARKER = "agentpact:m8:plan:v1"
-M8_JOURNAL_SCHEMA = "agentpact.plan-journal/v1"
-M8_CHECKPOINT_SCHEMA = "agentpact.plan-checkpoint/v1"
-
-
-class GovernedPlanError(RuntimeError):
-    """Fail-closed M8 coordination or journal error."""
-
-
-class PlanRunState(StrEnum):
-    ACTIVE = "active"
-    APPROVAL_REQUIRED = "approval_required"
-    REPLAN_REQUIRED = "replan_required"
-    PROBE_BLOCKED = "probe_blocked"
-    REAUTHORIZATION_REQUIRED = "reauthorization_required"
-    COMPLETED = "completed"
-    REJECTED = "rejected"
-    CANCELLED = "cancelled"
-    FAILED = "failed"
-
-
-class PlanStepState(StrEnum):
-    PENDING = "pending"
-    ACTIVE = "active"
-    COMPLETED = "completed"
-    SUPERSEDED = "superseded"
-    PROBE_BLOCKED = "probe_blocked"
-    FAILED = "failed"
-
-
-class PlanJournalTransition(StrEnum):
-    ADMITTED = "admitted"
-    CHILD_ACTIVATED = "child_activated"
-    CHILD_COMPLETED = "child_completed"
-    REPLAN_REQUIRED = "replan_required"
-    PROBE_BLOCKED = "probe_blocked"
-    PROBE_RESOLVED = "probe_resolved"
-    SUFFIX_SUPERSEDED = "suffix_superseded"
-    PLAN_COMPLETED = "plan_completed"
-    REAUTHORIZATION_REQUIRED = "reauthorization_required"
-    APPROVAL_REQUIRED = "approval_required"
-    APPROVAL_RESUMED = "approval_resumed"
-    APPROVAL_REJECTED = "approval_rejected"
-    RUN_CANCELLED = "run_cancelled"
-
 
 class ReplanDisposition(StrEnum):
     ACCEPTED = "accepted"
@@ -105,64 +78,6 @@ class NativeWorkOutcomeKind(StrEnum):
     BUSINESS_STATE_MISMATCH = "business_state_mismatch"
     PROBE_BLOCKED = "probe_blocked"
     FAILED = "failed"
-
-
-class GovernedPlanStepRef(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    business_plan_step_id: str
-    step_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    work_order_id: str
-    work_order_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    native_task_id: str
-    native_step_id: str
-    native_contract_id: str
-    authority_contract_id: str
-    state: PlanStepState
-    permit_id: str | None = None
-    attempt_id: str | None = None
-    probe_ref: str | None = None
-
-
-class GovernedPlanCheckpoint(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: Literal["agentpact.plan-checkpoint/v1"] = M8_CHECKPOINT_SCHEMA
-    plan_run_id: str
-    admission_id: str
-    root_task_id: str
-    plan_id: str
-    plan_version: int = Field(ge=1)
-    authority_contract_id: str
-    completed_prefix: tuple[GovernedPlanStepRef, ...] = ()
-    active_step: GovernedPlanStepRef | None = None
-    remaining_suffix: tuple[GovernedPlanStepRef, ...] = ()
-    superseded_suffix: tuple[GovernedPlanStepRef, ...] = ()
-    state: PlanRunState = PlanRunState.ACTIVE
-    replan_count: int = Field(default=0, ge=0)
-    max_replans: int = Field(default=2, ge=0, le=2)
-    journal_sequence: int = Field(default=0, ge=0)
-    journal_digest: str = Field(default="0" * 64, pattern=r"^[0-9a-f]{64}$")
-
-
-class PlanJournalEvent(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: Literal["agentpact.plan-journal/v1"] = M8_JOURNAL_SCHEMA
-    event_id: str
-    plan_run_id: str
-    root_task_id: str
-    plan_id: str
-    plan_version: int
-    sequence: int = Field(ge=1)
-    previous_event_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    event_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    transition: PlanJournalTransition
-    recovery_level: RecoveryLevel | None = None
-    reason: str | None = None
-    authority_digests: dict[str, str]
-    checkpoint: GovernedPlanCheckpoint
-    created_at: datetime
 
 
 class ReplanRequest(BaseModel):
@@ -702,65 +617,6 @@ class SqlAlchemyGovernedPlanJournal:
         ), tuple(revoked)
 
 
-async def append_m10_transition(
-    session: Any,
-    *,
-    checkpoint: GovernedPlanCheckpoint,
-    transition: PlanJournalTransition,
-    authority_digests: dict[str, str],
-    operation_key: str,
-    created_at: datetime,
-) -> GovernedPlanCheckpoint:
-    """Append one M10 transition inside the caller's root-locked transaction.
-
-    Approval/native rows and the journal event therefore commit together. An
-    exact operation-key retry reads back the one-event-ahead event; conflicting
-    reuse or unrelated stale state fails closed.
-    """
-
-    transition = PlanJournalTransition(transition)
-    if transition not in {
-        PlanJournalTransition.APPROVAL_REQUIRED,
-        PlanJournalTransition.APPROVAL_RESUMED,
-        PlanJournalTransition.APPROVAL_REJECTED,
-        PlanJournalTransition.RUN_CANCELLED,
-    }:
-        raise GovernedPlanError("M10 append accepts only bounded M10 transitions")
-    root = await _load_task(session, checkpoint.root_task_id, lock=True)
-    if root is None or root.application != M8_PLAN_MARKER:
-        raise GovernedPlanError("M10 transition root Task is missing or untrusted")
-    events = await _load_events(session, checkpoint.root_task_id)
-    restored = _replay(events)
-    if restored.journal_sequence != checkpoint.journal_sequence or restored.journal_digest != checkpoint.journal_digest:
-        if restored.journal_sequence == checkpoint.journal_sequence + 1:
-            committed = events[-1]
-            expected_checkpoint = checkpoint.model_copy(
-                update={
-                    "journal_sequence": committed.sequence,
-                    "journal_digest": checkpoint.journal_digest,
-                }
-            )
-            if (
-                committed.transition is transition
-                and committed.reason == operation_key
-                and committed.authority_digests == authority_digests
-                and committed.checkpoint == expected_checkpoint
-            ):
-                return restored
-        raise GovernedPlanError("M10 stale, conflicting, or one-sided transition detected")
-    await _verify_checkpoint_native_state(session, checkpoint, transition=transition)
-    event = _event(
-        checkpoint=checkpoint,
-        transition=transition,
-        authority_digests=authority_digests,
-        reason=operation_key,
-        created_at=created_at,
-    )
-    session.add(_event_model(event, root.organization_id))
-    await session.flush()
-    return checkpoint.model_copy(update={"journal_sequence": event.sequence, "journal_digest": event.event_digest})
-
-
 class GovernedPlanCoordinator:
     """Execute one admitted child at a time and stop on Replan/probe/L4 boundaries."""
 
@@ -1151,102 +1007,6 @@ async def _load_events(session: Any, root_task_id: str) -> list[PlanJournalEvent
     )
     events = [PlanJournalEvent.model_validate(item.payload) for item in models]
     return sorted(events, key=lambda item: item.sequence)
-
-
-def _replay(events: list[PlanJournalEvent]) -> GovernedPlanCheckpoint:
-    if not events:
-        raise GovernedPlanError("M8 journal is empty")
-    previous = "0" * 64
-    terminal = False
-    run_identity: tuple[str, str, str] | None = None
-    previous_plan_version = 0
-    previous_created_at: datetime | None = None
-    for expected_sequence, event in enumerate(events, start=1):
-        if event.sequence != expected_sequence:
-            raise GovernedPlanError("M8 journal contains a sequence gap or reorder")
-        if expected_sequence == 1 and event.transition is not PlanJournalTransition.ADMITTED:
-            raise GovernedPlanError("M8 journal does not begin with admission")
-        if event.previous_event_digest != previous:
-            raise GovernedPlanError("M8 journal digest chain is broken")
-        expected = event.model_dump(mode="json", exclude={"event_digest"})
-        if event.event_digest != _digest(expected):
-            raise GovernedPlanError("M8 journal event digest is corrupt")
-        expected_event_id = _stable_id(
-            event.plan_run_id,
-            f"event-v{event.plan_version}-{event.sequence}-{event.transition.value}",
-        )
-        if event.event_id != expected_event_id:
-            raise GovernedPlanError("M8 journal event identity is not deterministic")
-        checkpoint = event.checkpoint
-        identity = (event.plan_run_id, checkpoint.admission_id, event.root_task_id)
-        if run_identity is None:
-            run_identity = identity
-        elif identity != run_identity:
-            raise GovernedPlanError("M8 journal root identity changed")
-        if (
-            checkpoint.plan_run_id != event.plan_run_id
-            or checkpoint.root_task_id != event.root_task_id
-            or checkpoint.plan_id != event.plan_id
-            or checkpoint.plan_version != event.plan_version
-            or checkpoint.journal_sequence != event.sequence
-            or checkpoint.journal_digest != event.previous_event_digest
-        ):
-            raise GovernedPlanError("M8 journal event and checkpoint identity disagree")
-        if event.plan_version < previous_plan_version or event.plan_version > previous_plan_version + 1:
-            raise GovernedPlanError("M8 journal plan version is reordered or contains a gap")
-        if previous_plan_version and event.plan_version > previous_plan_version:
-            if event.transition is not PlanJournalTransition.SUFFIX_SUPERSEDED:
-                raise GovernedPlanError("M8 journal plan version changed outside suffix supersession")
-        if previous_created_at is not None and event.created_at < previous_created_at:
-            raise GovernedPlanError("M8 journal timestamps are reordered")
-        _validate_transition_checkpoint(event.transition, checkpoint)
-        if terminal:
-            raise GovernedPlanError("M8 journal contains a transition after terminal state")
-        terminal = event.transition in {
-            PlanJournalTransition.PLAN_COMPLETED,
-            PlanJournalTransition.REAUTHORIZATION_REQUIRED,
-            PlanJournalTransition.APPROVAL_REJECTED,
-            PlanJournalTransition.RUN_CANCELLED,
-        }
-        previous = event.event_digest
-        previous_plan_version = event.plan_version
-        previous_created_at = event.created_at
-    return events[-1].checkpoint.model_copy(
-        update={"journal_sequence": events[-1].sequence, "journal_digest": events[-1].event_digest}
-    )
-
-
-def _validate_transition_checkpoint(
-    transition: PlanJournalTransition,
-    checkpoint: GovernedPlanCheckpoint,
-) -> None:
-    expected_states = {
-        PlanJournalTransition.ADMITTED: {PlanRunState.ACTIVE},
-        PlanJournalTransition.CHILD_ACTIVATED: {PlanRunState.ACTIVE},
-        PlanJournalTransition.CHILD_COMPLETED: {PlanRunState.ACTIVE},
-        PlanJournalTransition.REPLAN_REQUIRED: {PlanRunState.REPLAN_REQUIRED},
-        PlanJournalTransition.PROBE_BLOCKED: {PlanRunState.PROBE_BLOCKED},
-        PlanJournalTransition.PROBE_RESOLVED: {PlanRunState.ACTIVE, PlanRunState.COMPLETED},
-        PlanJournalTransition.SUFFIX_SUPERSEDED: {PlanRunState.ACTIVE},
-        PlanJournalTransition.PLAN_COMPLETED: {PlanRunState.COMPLETED},
-        PlanJournalTransition.REAUTHORIZATION_REQUIRED: {PlanRunState.REAUTHORIZATION_REQUIRED},
-        PlanJournalTransition.APPROVAL_REQUIRED: {PlanRunState.APPROVAL_REQUIRED},
-        PlanJournalTransition.APPROVAL_RESUMED: {PlanRunState.ACTIVE},
-        PlanJournalTransition.APPROVAL_REJECTED: {PlanRunState.REJECTED},
-        PlanJournalTransition.RUN_CANCELLED: {PlanRunState.CANCELLED},
-    }
-    if checkpoint.state not in expected_states[transition]:
-        raise GovernedPlanError("M8 journal transition disagrees with checkpoint state")
-    if checkpoint.state is PlanRunState.COMPLETED and checkpoint.active_step is not None:
-        raise GovernedPlanError("M8 completed checkpoint retains an active child")
-    if checkpoint.state in {
-        PlanRunState.ACTIVE,
-        PlanRunState.APPROVAL_REQUIRED,
-        PlanRunState.REPLAN_REQUIRED,
-        PlanRunState.PROBE_BLOCKED,
-    }:
-        if checkpoint.active_step is None:
-            raise GovernedPlanError("M8 nonterminal checkpoint is missing its active child")
 
 
 async def _recover_journal_lag(

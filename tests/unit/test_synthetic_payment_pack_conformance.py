@@ -103,6 +103,7 @@ def test_runtime_contract_and_fixed_attestation_match_offline_manifest():
         "pack_version": PACK_VERSION,
         "display_name": PACK_DISPLAY_NAME,
         "capability_ids": PACK_CAPABILITY_IDS,
+        "adapter_id": "synthetic.payment.agent-run-runtime.v1",
         "manifest_digest": manifest.manifest_digest,
     }
     assert attestation.status is ConformanceStatus.PASS
