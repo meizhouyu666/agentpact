@@ -13,36 +13,28 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import and_, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from enterprise.approval.models import ApprovalRequestModel, ApprovalStatus
-from enterprise.approval.persistence import decide_approval_request
-from enterprise.approval.routing import ApprovalRoute
-from enterprise.auth.schemas import UserContext
-from enterprise.domains.synthetic_payment.constants import BUSINESS_LINE_ID, PAYMENTS_DEPARTMENT_ID
-from enterprise.domains.synthetic_payment.m8_runtime import (
+from enterprise.agent_runs.journal import (
     GovernedPlanCheckpoint,
     GovernedPlanError,
     PlanJournalEvent,
     PlanJournalTransition,
     PlanRunState,
     PlanStepState,
-    _authority_digests,
-    _replay,
-    append_m10_transition,
+    append_agent_run_transition,
+    replay_plan_journal,
 )
-from enterprise.domains.synthetic_payment.m10_runtime import (
-    M10ApprovalPause,
-    M10PlanningError,
-    SyntheticM10PreparedRun,
-    SyntheticPaymentRuntimeAdapter,
-    derive_agent_run_id,
-)
+from enterprise.approval.models import ApprovalRequestModel, ApprovalStatus
+from enterprise.approval.persistence import decide_approval_request
+from enterprise.approval.routing import ApprovalRoute
+from enterprise.auth.schemas import UserContext
 from enterprise.governance.admission import TaskAdmissionBundle
 from enterprise.governance.approval_orchestrator import create_approval_pause
 from enterprise.governance.approval_pause_service import begin_reobservation_after_approval
+from enterprise.governance.contracts import ActionIntent, ExecutionEffect, PolicyDecision
 from enterprise.governance.models import (
     ExecutionAttemptModel,
     ExecutionPermitModel,
@@ -50,7 +42,17 @@ from enterprise.governance.models import (
     GovernedTaskAdmissionModel,
     PendingActionModel,
 )
-from enterprise.governance.pack_runtime import PackRuntimeRegistry
+from enterprise.governance.pack_runtime import (
+    ApprovalRequestSpecification,
+    PackLifecycleError,
+    PackRunRequest,
+    PackRunRestoreRequest,
+    PackRuntimeAdapter,
+    PackRuntimeBinding,
+    PackRuntimeRegistry,
+    PreparedRunReference,
+    derive_pack_run_id,
+)
 from skyvern.forge.sdk.db.models import StepModel, TaskModel
 from skyvern.forge.sdk.models import StepStatus
 from skyvern.forge.sdk.schemas.tasks import TaskStatus
@@ -87,6 +89,14 @@ class AgentRunCreateRequest(BaseModel):
     request_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
     intent: str = Field(min_length=1, max_length=2000)
     business_inputs: dict[str, Any]
+    pack_id: str | None = Field(default=None, min_length=1)
+    pack_version: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def validate_pack_selection(self) -> "AgentRunCreateRequest":
+        if (self.pack_id is None) != (self.pack_version is None):
+            raise ValueError("pack_id and pack_version must be supplied together")
+        return self
 
 
 class AgentRunCommandRequest(BaseModel):
@@ -96,11 +106,20 @@ class AgentRunCommandRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=240)
 
 
+class _ApprovalIntentRecord(BaseModel):
+    """Non-executable approval history; fresh observation must create the real action."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    operation: str
+    action_fingerprint: str
+
+
 class AgentRunPlanStep(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     sequence: int = Field(ge=1)
-    role: Literal["precheck", "submit", "confirm"]
+    role: str = Field(min_length=1)
     state: Literal["pending", "active", "completed", "blocked", "terminal"]
 
 
@@ -207,6 +226,7 @@ class AgentRunService:
         session_factory: Callable[[], AbstractAsyncContextManager[Any]],
         *,
         runtime_registry: PackRuntimeRegistry,
+        default_pack_binding: PackRuntimeBinding,
         target_url: str,
         provider_timeout_seconds: float = 30.0,
         create_gate_factory: CreateGateFactory | None = None,
@@ -215,12 +235,13 @@ class AgentRunService:
         self._session_factory = session_factory
         self._registry = runtime_registry
         self._target_url = target_url
-        pack = runtime_registry.public_metadata(pack_id="synthetic.payment", pack_version="1.0.0")
-        self._projection_metadata = {
-            "pack_id": pack.pack_id,
-            "pack_version": pack.pack_version,
-            "pack_display_name": pack.display_name,
-        }
+        adapter = runtime_registry.require(
+            pack_id=default_pack_binding.pack_id,
+            pack_version=default_pack_binding.pack_version,
+        )
+        if adapter.binding != default_pack_binding:
+            raise ValueError("Default Pack binding does not match the registered adapter")
+        self._default_pack_binding = default_pack_binding
         self._provider_timeout_seconds = provider_timeout_seconds
         self._create_gate_factory = create_gate_factory or (
             lambda tenant_id, request_id: _postgres_advisory_gate(
@@ -231,17 +252,25 @@ class AgentRunService:
         )
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
-    @property
-    def _adapter(self) -> SyntheticPaymentRuntimeAdapter:
-        adapter = self._registry.require(pack_id="synthetic.payment", pack_version="1.0.0")
-        if not isinstance(adapter, SyntheticPaymentRuntimeAdapter):
+    def _adapter(self, binding: PackRuntimeBinding) -> PackRuntimeAdapter:
+        adapter = self._registry.require(pack_id=binding.pack_id, pack_version=binding.pack_version)
+        if adapter.binding != binding:
             raise AgentRunError("ADAPTER_CONFORMANCE_FAILED", status_code=503)
         return adapter
 
     async def create(self, request: AgentRunCreateRequest, *, user: UserContext) -> AgentRunProjection:
         _require_operator(user)
         intent_digest = _digest(["m10-intent", request.intent])
-        existing_run_id = derive_agent_run_id(tenant_id=user.org_id, request_id=request.request_id)
+        try:
+            selected = (
+                self._registry.require(pack_id=request.pack_id, pack_version=request.pack_version).binding
+                if request.pack_id is not None and request.pack_version is not None
+                else self._default_pack_binding
+            )
+        except LookupError as exc:
+            raise AgentRunError("PACK_RUNTIME_UNAVAILABLE", status_code=422) from exc
+        adapter = self._adapter(selected)
+        existing_run_id = derive_pack_run_id(tenant_id=user.org_id, request_id=request.request_id)
         async with self._create_gate_factory(user.org_id, request.request_id) as session:
             async with session.begin():
                 root = (
@@ -270,6 +299,7 @@ class AgentRunService:
                         bundle.task.task_id != existing_run_id
                         or stored_token != intent_digest
                         or bundle.request.typed_inputs != request.business_inputs
+                        or self._binding_for_bundle(bundle) != selected
                     ):
                         raise AgentRunError("IDEMPOTENCY_CONFLICT")
                     return await self._project_locked(
@@ -279,20 +309,22 @@ class AgentRunService:
             try:
                 prepared = await asyncio.wait_for(
                     asyncio.to_thread(
-                        self._adapter.prepare_run,
-                        user=user,
-                        tenant_id=user.org_id,
-                        request_id=request.request_id,
-                        intent_digest=intent_digest,
-                        business_inputs=request.business_inputs,
-                        target_url=self._target_url,
-                        now=self._clock(),
+                        adapter.prepare_run,
+                        PackRunRequest(
+                            principal=user,
+                            tenant_id=user.org_id,
+                            request_id=request.request_id,
+                            intent_digest=intent_digest,
+                            business_inputs=request.business_inputs,
+                            target_url=self._target_url,
+                            now=self._clock(),
+                        ),
                     ),
                     timeout=self._provider_timeout_seconds,
                 )
             except TimeoutError as exc:
                 raise AgentRunError("PLANNER_TIMEOUT", status_code=503) from exc
-            except M10PlanningError as exc:
+            except PackLifecycleError as exc:
                 raise AgentRunError(exc.code, status_code=503) from exc
             except (ValueError, GovernedPlanError) as exc:
                 raise AgentRunError("PLANNER_REJECTED", status_code=422) from exc
@@ -304,9 +336,9 @@ class AgentRunService:
                 predecessor="reservation",
             )
             try:
-                await self._adapter.admit_run(
+                await adapter.admit_run(
                     prepared,
-                    pause_handler=self._pause_for_approval,
+                    approval_handler=self._pause_for_approval,
                     operation_key=operation_key,
                 )
             except AgentRunError:
@@ -421,7 +453,8 @@ class AgentRunService:
         user: UserContext,
     ) -> AgentRunProjection:
         _require_approver(user)
-        prepared: SyntheticM10PreparedRun | None = None
+        prepared: PreparedRunReference | None = None
+        adapter: PackRuntimeAdapter | None = None
         should_advance = False
         async with self._session_factory() as session:
             async with session.begin():
@@ -460,7 +493,7 @@ class AgentRunService:
                         predecessor=locked.checkpoint.journal_digest,
                     )
                     active = locked.checkpoint.model_copy(update={"state": PlanRunState.ACTIVE})
-                    await append_m10_transition(
+                    await append_agent_run_transition(
                         session,
                         checkpoint=active,
                         transition=PlanJournalTransition.APPROVAL_RESUMED,
@@ -471,12 +504,12 @@ class AgentRunService:
                     if resumed.pending_action.status.value != "invalidated":
                         raise AgentRunError("STATE_CONFLICT")
                     should_advance = True
-                prepared = self._restore_prepared(locked.bundle)
-        if should_advance and prepared is not None:
+                adapter, prepared = self._restore_prepared(locked.bundle)
+        if should_advance and prepared is not None and adapter is not None:
             try:
-                await self._adapter.advance_run(
+                await adapter.advance_run(
                     prepared,
-                    pause_handler=self._pause_for_approval,
+                    approval_handler=self._pause_for_approval,
                     operation_key=command.operation_key,
                 )
             except (ValueError, GovernedPlanError) as exc:
@@ -518,7 +551,7 @@ class AgentRunService:
                         "active_step": locked.checkpoint.active_step.model_copy(update={"state": PlanStepState.FAILED}),
                     }
                 )
-                await append_m10_transition(
+                await append_agent_run_transition(
                     session,
                     checkpoint=rejected,
                     transition=PlanJournalTransition.APPROVAL_REJECTED,
@@ -559,7 +592,7 @@ class AgentRunService:
                         "active_step": locked.checkpoint.active_step.model_copy(update={"state": PlanStepState.FAILED}),
                     }
                 )
-                await append_m10_transition(
+                await append_agent_run_transition(
                     session,
                     checkpoint=cancelled,
                     transition=PlanJournalTransition.RUN_CANCELLED,
@@ -591,11 +624,10 @@ class AgentRunService:
                     if projection.state is not AgentRunState.UNKNOWN:
                         return projection
                     raise AgentRunError("STATE_CONFLICT")
-                prepared = self._restore_prepared(locked.bundle)
+                adapter, prepared = self._restore_prepared(locked.bundle)
         try:
-            await self._adapter.probe_run(
+            await adapter.probe_run(
                 prepared,
-                pause_handler=self._pause_for_approval,
                 operation_key=command.operation_key,
             )
         except (ValueError, GovernedPlanError) as exc:
@@ -604,56 +636,106 @@ class AgentRunService:
 
     async def _pause_for_approval(
         self,
-        *,
-        prepared: SyntheticM10PreparedRun,
-        checkpoint: object,
-        binding: object,
-        pause: M10ApprovalPause,
+        prepared: PreparedRunReference,
+        specification: ApprovalRequestSpecification,
         operation_key: str,
     ) -> GovernedPlanCheckpoint:
-        current = GovernedPlanCheckpoint.model_validate(checkpoint)
-        resolution = pause.resolution
-        if (
-            current.active_step is None
-            or binding.native_task_id != current.active_step.native_task_id
-            or binding.native_step_id != current.active_step.native_step_id
-            or resolution.approval_intent is None
-            or resolution.approval_decision is None
-            or resolution.binding_digest != binding.binding_digest
-        ):
+        route_department, separator, route_role = specification.requested_approval_route.rpartition(":")
+        if not separator or not route_department or not route_role:
             raise AgentRunError("STATE_CONFLICT")
         route = ApprovalRoute(
             requires_approval=True,
-            approver_department_id=str(
-                (resolution.approval_decision.required_approver or {}).get("department_id", PAYMENTS_DEPARTMENT_ID)
-            ),
-            approver_role=str((resolution.approval_decision.required_approver or {}).get("role", "approver")),
-            description="Governed synthetic payment approval",
+            approver_department_id=route_department,
+            approver_role=route_role,
+            description=specification.redacted_description,
         )
         async with self._session_factory() as session:
             async with session.begin():
-                await _require_root_lock(session, prepared.run_id, prepared.admission_bundle.task.organization_id)
+                await _require_root_lock(session, prepared.run_id, prepared.tenant_id)
+                admission = (
+                    await session.scalars(
+                        select(GovernedTaskAdmissionModel).where(
+                            GovernedTaskAdmissionModel.task_id == prepared.run_id,
+                            GovernedTaskAdmissionModel.organization_id == prepared.tenant_id,
+                        )
+                    )
+                ).one()
+                bundle = TaskAdmissionBundle.model_validate(admission.bundle_payload)
+                events = tuple(
+                    sorted(
+                        (
+                            PlanJournalEvent.model_validate(item.payload)
+                            for item in (
+                                await session.scalars(
+                                    select(GovernanceAuditEventModel).where(
+                                        GovernanceAuditEventModel.task_id == prepared.run_id,
+                                        GovernanceAuditEventModel.event_type.like("m8.plan.%"),
+                                    )
+                                )
+                            ).all()
+                        ),
+                        key=lambda item: item.sequence,
+                    )
+                )
+                current = replay_plan_journal(list(events))
+                active = current.active_step
+                if (
+                    active is None
+                    or active.native_task_id != specification.task_id
+                    or active.native_step_id != specification.step_id
+                    or active.native_contract_id != specification.contract_id
+                    or prepared.admission_id != bundle.admission_id
+                    or prepared.contract_id != bundle.contract.contract_id
+                    or self._binding_for_bundle(bundle)
+                    != PackRuntimeBinding(
+                        pack_id=prepared.pack_id,
+                        pack_version=prepared.pack_version,
+                        capability_ids=self._binding_for_bundle(bundle).capability_ids,
+                        adapter_id=prepared.adapter_id,
+                    )
+                ):
+                    raise AgentRunError("STATE_CONFLICT")
+                decision = PolicyDecision.model_validate(specification.policy_decision)
+                if (
+                    decision.intent_id != specification.intent_id
+                    or decision.risk_level != specification.risk_level
+                    or specification.organization_id != prepared.tenant_id
+                ):
+                    raise AgentRunError("STATE_CONFLICT")
+                intent = ActionIntent(
+                    intent_id=specification.intent_id,
+                    task_id=specification.task_id,
+                    step_id=specification.step_id,
+                    action_fingerprint=specification.action_fingerprint,
+                    observation_id=specification.observation_hash,
+                    operation=specification.redacted_description,
+                    effect=ExecutionEffect(specification.effect),
+                )
                 await create_approval_pause(
                     db_session=session,
-                    task_id=binding.native_task_id,
-                    step_id=binding.native_step_id,
-                    organization_id=binding.organization_id,
-                    contract_id=binding.contract_id,
-                    source_department_id=PAYMENTS_DEPARTMENT_ID,
-                    action=pause.action,
-                    intent=resolution.approval_intent,
-                    observation_hash=resolution.observation_hash,
-                    decision=resolution.approval_decision,
+                    task_id=specification.task_id,
+                    step_id=specification.step_id,
+                    organization_id=specification.organization_id,
+                    contract_id=specification.contract_id,
+                    source_department_id=specification.source_department_id,
+                    action=_ApprovalIntentRecord(
+                        operation=specification.redacted_description,
+                        action_fingerprint=specification.action_fingerprint,
+                    ),
+                    intent=intent,
+                    observation_hash=specification.observation_hash,
+                    decision=decision,
                     route=route,
-                    requester_user_id=prepared.admission_bundle.request.principal_ref,
-                    business_line_id=BUSINESS_LINE_ID,
+                    requester_user_id=bundle.request.principal_ref,
+                    business_line_id=specification.business_line_id,
+                    ttl_seconds=max(1, int((specification.expires_at - self._clock()).total_seconds())),
                 )
                 paused = current.model_copy(update={"state": PlanRunState.APPROVAL_REQUIRED})
-                return await append_m10_transition(
+                return await append_agent_run_transition(
                     session,
                     checkpoint=paused,
                     transition=PlanJournalTransition.APPROVAL_REQUIRED,
-                    authority_digests=_authority_digests(prepared.compilation),
+                    authority_digests=events[-1].authority_digests,
                     operation_key=operation_key,
                     created_at=self._clock(),
                 )
@@ -678,7 +760,7 @@ class AgentRunService:
         if admission is None:
             raise AgentRunError("RUN_NOT_FOUND", status_code=404)
         bundle = TaskAdmissionBundle.model_validate(admission.bundle_payload)
-        expected_run_id = derive_agent_run_id(tenant_id=user.org_id, request_id=bundle.request.request_id)
+        expected_run_id = derive_pack_run_id(tenant_id=user.org_id, request_id=bundle.request.request_id)
         if root.task_id != expected_run_id or bundle.task.task_id != expected_run_id:
             raise AgentRunError("STATE_CONFLICT")
         models = list(
@@ -695,7 +777,7 @@ class AgentRunService:
             events = tuple(
                 sorted((PlanJournalEvent.model_validate(item.payload) for item in models), key=lambda x: x.sequence)
             )
-            checkpoint = _replay(list(events))
+            checkpoint = replay_plan_journal(list(events))
         except (ValueError, GovernedPlanError) as exc:
             raise AgentRunError("STATE_CONFLICT") from exc
         return _LockedRun(
@@ -715,6 +797,7 @@ class AgentRunService:
         latest = locked.events[-1].transition
         if checkpoint.state is PlanRunState.COMPLETED and active is None:
             return self._projection(
+                bundle=locked.bundle,
                 provider_mode=locked.bundle.provider_mode,
                 run_id=checkpoint.root_task_id,
                 state=AgentRunState.SUCCEEDED,
@@ -725,7 +808,7 @@ class AgentRunService:
             )
         if active is None:
             return self._state_conflict(
-                checkpoint.root_task_id, plan, completed, provider_mode=locked.bundle.provider_mode
+                checkpoint.root_task_id, plan, completed, bundle=locked.bundle
             )
         task, step = await _native_pair(session, active.native_task_id, active.native_step_id)
         pending, approval = await _pending_approval(session, checkpoint)
@@ -761,6 +844,7 @@ class AgentRunService:
                 and exact_attempt[0].observation_hash == exact_permit[0].observation_hash
             ):
                 return self._projection(
+                    bundle=locked.bundle,
                     provider_mode=locked.bundle.provider_mode,
                     run_id=checkpoint.root_task_id,
                     state=AgentRunState.UNKNOWN,
@@ -771,7 +855,7 @@ class AgentRunService:
                     reason_code="RESULT_UNCERTAIN",
                 )
             return self._state_conflict(
-                checkpoint.root_task_id, plan, completed, provider_mode=locked.bundle.provider_mode
+                checkpoint.root_task_id, plan, completed, bundle=locked.bundle
             )
         if latest is PlanJournalTransition.APPROVAL_REJECTED:
             if (
@@ -788,6 +872,7 @@ class AgentRunService:
                 and not any(item.status == "consumed" for item in permits)
             ):
                 return self._projection(
+                    bundle=locked.bundle,
                     provider_mode=locked.bundle.provider_mode,
                     run_id=checkpoint.root_task_id,
                     state=AgentRunState.REJECTED,
@@ -798,7 +883,7 @@ class AgentRunService:
                     reason_code="APPROVAL_REJECTED",
                 )
             return self._state_conflict(
-                checkpoint.root_task_id, plan, completed, provider_mode=locked.bundle.provider_mode
+                checkpoint.root_task_id, plan, completed, bundle=locked.bundle
             )
         if latest is PlanJournalTransition.RUN_CANCELLED:
             if (
@@ -811,6 +896,7 @@ class AgentRunService:
                 and not any(item.status == "consumed" for item in permits)
             ):
                 return self._projection(
+                    bundle=locked.bundle,
                     provider_mode=locked.bundle.provider_mode,
                     run_id=checkpoint.root_task_id,
                     state=AgentRunState.CANCELLED,
@@ -821,7 +907,7 @@ class AgentRunService:
                     reason_code="RUN_CANCELLED",
                 )
             return self._state_conflict(
-                checkpoint.root_task_id, plan, completed, provider_mode=locked.bundle.provider_mode
+                checkpoint.root_task_id, plan, completed, bundle=locked.bundle
             )
         if checkpoint.state is PlanRunState.APPROVAL_REQUIRED:
             if (
@@ -837,6 +923,7 @@ class AgentRunService:
                 and not permits
             ):
                 return self._projection(
+                    bundle=locked.bundle,
                     provider_mode=locked.bundle.provider_mode,
                     run_id=checkpoint.root_task_id,
                     state=AgentRunState.AWAITING_APPROVAL,
@@ -847,6 +934,7 @@ class AgentRunService:
                 )
             if pending is not None and approval is not None and pending.status == "approved":
                 return self._projection(
+                    bundle=locked.bundle,
                     provider_mode=locked.bundle.provider_mode,
                     run_id=checkpoint.root_task_id,
                     state=AgentRunState.RUNNING,
@@ -857,11 +945,12 @@ class AgentRunService:
                     reason_code="APPROVAL_RECORDED",
                 )
             return self._state_conflict(
-                checkpoint.root_task_id, plan, completed, provider_mode=locked.bundle.provider_mode
+                checkpoint.root_task_id, plan, completed, bundle=locked.bundle
             )
         if checkpoint.state is PlanRunState.ACTIVE:
             if task is None and step is None and latest is PlanJournalTransition.ADMITTED:
                 return self._projection(
+                    bundle=locked.bundle,
                     provider_mode=locked.bundle.provider_mode,
                     run_id=checkpoint.root_task_id,
                     state=AgentRunState.PLANNING,
@@ -880,6 +969,7 @@ class AgentRunService:
             ):
                 legal = () if task.status == TaskStatus.resuming.value else (AgentRunAction.CANCEL,)
                 return self._projection(
+                    bundle=locked.bundle,
                     provider_mode=locked.bundle.provider_mode,
                     run_id=checkpoint.root_task_id,
                     state=AgentRunState.RUNNING,
@@ -889,11 +979,18 @@ class AgentRunService:
                     total_steps=total,
                 )
         return self._state_conflict(
-            checkpoint.root_task_id, plan, completed, provider_mode=locked.bundle.provider_mode
+            checkpoint.root_task_id, plan, completed, bundle=locked.bundle
         )
 
-    def _projection(self, **values: Any) -> AgentRunProjection:
-        return AgentRunProjection(**self._projection_metadata, **values)
+    def _projection(self, *, bundle: TaskAdmissionBundle, **values: Any) -> AgentRunProjection:
+        binding = self._binding_for_bundle(bundle)
+        metadata = self._registry.public_metadata(pack_id=binding.pack_id, pack_version=binding.pack_version)
+        return AgentRunProjection(
+            pack_id=metadata.pack_id,
+            pack_version=metadata.pack_version,
+            pack_display_name=metadata.display_name,
+            **values,
+        )
 
     def _state_conflict(
         self,
@@ -901,10 +998,11 @@ class AgentRunService:
         plan: tuple[AgentRunPlanStep, ...],
         completed: int,
         *,
-        provider_mode: Literal["recorded", "live"],
+        bundle: TaskAdmissionBundle,
     ) -> AgentRunProjection:
         return self._projection(
-            provider_mode=provider_mode,
+            bundle=bundle,
+            provider_mode=bundle.provider_mode,
             run_id=run_id,
             state=AgentRunState.FAILED,
             legal_actions=(),
@@ -914,14 +1012,38 @@ class AgentRunService:
             reason_code="STATE_CONFLICT",
         )
 
-    def _restore_prepared(self, bundle: TaskAdmissionBundle) -> SyntheticM10PreparedRun:
+    def _binding_for_bundle(self, bundle: TaskAdmissionBundle) -> PackRuntimeBinding:
+        # Legacy admissions predate pinned bindings and are admitted only through
+        # the explicitly configured compatibility default at composition.
+        return bundle.runtime_binding or self._default_pack_binding
+
+    def _restore_prepared(self, bundle: TaskAdmissionBundle) -> tuple[PackRuntimeAdapter, PreparedRunReference]:
+        binding = self._binding_for_bundle(bundle)
+        adapter = self._adapter(binding)
         try:
-            prepared = self._adapter.restore_run(bundle, target_url=self._target_url)
+            prepared = adapter.restore_run(
+                PackRunRestoreRequest(
+                    run_id=bundle.task.task_id,
+                    tenant_id=bundle.request.tenant_id,
+                    request_id=bundle.request.request_id,
+                    binding=binding,
+                    provider_mode=bundle.provider_mode,
+                    target_url=self._target_url,
+                    admission_payload=bundle.model_dump(mode="json"),
+                )
+            )
         except (ValueError, GovernedPlanError) as exc:
             raise AgentRunError("STATE_CONFLICT") from exc
-        if prepared.admission_bundle != bundle or prepared.run_id != bundle.task.task_id:
+        if (
+            prepared.run_id != bundle.task.task_id
+            or prepared.admission_id != bundle.admission_id
+            or prepared.contract_id != bundle.contract.contract_id
+            or prepared.pack_id != binding.pack_id
+            or prepared.pack_version != binding.pack_version
+            or prepared.adapter_id != binding.adapter_id
+        ):
             raise AgentRunError("STATE_CONFLICT")
-        return prepared
+        return adapter, prepared
 
 
 class _LockedRun(BaseModel):

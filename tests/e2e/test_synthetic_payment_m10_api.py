@@ -16,12 +16,13 @@ import pytest
 from fastapi import FastAPI, Header
 from sqlalchemy import select
 
-from enterprise.agent_runs.routes import mount_agent_run_api, reset_agent_run_service
+from enterprise.agent_runs.routes import reset_agent_run_service
 from enterprise.approval.models import ApprovalRequestModel
 from enterprise.auth.dependencies import get_current_user
 from enterprise.auth.models import BusinessLineModel, DepartmentModel
 from enterprise.auth.schemas import DepartmentRole, UserContext
 from enterprise.domains.synthetic_payment.constants import BUSINESS_LINE_ID, PAYMENTS_DEPARTMENT_ID
+from enterprise.domains.synthetic_payment.agent_run_composition import mount_synthetic_agent_run_api
 from enterprise.domains.synthetic_payment.m10_runtime import SyntheticPaymentRuntimeAdapter
 from enterprise.governance.models import (
     ExecutionAttemptModel,
@@ -94,7 +95,7 @@ def test_m10_recorded_api_uses_boot_driver_reobserves_permits_and_probes_once() 
                 async with support.real_chromium(environment.console_url, environment.cleanup) as browser:
                     with support.configured_forge_boundary(database, browser.state):
                         application = FastAPI()
-                        mount_agent_run_api(
+                        mount_synthetic_agent_run_api(
                             application,
                             session_factory=database.Session,
                             target_url=environment.console_url,
@@ -163,7 +164,7 @@ def test_m10_recorded_api_uses_boot_driver_reobserves_permits_and_probes_once() 
                             assert initial_stages["provider"]["provider_calls"] == 1
                             assert initial_stages["approval"]["status"] == "active"
                             restart_application = FastAPI()
-                            mount_agent_run_api(
+                            mount_synthetic_agent_run_api(
                                 restart_application,
                                 session_factory=database.Session,
                                 target_url=environment.console_url,

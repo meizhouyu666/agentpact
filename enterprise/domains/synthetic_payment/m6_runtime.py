@@ -63,6 +63,7 @@ SYNTHETIC_RUNTIME_CONTRACT = PackRuntimeContract(
     pack_version=PACK_VERSION,
     display_name=PACK_DISPLAY_NAME,
     capability_ids=PACK_CAPABILITY_IDS,
+    adapter_id="synthetic.payment.agent-run-runtime.v1",
     manifest_digest=PACK_CONFORMANCE_MANIFEST_DIGEST,
 )
 

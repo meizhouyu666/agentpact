@@ -63,8 +63,20 @@ from enterprise.governance.models import (
     GovernedTaskAdmissionModel,
 )
 from enterprise.governance.pack_runtime import (
+    ApprovalHandler,
+    ApprovalRequestSpecification,
+    ExecutionCheckpoint,
     ModelSafeRuntimeProjection,
+    PackAdmissionResult,
+    PackAdvanceResult,
+    PackAdvanceStatus,
+    PackLifecycleError,
+    PackProbeResult,
+    PackProbeStatus,
+    PackRunRequest,
+    PackRunRestoreRequest,
     PackRuntimeBinding,
+    PreparedRunReference,
 )
 from enterprise.governance.permit_service import issue_permit
 from enterprise.governance.result_probes import ResultProbeEvidence
@@ -88,6 +100,7 @@ from .constants import (
     PACK_VERSION,
     PAYMENTS_DEPARTMENT_ID,
     POLICY_VERSION,
+    RESULT_PROBE_REF,
 )
 from .m6_runtime import (
     SYNTHETIC_RUNTIME_CONTRACT,
@@ -104,6 +117,7 @@ from .m7_runtime import (
     build_native_probe_evidence,
 )
 from .m8_runtime import (
+    GovernedPlanCheckpoint,
     GovernedPlanCoordinator,
     GovernedPlanStepRef,
     NativeWorkOutcome,
@@ -137,7 +151,7 @@ M10_ADAPTER_ID = "synthetic.payment.agent-run-runtime.v1"
 M9ProviderFactory = Callable[[M9PlanInput], M9PlannerProvider]
 
 
-class M10PlanningError(ValueError):
+class M10PlanningError(PackLifecycleError, ValueError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
@@ -836,7 +850,27 @@ class SyntheticPaymentRuntimeAdapter:
             input_slot_names=slots,
         )
 
-    def prepare_run(self, **trusted_inputs: Any) -> SyntheticM10PreparedRun:
+    def prepare_run(
+        self,
+        request: PackRunRequest | None = None,
+        **trusted_inputs: Any,
+    ) -> PreparedRunReference | SyntheticM10PreparedRun:
+        """Prepare a typed reference; legacy keyword calls remain an API-edge shim."""
+
+        if request is None:
+            return self._prepare_run_legacy(**trusted_inputs)
+        run = self._prepare_run_legacy(
+            user=request.principal,
+            tenant_id=request.tenant_id,
+            request_id=request.request_id,
+            intent_digest=request.intent_digest,
+            business_inputs=request.business_inputs,
+            target_url=request.target_url,
+            now=request.now,
+        )
+        return self._reference(run)
+
+    def _prepare_run_legacy(self, **trusted_inputs: Any) -> SyntheticM10PreparedRun:
         user = UserContext.model_validate(trusted_inputs["user"])
         request_id = str(trusted_inputs["request_id"])
         intent_digest = str(trusted_inputs["intent_digest"])
@@ -893,7 +927,23 @@ class SyntheticPaymentRuntimeAdapter:
             target_url=target_url,
         )
 
-    def restore_run(self, bundle: TaskAdmissionBundle, *, target_url: str) -> SyntheticM10PreparedRun:
+    def restore_run(
+        self,
+        request: PackRunRestoreRequest | TaskAdmissionBundle,
+        *,
+        target_url: str | None = None,
+    ) -> PreparedRunReference | SyntheticM10PreparedRun:
+        if isinstance(request, TaskAdmissionBundle):
+            if target_url is None:
+                raise ValueError("Legacy restore requires target_url")
+            return self._restore_run_legacy(request, target_url=target_url)
+        if request.binding != self.binding:
+            raise ValueError("Stored Agent Run binding does not match this adapter")
+        bundle = TaskAdmissionBundle.model_validate(request.admission_payload)
+        run = self._restore_run_legacy(bundle, target_url=request.target_url)
+        return self._reference(run)
+
+    def _restore_run_legacy(self, bundle: TaskAdmissionBundle, *, target_url: str) -> SyntheticM10PreparedRun:
         """Rebuild trusted execution state from admission without invoking a provider."""
 
         facts = PaymentFacts.model_validate(bundle.request.typed_inputs)
@@ -958,7 +1008,80 @@ class SyntheticPaymentRuntimeAdapter:
             target_url=target_url,
         )
 
-    async def admit_run(self, prepared: object, **trusted_inputs: Any) -> object:
+    async def admit_run(
+        self,
+        prepared: PreparedRunReference | object,
+        *,
+        approval_handler: ApprovalHandler | None = None,
+        operation_key: str,
+        **trusted_inputs: Any,
+    ) -> PackAdmissionResult | object:
+        if not isinstance(prepared, PreparedRunReference):
+            return await self._admit_run_legacy(prepared, operation_key=operation_key, **trusted_inputs)
+        run = self._unwrap(prepared)
+        approval_spec: ApprovalRequestSpecification | None = None
+
+        async def typed_pause_handler(
+            *,
+            prepared: SyntheticM10PreparedRun,
+            checkpoint: object,
+            binding: NativeSkyvernBinding,
+            pause: M10ApprovalPause,
+            operation_key: str,
+        ) -> object:
+            nonlocal approval_spec
+            if approval_handler is None:
+                raise ValueError("Typed Pack admission requires an approval handler")
+            resolution = pause.resolution
+            intent = resolution.approval_intent
+            decision = resolution.approval_decision
+            if intent is None or decision is None:
+                raise ValueError("Pack approval pause lacks generic intent and policy evidence")
+            approver = decision.required_approver or {}
+            spec = ApprovalRequestSpecification(
+                task_id=binding.native_task_id,
+                step_id=binding.native_step_id,
+                contract_id=binding.contract_id,
+                organization_id=binding.organization_id,
+                intent_id=intent.intent_id,
+                action_fingerprint=intent.action_fingerprint,
+                observation_hash=resolution.observation_hash,
+                requested_approval_route=f"{approver.get('department_id', PAYMENTS_DEPARTMENT_ID)}:{approver.get('role', 'approver')}",
+                source_department_id=PAYMENTS_DEPARTMENT_ID,
+                business_line_id=BUSINESS_LINE_ID,
+                risk_level=decision.risk_level,
+                effect=intent.effect.value,
+                expires_at=self._clock() + timedelta(hours=1),
+                reason_code="BUSINESS_APPROVAL_REQUIRED",
+                redacted_description=intent.operation,
+                policy_decision=decision.model_dump(mode="json"),
+            )
+            approval_spec = spec
+            return await approval_handler(self._reference(prepared), spec, operation_key)
+
+        checkpoint = await self._admit_run_legacy(
+            run,
+            pause_handler=typed_pause_handler,
+            operation_key=operation_key,
+        )
+        initial = (
+            PackAdvanceResult(
+                status=PackAdvanceStatus.AWAITING_APPROVAL,
+                run_id=run.run_id,
+                step_id=approval_spec.step_id,
+                reason_code=approval_spec.reason_code,
+                approval=approval_spec,
+            )
+            if approval_spec is not None
+            else await self._advance_result(checkpoint)
+        )
+        return PackAdmissionResult(
+            prepared=prepared,
+            admission_id=run.admission_bundle.admission_id,
+            initial=initial,
+        )
+
+    async def _admit_run_legacy(self, prepared: object, **trusted_inputs: Any) -> object:
         run = SyntheticM10PreparedRun.model_validate(prepared)
         await self._persist_admission(run)
         pause_handler: M10PauseHandler = trusted_inputs["pause_handler"]
@@ -988,7 +1111,30 @@ class SyntheticPaymentRuntimeAdapter:
                 operation_key=operation_key,
             )
 
-    async def advance_run(self, prepared: object, **trusted_inputs: Any) -> object:
+    async def advance_run(
+        self,
+        prepared: PreparedRunReference | object,
+        *,
+        approval_handler: ApprovalHandler | None = None,
+        operation_key: str | None = None,
+        **trusted_inputs: Any,
+    ) -> PackAdvanceResult | object:
+        if not isinstance(prepared, PreparedRunReference):
+            return await self._advance_run_legacy(
+                prepared,
+                operation_key=operation_key,
+                **trusted_inputs,
+            )
+        if approval_handler is None or operation_key is None:
+            raise ValueError("Typed Pack advance requires approval_handler and operation_key")
+        result = await self._advance_run_legacy(
+            self._unwrap(prepared),
+            pause_handler=lambda **_kwargs: None,
+            operation_key=operation_key,
+        )
+        return await self._advance_result(result)
+
+    async def _advance_run_legacy(self, prepared: object, **trusted_inputs: Any) -> object:
         run = SyntheticM10PreparedRun.model_validate(prepared)
         journal = SqlAlchemyGovernedPlanJournal(self._session_factory, clock=self._clock)
         checkpoint = await journal.initialize(
@@ -1036,14 +1182,41 @@ class SyntheticPaymentRuntimeAdapter:
             authority_digests=_authority_digests(run.compilation),
         )
         if completed.state is PlanRunState.ACTIVE:
-            return await self.admit_run(
+            return await self._admit_run_legacy(
                 run,
                 pause_handler=trusted_inputs["pause_handler"],
                 operation_key=trusted_inputs["operation_key"],
             )
         return completed
 
-    async def probe_run(self, prepared: object, **trusted_inputs: Any) -> object:
+    async def probe_run(
+        self,
+        prepared: PreparedRunReference | object,
+        *,
+        operation_key: str | None = None,
+        **trusted_inputs: Any,
+    ) -> PackProbeResult | object:
+        if not isinstance(prepared, PreparedRunReference):
+            return await self._probe_run_legacy(prepared, operation_key=operation_key, **trusted_inputs)
+        run = self._unwrap(prepared)
+        before = await self._current_checkpoint(run)
+        if before.active_step is None:
+            raise ValueError("Typed probe requires an exact active execution checkpoint")
+        exact = await self._execution_checkpoint(before.active_step)
+        result = await self._probe_run_legacy(run, operation_key=operation_key)
+        status = (
+            PackProbeStatus.CONFIRMED
+            if result.state in {PlanRunState.ACTIVE, PlanRunState.COMPLETED}
+            else PackProbeStatus.INCONCLUSIVE
+        )
+        return PackProbeResult(
+            status=status,
+            checkpoint=exact,
+            reason_code="BUSINESS_RESULT_CONFIRMED" if status is PackProbeStatus.CONFIRMED else "BUSINESS_RESULT_INCONCLUSIVE",
+            evidence_refs=(),
+        )
+
+    async def _probe_run_legacy(self, prepared: object, **trusted_inputs: Any) -> object:
         run = SyntheticM10PreparedRun.model_validate(prepared)
         journal = SqlAlchemyGovernedPlanJournal(self._session_factory, clock=self._clock)
         checkpoint = await journal.initialize(
@@ -1067,12 +1240,83 @@ class SyntheticPaymentRuntimeAdapter:
             outcome=outcome,
         )
         if resolved.state is PlanRunState.ACTIVE:
-            return await self.admit_run(
+            return await self._admit_run_legacy(
                 run,
                 pause_handler=trusted_inputs["pause_handler"],
                 operation_key=trusted_inputs["operation_key"],
             )
         return resolved
+
+    def _reference(self, run: SyntheticM10PreparedRun) -> PreparedRunReference:
+        return PreparedRunReference(
+            run_id=run.run_id,
+            tenant_id=run.admission_bundle.request.tenant_id,
+            request_id=run.admission_bundle.request.request_id,
+            pack_id=self.binding.pack_id,
+            pack_version=self.binding.pack_version,
+            adapter_id=self.binding.adapter_id,
+            admission_id=run.admission_bundle.admission_id,
+            contract_id=run.admission_bundle.contract.contract_id,
+            provider_mode=self._provider_mode,
+            opaque_payload=run.model_dump(mode="json"),
+        )
+
+    def _unwrap(self, prepared: PreparedRunReference) -> SyntheticM10PreparedRun:
+        if (
+            prepared.pack_id != self.binding.pack_id
+            or prepared.pack_version != self.binding.pack_version
+            or prepared.adapter_id != self.binding.adapter_id
+        ):
+            raise ValueError("Prepared run reference does not match this immutable adapter")
+        run = SyntheticM10PreparedRun.model_validate(prepared.opaque_payload)
+        if (
+            run.run_id != prepared.run_id
+            or run.admission_bundle.admission_id != prepared.admission_id
+            or run.admission_bundle.contract.contract_id != prepared.contract_id
+        ):
+            raise ValueError("Prepared run reference identity does not match its opaque payload")
+        return run
+
+    async def _current_checkpoint(self, run: SyntheticM10PreparedRun) -> GovernedPlanCheckpoint:
+        return await SqlAlchemyGovernedPlanJournal(self._session_factory, clock=self._clock).initialize(
+            compilation=run.compilation,
+            admission_bundle=run.admission_bundle,
+            target_url=run.target_url,
+        )
+
+    async def _advance_result(self, value: object) -> PackAdvanceResult:
+        checkpoint = GovernedPlanCheckpoint.model_validate(value)
+        if checkpoint.state is PlanRunState.COMPLETED:
+            return PackAdvanceResult(status=PackAdvanceStatus.COMPLETED, run_id=checkpoint.root_task_id)
+        if checkpoint.state is PlanRunState.PROBE_BLOCKED and checkpoint.active_step is not None:
+            return PackAdvanceResult(
+                status=PackAdvanceStatus.PENDING_RESULT_PROBE,
+                run_id=checkpoint.root_task_id,
+                step_id=checkpoint.active_step.native_step_id,
+                reason_code="RESULT_UNCERTAIN",
+                execution_checkpoint=await self._execution_checkpoint(checkpoint.active_step),
+            )
+        return PackAdvanceResult(
+            status=PackAdvanceStatus.FAILED,
+            run_id=checkpoint.root_task_id,
+            step_id=checkpoint.active_step.native_step_id if checkpoint.active_step else None,
+            reason_code="PACK_ADVANCE_FAILED",
+        )
+
+    async def _execution_checkpoint(self, active_step: GovernedPlanStepRef) -> ExecutionCheckpoint:
+        permit, attempt = await self._probe_authority(active_step)
+        return ExecutionCheckpoint(
+            permit_id=permit.permit_id,
+            attempt_id=attempt.attempt_id,
+            task_id=attempt.task_id,
+            step_id=attempt.step_id,
+            action_fingerprint=attempt.action_fingerprint,
+            observation_hash=attempt.observation_hash,
+            idempotency_key_digest=_digest(attempt.idempotency_key),
+            execution_effect=ExecutionEffect.EXTERNAL_WRITE.value,
+            result_probe_ref=active_step.probe_ref or RESULT_PROBE_REF,
+            attempt_status=attempt.status,
+        )
 
     async def _persist_admission(self, run: SyntheticM10PreparedRun) -> None:
         bundle = run.admission_bundle
@@ -1228,6 +1472,12 @@ def _admission_bundle(
     )
     return TaskAdmissionBundle(
         provider_mode=provider_mode,
+        runtime_binding=PackRuntimeBinding(
+            pack_id=PACK_ID,
+            pack_version=PACK_VERSION,
+            capability_ids=SYNTHETIC_RUNTIME_CONTRACT.capability_ids,
+            adapter_id=M10_ADAPTER_ID,
+        ),
         planner_observation=planner_observation,
         admission_id=admission_id,
         task=GovernedTaskDraft(

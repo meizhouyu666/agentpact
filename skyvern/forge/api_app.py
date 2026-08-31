@@ -205,12 +205,12 @@ def create_api_app() -> FastAPI:
     fastapi_app.add_middleware(TenantIsolationMiddleware)
 
     # Enterprise extension routes
-    from enterprise.agent_runs.routes import mount_agent_run_api
     from enterprise.approval.routes import router as enterprise_approval_router
     from enterprise.auth.routes import router as enterprise_auth_router
+    from enterprise.domains.synthetic_payment.agent_run_composition import mount_synthetic_agent_run_api
     from enterprise.tenant.routes import router as enterprise_tenant_router
 
-    mount_agent_run_api(
+    mount_synthetic_agent_run_api(
         fastapi_app,
         session_factory=forge_app.DATABASE.Session,
         target_url=settings.SKYVERN_APP_URL,

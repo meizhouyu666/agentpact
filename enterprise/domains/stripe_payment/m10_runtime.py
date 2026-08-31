@@ -484,6 +484,12 @@ def _admission_bundle(
     )
     return TaskAdmissionBundle(
         provider_mode=provider_mode,
+        runtime_binding=PackRuntimeBinding(
+            pack_id=PACK_ID,
+            pack_version=PACK_VERSION,
+            capability_ids=STRIPE_RUNTIME_CONTRACT.capability_ids,
+            adapter_id=M10_ADAPTER_ID,
+        ),
         planner_observation=planner_observation,
         admission_id=admission_id,
         task=GovernedTaskDraft(
