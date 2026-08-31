@@ -18,6 +18,7 @@ from enterprise.browser_loop.persisted_executor import (
     recover_abandoned_persisted_executions,
 )
 from enterprise.browser_loop.ports import StaleObservationError
+from enterprise.domains.synthetic_payment.agent_run_composition import recover_abandoned_agent_run_executions
 from enterprise.governance.contracts import (
     DecisionOutcome,
     ExecutionAttemptStatus,
@@ -332,6 +333,34 @@ async def test_recovery_abandons_authorized_and_moves_executing_to_unknown_witho
     assert report.ambiguous[0].attempt_id == executing_store.attempts[0].attempt_id
     assert executing_store.attempts[0].status == ExecutionAttemptStatus.UNKNOWN.value
     assert executing_runtime.browser_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_application_composition_hook_owns_abandoned_execution_recovery() -> None:
+    store = _SessionFactory()
+    command = await _command(store)
+
+    async def crash(stage: PersistedExecutionStage, _checkpoint) -> None:
+        if stage is PersistedExecutionStage.AFTER_EXECUTING:
+            raise RuntimeError("owner-invoked recovery boundary")
+
+    with pytest.raises(RuntimeError):
+        await PersistedBrowserExecutor(
+            store,
+            _Runtime(store),
+            result_probe_ref="probe://orders/v1",
+            fault_hook=crash,
+            clock=lambda: NOW,
+        ).execute(command)
+
+    report = await recover_abandoned_agent_run_executions(
+        store,
+        minimum_age=timedelta(0),
+        now=NOW,
+    )
+    assert len(report.ambiguous) == 1
+    assert report.ambiguous[0].attempt_id == store.attempts[0].attempt_id
+    assert store.attempts[0].status == ExecutionAttemptStatus.UNKNOWN.value
 
 
 @pytest.mark.asyncio

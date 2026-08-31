@@ -4,16 +4,41 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
+from datetime import datetime, timedelta
 from typing import Any, Literal
 
 from fastapi import FastAPI
 
 from enterprise.agent_runs.routes import mount_agent_run_api
 from enterprise.agent_runs.service import AgentRunService
+from enterprise.browser_loop.persisted_executor import (
+    PersistedExecutionRecoveryReport,
+    recover_abandoned_persisted_executions,
+)
 from enterprise.governance.pack_runtime import PackRuntimeRegistry
 
 from .m6_runtime import SYNTHETIC_RUNTIME_CONTRACT
 from .m10_runtime import SyntheticPaymentRuntimeAdapter, TrustedSyntheticM10Driver, build_m10_provider_factory
+
+
+async def recover_abandoned_agent_run_executions(
+    session_factory: Callable[[], AbstractAsyncContextManager[Any]],
+    *,
+    minimum_age: timedelta,
+    now: datetime | None = None,
+) -> PersistedExecutionRecoveryReport:
+    """Owner-invoked application recovery hook for abandoned browser effects.
+
+    The application worker or scheduler owns when this boundary runs. The
+    generic scanner row-locks stale attempts, fails AUTHORIZED attempts, and
+    moves EXECUTING attempts to UNKNOWN for probing; it never replays a write.
+    """
+
+    return await recover_abandoned_persisted_executions(
+        session_factory,
+        minimum_age=minimum_age,
+        now=now,
+    )
 
 
 def compose_synthetic_agent_run_service(
