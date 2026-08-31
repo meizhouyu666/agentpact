@@ -65,9 +65,10 @@ def test_m10_recorded_api_uses_boot_driver_reobserves_permits_and_probes_once() 
         proposal_calls: list[str] = []
         original_prepare = SyntheticPaymentRuntimeAdapter.prepare_run
 
-        def counted_prepare(self: SyntheticPaymentRuntimeAdapter, **trusted_inputs: object):
-            proposal_calls.append(str(trusted_inputs["request_id"]))
-            return original_prepare(self, **trusted_inputs)
+        def counted_prepare(self: SyntheticPaymentRuntimeAdapter, request=None, **trusted_inputs: object):
+            request_id = request.request_id if request is not None else trusted_inputs["request_id"]
+            proposal_calls.append(str(request_id))
+            return original_prepare(self, request, **trusted_inputs)
 
         async def scenario() -> dict[str, object]:
             try:

@@ -6,13 +6,16 @@ from types import SimpleNamespace
 import pytest
 
 from enterprise.governance import resume_execution_service
+from enterprise.governance.models import ExecutionAttemptModel
+from enterprise.governance.pack_runtime import ExecutionCheckpoint
 from enterprise.governance.resume_execution_service import (
     ResumeExecutionError,
     claim_resuming_task_for_execution,
     execute_resuming_task,
+    suspend_unknown_execution_for_probe,
 )
-from skyvern.schemas.runs import RunEngine
 from skyvern.forge.sdk.db.models import StepModel, TaskModel
+from skyvern.schemas.runs import RunEngine
 
 
 class _Result:
@@ -27,11 +30,30 @@ class FakeSession:
     def __init__(self, task_status="resuming", step_status="resuming"):
         self.task = TaskModel(task_id="task_1", organization_id="org_1", status=task_status)
         self.step = StepModel(step_id="step_1", task_id="task_1", organization_id="org_1", status=step_status)
+        self.attempt = ExecutionAttemptModel(
+            attempt_id="attempt_1",
+            permit_id="permit_1",
+            task_id="task_1",
+            step_id="step_1",
+            contract_id="contract_1",
+            action_fingerprint="action_fp",
+            observation_hash="observation_fp",
+            idempotency_key="secret-key",
+            idempotency_key_digest="a" * 64,
+            execution_effect="external_write",
+            result_probe_ref="probe://orders/v1",
+            status="unknown",
+        )
         self.flush_count = 0
 
     async def scalars(self, statement):
         entity = statement.column_descriptions[0]["entity"]
-        return _Result(self.task if entity is TaskModel else self.step)
+        values = {
+            TaskModel: self.task,
+            StepModel: self.step,
+            ExecutionAttemptModel: self.attempt,
+        }
+        return _Result(values[entity])
 
     async def flush(self):
         self.flush_count += 1
@@ -68,6 +90,49 @@ def test_claim_is_idempotent_after_worker_crash_before_agent_start():
 def test_claim_rejects_non_resuming_step():
     with pytest.raises(ResumeExecutionError, match="resuming step"):
         _claim(FakeSession(step_status="pending_approval"))
+
+
+def _checkpoint() -> ExecutionCheckpoint:
+    return ExecutionCheckpoint(
+        permit_id="permit_1",
+        attempt_id="attempt_1",
+        task_id="task_1",
+        step_id="step_1",
+        action_fingerprint="action_fp",
+        observation_hash="observation_fp",
+        idempotency_key_digest="a" * 64,
+        execution_effect="external_write",
+        result_probe_ref="probe://orders/v1",
+        attempt_status="unknown",
+    )
+
+
+def test_exact_unknown_checkpoint_suspends_running_task_and_step_for_probe():
+    session = FakeSession(task_status="running", step_status="running")
+
+    asyncio.run(
+        suspend_unknown_execution_for_probe(
+            db_session=session,
+            organization_id="org_1",
+            checkpoint=_checkpoint(),
+        )
+    )
+
+    assert session.task.status == "pending_result_probe"
+    assert session.step.status == "pending_result_probe"
+
+
+def test_substituted_unknown_checkpoint_is_rejected():
+    session = FakeSession(task_status="running", step_status="running")
+
+    with pytest.raises(ResumeExecutionError, match="substituted"):
+        asyncio.run(
+            suspend_unknown_execution_for_probe(
+                db_session=session,
+                organization_id="org_1",
+                checkpoint=_checkpoint().model_copy(update={"permit_id": "permit_substituted"}),
+            )
+        )
 
 
 def test_execute_resuming_task_reuses_step_for_fresh_agent_perception():

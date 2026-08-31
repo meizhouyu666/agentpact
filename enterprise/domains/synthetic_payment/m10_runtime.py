@@ -24,9 +24,13 @@ from enterprise.agent.interactions import CapabilityRequest, CapabilityRequestKi
 from enterprise.auth.schemas import DepartmentRole, UserContext
 from enterprise.browser_loop.contracts import (
     ActionDecision,
+    ActionKind,
+    AuthorizedAction,
+    BrowserAction,
     BrowserLoopConfig,
     BrowserLoopRunContext,
     BrowserLoopStatus,
+    BrowserObservation,
     DecisionKind,
     ModelInput,
     PolicyAuthorization,
@@ -37,6 +41,7 @@ from enterprise.browser_loop.contracts import (
 )
 from enterprise.browser_loop.integrations import SqlAlchemyBrowserLoopEventSink
 from enterprise.browser_loop.loop import AgentPactBrowserLoop
+from enterprise.browser_loop.persisted_executor import PersistedBrowserExecutor
 from enterprise.browser_loop.runtime import PlaywrightPageRuntime
 from enterprise.governance.admission import (
     AdmissionAuditRecord,
@@ -80,18 +85,14 @@ from enterprise.governance.pack_runtime import (
 )
 from enterprise.governance.permit_service import issue_permit
 from enterprise.governance.result_probes import ResultProbeEvidence
-from enterprise.governance.resume_execution_service import claim_resuming_task_for_execution
-from skyvern.forge import app as forge_app
-from skyvern.forge.native_action import (
-    NativeActionDisposition,
-    NativeActionHandlerOutcome,
-    NativeActionResolution,
-    PostActionControl,
+from enterprise.governance.resume_execution_service import (
+    claim_resuming_task_for_execution,
+    suspend_unknown_execution_for_probe,
 )
+from skyvern.forge import app as forge_app
 from skyvern.forge.sdk.db.models import StepModel, TaskModel
 from skyvern.forge.sdk.models import StepStatus
 from skyvern.forge.sdk.schemas.tasks import TaskStatus
-from skyvern.webeye.actions.actions import ClickAction
 
 from .constants import (
     BUSINESS_LINE_ID,
@@ -105,6 +106,7 @@ from .constants import (
 from .m6_runtime import (
     SYNTHETIC_RUNTIME_CONTRACT,
     SyntheticM6TrustedContext,
+    bind_compilation_for_execution,
     build_synthetic_conformance_attestation,
     build_synthetic_installation,
     compile_synthetic_request,
@@ -215,11 +217,20 @@ class SyntheticM10PreparedRun(BaseModel):
 
 
 class M10ApprovalPause(RuntimeError):
-    """Trusted driver signal carrying the resolver's verified pause context."""
+    """Private Pack signal converted to a typed approval result at the adapter."""
 
-    def __init__(self, *, resolution: NativeActionResolution, action: object) -> None:
-        self.resolution = resolution
-        self.action = action
+    def __init__(
+        self,
+        *,
+        intent: ActionIntent,
+        decision: PolicyDecision,
+        observation_hash: str,
+        binding_digest: str,
+    ) -> None:
+        self.intent = intent
+        self.decision = decision
+        self.observation_hash = observation_hash
+        self.binding_digest = binding_digest
         super().__init__("M10 approval pause")
 
 
@@ -349,6 +360,64 @@ class _M10FreshPermitAuthorizer:
                 permit_id=permit.permit_id,
                 action_fingerprint=fingerprint,
                 observation_hash=observed_hash,
+                idempotency_key=f"synthetic:{self._payment_id}",
+                effect=ExecutionEffect.EXTERNAL_WRITE,
+            ),
+            profile,
+        )
+
+    async def authorize_agentpact(
+        self,
+        *,
+        task_id: str,
+        step_id: str,
+        action: BrowserAction,
+        observation: BrowserObservation,
+        binding: NativeSkyvernBinding,
+        execution_binding: Any,
+    ) -> tuple[ExecutionAuthorization, ExecutionProfile]:
+        fingerprint = action_fingerprint(
+            task_id=task_id,
+            step_id=step_id,
+            action_payload=action.model_dump(mode="json", exclude_none=True),
+            observation_hash=observation.observation_id,
+            secret=self._hmac_secret,
+        )
+        profile = ExecutionProfile(
+            mechanism=ExecutionMechanism.LOCATOR,
+            fallback_rank=0,
+            evidence_refs=[f"agentpact://m10-native/{binding.binding_digest}"],
+        )
+        decision = PolicyDecision(
+            decision_id=f"m10-permit:{fingerprint}",
+            intent_id=f"m10-approved:{fingerprint}",
+            outcome=DecisionOutcome.ALLOW,
+            risk_level="high",
+            reasons=["Fresh M10 policy evaluation passed after authenticated approval"],
+            matched_rules=["synthetic.payment.separation-of-duties", "synthetic.payment.approved"],
+            policy_version=POLICY_VERSION,
+        )
+        now = self._clock()
+        expires_at = min(now + timedelta(minutes=5), execution_binding.expires_at)
+        async with self._session_factory() as session:
+            async with session.begin():
+                permit = await issue_permit(
+                    db_session=session,
+                    task_id=task_id,
+                    step_id=step_id,
+                    contract_id=binding.contract_id,
+                    action_fingerprint=fingerprint,
+                    observation_hash=observation.observation_id,
+                    decision=decision,
+                    effect=ExecutionEffect.EXTERNAL_WRITE,
+                    execution_profile=profile,
+                    ttl_seconds=max(1, int((expires_at - now).total_seconds())),
+                )
+        return (
+            ExecutionAuthorization(
+                permit_id=permit.permit_id,
+                action_fingerprint=fingerprint,
+                observation_hash=observation.observation_id,
                 idempotency_key=f"synthetic:{self._payment_id}",
                 effect=ExecutionEffect.EXTERNAL_WRITE,
             ),
@@ -564,21 +633,30 @@ class TrustedSyntheticM10Driver:
         )
 
     async def _request_approval(self, *, compilation: Any, binding: NativeSkyvernBinding) -> NativeWorkOutcome:
-        task, step, page, browser_state = await self._browser_context(binding)
+        task, step, page, _browser_state = await self._browser_context(binding)
         await self._prepare_synthetic_challenge(page=page, compilation=compilation)
         await self._mark_step_running(binding)
         task, step = await self._native_rows(binding)
-        scraped = await self._scrape(browser_state=browser_state, page=page)
-        action = self._submit_action(task=task, step=step, scraped_page=scraped)
-        resolution = await self._resolver(
+        _runtime, observation, _action, _execution_binding, intent = await self._fresh_submit_context(
             compilation=compilation,
             binding=binding,
             page=page,
-            approved=False,
-        ).resolve(task=task, step=step, scraped_page=scraped, action=action)
-        if resolution.disposition is not NativeActionDisposition.APPROVAL_REQUIRED:
+            task=task,
+            step=step,
+        )
+        observed_inputs = await self._observed_business_inputs(page=page, compilation=compilation)
+        decision = await _M10ApprovalEvaluator(approved=False).evaluate(
+            intent=intent,
+            observed_business_inputs=observed_inputs,
+        )
+        if decision.outcome is not DecisionOutcome.REQUIRE_APPROVAL:
             raise ValueError("M10 initial native resolution did not produce an approval pause")
-        raise M10ApprovalPause(resolution=resolution, action=action)
+        raise M10ApprovalPause(
+            intent=intent,
+            decision=decision,
+            observation_hash=observation.observation_id,
+            binding_digest=binding.binding_digest,
+        )
 
     async def _execute_after_approval(
         self,
@@ -595,48 +673,139 @@ class TrustedSyntheticM10Driver:
                     organization_id=binding.organization_id,
                 )
         await self._mark_step_running(binding)
-        task, step, page, browser_state = await self._browser_context(binding)
+        task, step, page, _browser_state = await self._browser_context(binding)
         await page.evaluate("document.body.dataset.m10FreshObservation = 'approved'")
-        scraped = await self._scrape(browser_state=browser_state, page=page)
-        action = self._submit_action(task=task, step=step, scraped_page=scraped)
-        resolver = self._resolver(
+        runtime, observation, action, execution_binding, intent = await self._fresh_submit_context(
             compilation=compilation,
             binding=binding,
             page=page,
-            approved=True,
+            task=task,
+            step=step,
         )
-        resolution = await resolver.resolve(task=task, step=step, scraped_page=scraped, action=action)
-        if resolution.disposition is not NativeActionDisposition.BOUND_AUTHORIZED_EFFECT:
+        observed_inputs = await self._observed_business_inputs(page=page, compilation=compilation)
+        decision = await _M10ApprovalEvaluator(approved=True).evaluate(
+            intent=intent,
+            observed_business_inputs=observed_inputs,
+        )
+        if decision.outcome is not DecisionOutcome.ALLOW:
             raise ValueError("M10 resume did not produce fresh Permit-backed authority")
-        from skyvern.webeye.actions.handler import ActionHandler
-
-        handler_outcome = await ActionHandler.handle_action(
-            scraped_page=scraped,
-            task=task,
-            step=step,
-            page=page,
+        facts = PaymentFacts.model_validate(compilation.business_plan.steps[0].inputs)
+        authorization, profile = await _M10FreshPermitAuthorizer(
+            self._session_factory,
+            payment_id=facts.payment_id,
+            clock=self._clock,
+            hmac_secret=self._hmac_secret,
+        ).authorize_agentpact(
+            task_id=task.task_id,
+            step_id=step.step_id,
             action=action,
-            native_resolution=resolution,
+            observation=observation,
+            binding=binding,
+            execution_binding=execution_binding,
         )
-        if (
-            not isinstance(handler_outcome, NativeActionHandlerOutcome)
-            or handler_outcome.post_action_control is not PostActionControl.SUSPEND_FOR_PROBE
-            or handler_outcome.attempt_id is None
-        ):
+        result = await PersistedBrowserExecutor(
+            self._session_factory,
+            runtime,
+            result_probe_ref=binding.result_probe_ref,
+            clock=self._clock,
+        ).execute(
+            AuthorizedAction(
+                action=action,
+                action_fingerprint=authorization.action_fingerprint,
+                observation_id=observation.observation_id,
+                expected_snapshot_hash=observation.snapshot_hash,
+                authorization=authorization,
+                execution_profile=profile,
+            )
+        )
+        checkpoint = result.execution_checkpoint
+        if not result.pending_result_probe or checkpoint is None:
             raise ValueError("M10 native effect did not enter the exact UNKNOWN probe boundary")
-        await resolver.suspend_for_probe(
-            task=task,
-            step=step,
-            resolution=resolution,
-            attempt_id=handler_outcome.attempt_id,
-        )
-        assert resolution.execution_authorization is not None
+        async with self._session_factory() as session:
+            async with session.begin():
+                await suspend_unknown_execution_for_probe(
+                    db_session=session,
+                    organization_id=binding.organization_id,
+                    checkpoint=checkpoint,
+                )
         return NativeWorkOutcome(
             kind=NativeWorkOutcomeKind.PROBE_BLOCKED,
-            permit_id=resolution.execution_authorization.permit_id,
-            attempt_id=handler_outcome.attempt_id,
-            probe_ref=binding.result_probe_ref,
+            permit_id=checkpoint.permit_id,
+            attempt_id=checkpoint.attempt_id,
+            probe_ref=checkpoint.result_probe_ref,
         )
+
+    async def _fresh_submit_context(
+        self,
+        *,
+        compilation: Any,
+        binding: NativeSkyvernBinding,
+        page: Any,
+        task: Any,
+        step: Any,
+    ) -> tuple[PlaywrightPageRuntime, BrowserObservation, BrowserAction, Any, ActionIntent]:
+        runtime = PlaywrightPageRuntime(page, capture_screenshot=False, clock=self._clock)
+        raw = await runtime.observe()
+        observed_hash = observation_hash(url=raw.url, html=raw.page_html, secret=self._hmac_secret)
+        observation = BrowserObservation(
+            observation_id=observed_hash,
+            snapshot_hash=hashlib.sha256(f"{raw.url}\n{raw.page_html}".encode("utf-8")).hexdigest(),
+            sequence=1,
+            url=raw.url,
+            title=raw.title,
+            model_dom=raw.model_dom,
+            screenshots=raw.screenshots,
+            elements=raw.elements,
+            captured_at=raw.captured_at,
+        )
+        action = self._submit_action(observation)
+        observed_inputs = await self._observed_business_inputs(page=page, compilation=compilation)
+        execution_binding = bind_compilation_for_execution(
+            compilation,
+            observed_business_inputs=observed_inputs,
+            work_order_id=binding.work_order_id,
+            now=self._clock(),
+        )
+        if (
+            execution_binding.task_id != binding.native_task_id
+            or execution_binding.contract_id != binding.contract_id
+            or execution_binding.grant_id != binding.grant_id
+            or execution_binding.result_probe_ref != binding.result_probe_ref
+            or task.task_id != binding.native_task_id
+            or step.step_id != binding.native_step_id
+        ):
+            raise ValueError("M10 fresh AgentPact observation does not match native authority")
+        fingerprint = action_fingerprint(
+            task_id=task.task_id,
+            step_id=step.step_id,
+            action_payload=action.model_dump(mode="json", exclude_none=True),
+            observation_hash=observation.observation_id,
+            secret=self._hmac_secret,
+        )
+        intent = ActionIntent(
+            intent_id=f"m10-intent:{fingerprint}",
+            task_id=task.task_id,
+            step_id=step.step_id,
+            action_fingerprint=fingerprint,
+            observation_id=observation.observation_id,
+            operation="submit",
+            effect=ExecutionEffect.EXTERNAL_WRITE,
+            target={"kind": "synthetic-payment-submit"},
+            confidence=1.0,
+            evidence=["fresh-agentpact-observation"],
+        )
+        return runtime, observation, action, execution_binding, intent
+
+    async def _observed_business_inputs(self, *, page: Any, compilation: Any) -> dict[str, object]:
+        facts = PaymentFacts.model_validate(compilation.business_plan.steps[0].inputs)
+        return {
+            "payment_id": await page.input_value("#paymentId"),
+            "beneficiary_id": await page.input_value("#beneficiary"),
+            "amount": await page.input_value("#amount"),
+            "currency": await page.input_value("#currency"),
+            "reference": await page.input_value("#reference"),
+            "object_version": facts.object_version,
+        }
 
     def _resolver(
         self,
@@ -739,32 +908,18 @@ class TrustedSyntheticM10Driver:
         )
         await page.select_option("#fault", "commit_then_inconclusive")
 
-    async def _scrape(self, *, browser_state: Any, page: Any) -> Any:
-        async def identity_cleanup(_page: Any, _url: str, tree: list[dict[str, Any]]) -> list[dict[str, Any]]:
-            return tree
-
-        return await browser_state.scrape_website(
-            url=page.url,
-            cleanup_element_tree=identity_cleanup,
-            take_screenshots=False,
-            draw_boxes=False,
-            scroll=False,
-            max_screenshot_number=1,
-            must_included_tags=["button", "select"],
-        )
-
-    def _submit_action(self, *, task: Any, step: Any, scraped_page: Any) -> ClickAction:
-        element_id = _element_id_by_aria_label(scraped_page, "Execute synthetic payment once")
-        return ClickAction(
-            element_id=element_id,
-            organization_id=task.organization_id,
-            task_id=task.task_id,
-            step_id=step.step_id,
-            step_order=step.order,
-            action_order=0,
-            description="Execute the freshly approved M10 synthetic action exactly once",
-            reasoning="Trusted recorded M10 native composition",
-            intention="Execute the freshly approved M10 synthetic action exactly once",
+    def _submit_action(self, observation: BrowserObservation) -> BrowserAction:
+        matches = [
+            element
+            for element in observation.elements
+            if element.name == "Execute synthetic payment once" and element.enabled
+        ]
+        if len(matches) != 1:
+            raise ValueError("Fresh AgentPact observation lacks one executable synthetic submit target")
+        return BrowserAction(
+            kind=ActionKind.CLICK,
+            operation="submit",
+            element_id=matches[0].element_id,
         )
 
     async def _probe_authority(self, active_step: GovernedPlanStepRef) -> tuple[Any, Any]:
@@ -1032,11 +1187,10 @@ class SyntheticPaymentRuntimeAdapter:
             nonlocal approval_spec
             if approval_handler is None:
                 raise ValueError("Typed Pack admission requires an approval handler")
-            resolution = pause.resolution
-            intent = resolution.approval_intent
-            decision = resolution.approval_decision
-            if intent is None or decision is None:
-                raise ValueError("Pack approval pause lacks generic intent and policy evidence")
+            intent = pause.intent
+            decision = pause.decision
+            if pause.binding_digest != binding.binding_digest:
+                raise ValueError("Pack approval pause does not match its immutable execution binding")
             approver = decision.required_approver or {}
             spec = ApprovalRequestSpecification(
                 task_id=binding.native_task_id,
@@ -1045,7 +1199,7 @@ class SyntheticPaymentRuntimeAdapter:
                 organization_id=binding.organization_id,
                 intent_id=intent.intent_id,
                 action_fingerprint=intent.action_fingerprint,
-                observation_hash=resolution.observation_hash,
+                observation_hash=pause.observation_hash,
                 requested_approval_route=f"{approver.get('department_id', PAYMENTS_DEPARTMENT_ID)}:{approver.get('role', 'approver')}",
                 source_department_id=PAYMENTS_DEPARTMENT_ID,
                 business_line_id=BUSINESS_LINE_ID,
@@ -1199,11 +1353,19 @@ class SyntheticPaymentRuntimeAdapter:
         if not isinstance(prepared, PreparedRunReference):
             return await self._probe_run_legacy(prepared, operation_key=operation_key, **trusted_inputs)
         run = self._unwrap(prepared)
+
+        async def unexpected_approval(**_kwargs: Any) -> object:
+            raise ValueError("Result-probe continuation unexpectedly requested a new approval")
+
         before = await self._current_checkpoint(run)
         if before.active_step is None:
             raise ValueError("Typed probe requires an exact active execution checkpoint")
         exact = await self._execution_checkpoint(before.active_step)
-        result = await self._probe_run_legacy(run, operation_key=operation_key)
+        result = await self._probe_run_legacy(
+            run,
+            pause_handler=unexpected_approval,
+            operation_key=operation_key,
+        )
         status = (
             PackProbeStatus.CONFIRMED
             if result.state in {PlanRunState.ACTIVE, PlanRunState.COMPLETED}
@@ -1304,7 +1466,27 @@ class SyntheticPaymentRuntimeAdapter:
         )
 
     async def _execution_checkpoint(self, active_step: GovernedPlanStepRef) -> ExecutionCheckpoint:
-        permit, attempt = await self._probe_authority(active_step)
+        async with self._session_factory() as session:
+            permit = (
+                await session.scalars(
+                    select(ExecutionPermitModel).where(ExecutionPermitModel.permit_id == active_step.permit_id)
+                )
+            ).one()
+            attempt = (
+                await session.scalars(
+                    select(ExecutionAttemptModel).where(ExecutionAttemptModel.attempt_id == active_step.attempt_id)
+                )
+            ).one()
+        if (
+            attempt.permit_id != permit.permit_id
+            or attempt.status != ExecutionAttemptStatus.UNKNOWN.value
+            or attempt.task_id != active_step.native_task_id
+            or attempt.step_id != active_step.native_step_id
+            or attempt.result_probe_ref != active_step.probe_ref
+            or not attempt.idempotency_key_digest
+            or not attempt.execution_effect
+        ):
+            raise ValueError("Persisted Pack checkpoint does not match the exact UNKNOWN Attempt")
         return ExecutionCheckpoint(
             permit_id=permit.permit_id,
             attempt_id=attempt.attempt_id,
@@ -1312,8 +1494,8 @@ class SyntheticPaymentRuntimeAdapter:
             step_id=attempt.step_id,
             action_fingerprint=attempt.action_fingerprint,
             observation_hash=attempt.observation_hash,
-            idempotency_key_digest=_digest(attempt.idempotency_key),
-            execution_effect=ExecutionEffect.EXTERNAL_WRITE.value,
+            idempotency_key_digest=attempt.idempotency_key_digest,
+            execution_effect=attempt.execution_effect,
             result_probe_ref=active_step.probe_ref or RESULT_PROBE_REF,
             attempt_status=attempt.status,
         )
@@ -1498,10 +1680,3 @@ def _admission_bundle(
 def _digest(value: object) -> str:
     canonical = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _element_id_by_aria_label(scraped_page: Any, aria_label: str) -> str:
-    for element_id, element in scraped_page.id_to_element_dict.items():
-        if (element.get("attributes") or {}).get("aria-label") == aria_label:
-            return element_id
-    raise ValueError(f"M10 native observation did not contain the expected {aria_label!r} control")

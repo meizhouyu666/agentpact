@@ -7,6 +7,9 @@ from typing import Any
 
 from sqlalchemy import select
 
+from enterprise.governance.contracts import ExecutionAttemptStatus
+from enterprise.governance.models import ExecutionAttemptModel
+from enterprise.governance.pack_runtime import ExecutionCheckpoint
 from skyvern.forge import app
 from skyvern.forge.sdk.db.models import StepModel, TaskModel
 from skyvern.forge.sdk.models import StepStatus
@@ -96,6 +99,61 @@ async def claim_resuming_task_for_execution(
         raise ResumeExecutionError("Task is not eligible for approval recovery")
 
     task.status = TaskStatus.running.value
+    await db_session.flush()
+
+
+async def suspend_unknown_execution_for_probe(
+    *,
+    db_session: Any,
+    organization_id: str,
+    checkpoint: ExecutionCheckpoint,
+) -> None:
+    """Bind orchestration suspension to one exact persisted UNKNOWN Attempt."""
+
+    task = (
+        await db_session.scalars(
+            select(TaskModel)
+            .where(TaskModel.task_id == checkpoint.task_id, TaskModel.organization_id == organization_id)
+            .with_for_update()
+        )
+    ).first()
+    step = (
+        await db_session.scalars(
+            select(StepModel)
+            .where(
+                StepModel.step_id == checkpoint.step_id,
+                StepModel.task_id == checkpoint.task_id,
+                StepModel.organization_id == organization_id,
+            )
+            .with_for_update()
+        )
+    ).first()
+    attempt = (
+        await db_session.scalars(
+            select(ExecutionAttemptModel)
+            .where(ExecutionAttemptModel.attempt_id == checkpoint.attempt_id)
+            .with_for_update()
+        )
+    ).first()
+    if task is None or step is None or attempt is None:
+        raise ResumeExecutionError("Result-probe suspension is missing exact correlated state")
+    if (
+        attempt.status != ExecutionAttemptStatus.UNKNOWN.value
+        or attempt.permit_id != checkpoint.permit_id
+        or attempt.task_id != checkpoint.task_id
+        or attempt.step_id != checkpoint.step_id
+        or attempt.action_fingerprint != checkpoint.action_fingerprint
+        or attempt.observation_hash != checkpoint.observation_hash
+        or attempt.idempotency_key_digest != checkpoint.idempotency_key_digest
+        or attempt.execution_effect != checkpoint.execution_effect
+        or attempt.result_probe_ref != checkpoint.result_probe_ref
+        or checkpoint.attempt_status != ExecutionAttemptStatus.UNKNOWN.value
+    ):
+        raise ResumeExecutionError("Result-probe suspension checkpoint was substituted")
+    if task.status != TaskStatus.running.value or step.status != StepStatus.running.value:
+        raise ResumeExecutionError("Only a running task and step may suspend for a result probe")
+    task.status = TaskStatus.pending_result_probe.value
+    step.status = StepStatus.pending_result_probe.value
     await db_session.flush()
 
 
