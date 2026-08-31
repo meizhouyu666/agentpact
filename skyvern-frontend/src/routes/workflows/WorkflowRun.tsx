@@ -181,7 +181,7 @@ function WorkflowRun() {
   const failureTips: { match: (reason: string) => boolean; tip: string }[] = [
     {
       match: (reason) => reason.includes("Invalid master password"),
-      tip: "Tip: If inputting the master password via Docker Compose or in any container environment, make sure to double any dollar signs and do not surround it with quotes.",
+      tip: "Tip: When passing the master password through a shell, escape dollar signs according to that shell's rules.",
     },
     // Add more tips as needed
   ];
@@ -348,7 +348,12 @@ function WorkflowRun() {
                 />
               ) : null}
             </div>
-            <h2 className="text-2xl" style={{ color: "var(--finrpa-text-muted)" }}>{workflowRunId}</h2>
+            <h2
+              className="text-2xl"
+              style={{ color: "var(--finrpa-text-muted)" }}
+            >
+              {workflowRunId}
+            </h2>
             {workflowRun?.browser_session_id && (
               <Link
                 className="font-mono text-sm hover:underline hover:underline-offset-2"
@@ -468,7 +473,9 @@ function WorkflowRun() {
           {(hasSomeExtractedInformation || hasTaskv2Output) && (
             <div className="space-y-4">
               <Label>
-                {hasTaskv2Output ? t("workflows.output") : t("tasks.extractedData")}
+                {hasTaskv2Output
+                  ? t("workflows.output")
+                  : t("tasks.extractedData")}
               </Label>
               <CodeEditor
                 language="json"
@@ -505,7 +512,9 @@ function WorkflowRun() {
                       );
                     })
                   ) : (
-                    <div className="text-sm">{t("workflows.noFilesDownloaded")}</div>
+                    <div className="text-sm">
+                      {t("workflows.noFilesDownloaded")}
+                    </div>
                   )}
                 </ScrollAreaViewport>
               </ScrollArea>
