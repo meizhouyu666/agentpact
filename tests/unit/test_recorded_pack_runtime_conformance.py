@@ -79,4 +79,3 @@ def test_recorded_adapter_fixture_has_no_synthetic_dependency() -> None:
     )
     assert "synthetic_payment" not in source
     assert "synthetic.payment" not in source
-
