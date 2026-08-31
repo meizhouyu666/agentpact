@@ -47,8 +47,19 @@ from enterprise.governance.capabilities import CapabilityDataScope
 from enterprise.governance.creation_snapshot import TaskCreationPath, TrustedTaskCreationSnapshot
 from enterprise.governance.models import GovernedTaskAdmissionModel
 from enterprise.governance.pack_runtime import (
+    ApprovalHandler,
+    ApprovalRequestSpecification,
+    ExecutionCheckpoint,
     ModelSafeRuntimeProjection,
+    PackAdmissionResult,
+    PackAdvanceResult,
+    PackAdvanceStatus,
+    PackProbeResult,
+    PackProbeStatus,
+    PackRunRequest,
+    PackRunRestoreRequest,
     PackRuntimeBinding,
+    PreparedRunReference,
 )
 
 from .accounts import require_stripe_account
@@ -60,7 +71,7 @@ from .constants import (
     PAYMENTS_DEPARTMENT_ID,
     POLICY_VERSION,
 )
-from .harness import ChallengeState, StripePaymentEnforceHarness
+from .harness import ChallengeState, StripePaymentEnforceHarness, StripeSubmissionChallenge
 from .live_browser import StripeHostedCheckoutFlow
 from .m6_runtime import (
     STRIPE_RUNTIME_CONTRACT,
@@ -183,7 +194,27 @@ class StripePaymentRuntimeAdapter:
             input_slot_names=tuple(StripePaymentFacts.model_fields),
         )
 
-    def prepare_run(self, **trusted_inputs: Any) -> StripeM10PreparedRun:
+    def prepare_run(
+        self,
+        request: PackRunRequest | None = None,
+        **trusted_inputs: Any,
+    ) -> PreparedRunReference | StripeM10PreparedRun:
+        """Prepare a typed reference; keyword calls remain a composition-edge shim."""
+
+        if request is None:
+            return self._prepare_run_legacy(**trusted_inputs)
+        run = self._prepare_run_legacy(
+            user=request.principal,
+            tenant_id=request.tenant_id,
+            request_id=request.request_id,
+            intent_digest=request.intent_digest,
+            business_inputs=request.business_inputs,
+            target_url=request.target_url,
+            now=request.now,
+        )
+        return self._reference(run)
+
+    def _prepare_run_legacy(self, **trusted_inputs: Any) -> StripeM10PreparedRun:
         user = UserContext.model_validate(trusted_inputs["user"])
         request_id = str(trusted_inputs["request_id"])
         intent_digest = str(trusted_inputs["intent_digest"])
@@ -224,7 +255,23 @@ class StripePaymentRuntimeAdapter:
             target_url=target_url,
         )
 
-    def restore_run(self, bundle: TaskAdmissionBundle, *, target_url: str) -> StripeM10PreparedRun:
+    def restore_run(
+        self,
+        request: PackRunRestoreRequest | TaskAdmissionBundle,
+        *,
+        target_url: str | None = None,
+    ) -> PreparedRunReference | StripeM10PreparedRun:
+        if isinstance(request, TaskAdmissionBundle):
+            if target_url is None:
+                raise ValueError("Legacy restore requires target_url")
+            return self._restore_run_legacy(request, target_url=target_url)
+        if request.binding != self.binding:
+            raise ValueError("Stored Agent Run binding does not match this adapter")
+        bundle = TaskAdmissionBundle.model_validate(request.admission_payload)
+        run = self._restore_run_legacy(bundle, target_url=request.target_url)
+        return self._reference(run)
+
+    def _restore_run_legacy(self, bundle: TaskAdmissionBundle, *, target_url: str) -> StripeM10PreparedRun:
         """Rebuild trusted execution state from admission without invoking a provider."""
 
         facts = StripePaymentFacts.model_validate(bundle.request.typed_inputs)
@@ -275,16 +322,41 @@ class StripePaymentRuntimeAdapter:
             target_url=target_url,
         )
 
-    async def admit_run(self, prepared: object, **trusted_inputs: Any) -> object:
-        run = StripeM10PreparedRun.model_validate(prepared)
-        if self._session_factory is not None:
-            await self._persist_admission(run)
-        harness = self._harness_for(run)
-        challenge = harness.prepare_submission(
-            requester=run.user,
-            facts=StripePaymentFacts.model_validate(run.business_inputs),
+    async def admit_run(
+        self,
+        prepared: PreparedRunReference | object,
+        *,
+        approval_handler: ApprovalHandler | None = None,
+        operation_key: str | None = None,
+        **trusted_inputs: Any,
+    ) -> PackAdmissionResult | object:
+        if not isinstance(prepared, PreparedRunReference):
+            return await self._admit_run_legacy(
+                prepared,
+                operation_key=operation_key,
+                **trusted_inputs,
+            )
+        if approval_handler is None or operation_key is None:
+            raise ValueError("Typed Pack admission requires approval_handler and operation_key")
+        run = self._unwrap(prepared)
+        challenge = await self._prepare_challenge(run)
+        spec = self._approval_specification(run, challenge)
+        await approval_handler(prepared, spec, operation_key)
+        return PackAdmissionResult(
+            prepared=prepared,
+            admission_id=run.admission_bundle.admission_id,
+            initial=PackAdvanceResult(
+                status=PackAdvanceStatus.AWAITING_APPROVAL,
+                run_id=run.run_id,
+                step_id=spec.step_id,
+                reason_code=spec.reason_code,
+                approval=spec,
+            ),
         )
-        self._challenge_ids[run.run_id] = challenge.challenge_id
+
+    async def _admit_run_legacy(self, prepared: object, **trusted_inputs: Any) -> object:
+        run = StripeM10PreparedRun.model_validate(prepared)
+        challenge = await self._prepare_challenge(run)
         pause_handler: StripeM10PauseHandler | None = trusted_inputs.get("pause_handler")
         if pause_handler is not None:
             return await pause_handler(
@@ -294,7 +366,38 @@ class StripePaymentRuntimeAdapter:
             )
         return {"state": ChallengeState.PENDING_APPROVAL.value, "challenge_id": challenge.challenge_id}
 
-    async def advance_run(self, prepared: object, **trusted_inputs: Any) -> object:
+    async def _prepare_challenge(self, run: StripeM10PreparedRun) -> StripeSubmissionChallenge:
+        if self._session_factory is not None:
+            await self._persist_admission(run)
+        harness = self._harness_for(run)
+        challenge = harness.prepare_submission(
+            requester=run.user,
+            facts=StripePaymentFacts.model_validate(run.business_inputs),
+        )
+        self._challenge_ids[run.run_id] = challenge.challenge_id
+        return challenge
+
+    async def advance_run(
+        self,
+        prepared: PreparedRunReference | object,
+        *,
+        approval_handler: ApprovalHandler | None = None,
+        operation_key: str | None = None,
+        **trusted_inputs: Any,
+    ) -> PackAdvanceResult | object:
+        if not isinstance(prepared, PreparedRunReference):
+            return await self._advance_run_legacy(prepared, **trusted_inputs)
+        run = self._unwrap(prepared)
+        result = await self._advance_run_legacy(run)
+        if result["state"] == ChallengeState.CONFIRMED.value:
+            return PackAdvanceResult(status=PackAdvanceStatus.COMPLETED, run_id=run.run_id)
+        return PackAdvanceResult(
+            status=PackAdvanceStatus.FAILED,
+            run_id=run.run_id,
+            reason_code="STRIPE_RECORDED_EXECUTION_FAILED",
+        )
+
+    async def _advance_run_legacy(self, prepared: object, **trusted_inputs: Any) -> object:
         run = StripeM10PreparedRun.model_validate(prepared)
         if self._provider_mode == "live":
             raise StripeM10NotWired(
@@ -323,7 +426,42 @@ class StripePaymentRuntimeAdapter:
             "challenge_id": challenge_id,
         }
 
-    async def probe_run(self, prepared: object, **trusted_inputs: Any) -> object:
+    async def probe_run(
+        self,
+        prepared: PreparedRunReference | object,
+        *,
+        operation_key: str | None = None,
+        **trusted_inputs: Any,
+    ) -> PackProbeResult | object:
+        if not isinstance(prepared, PreparedRunReference):
+            return await self._probe_run_legacy(prepared, **trusted_inputs)
+        if self._provider_mode == "live":
+            raise StripeM10NotWired(
+                "stripe.payment live result probing is not wired to durable Attempt recovery; "
+                "use the explicit smoke flow's independent Probe only"
+            )
+        run = self._unwrap(prepared)
+        before = self._current_challenge(run)
+        checkpoint = self._execution_checkpoint(before)
+        result = await self._probe_run_legacy(run)
+        status = {
+            ChallengeState.CONFIRMED.value: PackProbeStatus.CONFIRMED,
+            ChallengeState.FAILED.value: PackProbeStatus.NOT_CONFIRMED,
+        }.get(result["state"], PackProbeStatus.INCONCLUSIVE)
+        reason_code = {
+            PackProbeStatus.CONFIRMED: "BUSINESS_RESULT_CONFIRMED",
+            PackProbeStatus.NOT_CONFIRMED: "BUSINESS_RESULT_NOT_CONFIRMED",
+            PackProbeStatus.INCONCLUSIVE: "BUSINESS_RESULT_INCONCLUSIVE",
+        }[status]
+        evidence_ref = before.work_order.result_probe_ref
+        return PackProbeResult(
+            status=status,
+            checkpoint=checkpoint,
+            reason_code=reason_code,
+            evidence_refs=(evidence_ref,) if evidence_ref else (),
+        )
+
+    async def _probe_run_legacy(self, prepared: object, **trusted_inputs: Any) -> object:
         run = StripeM10PreparedRun.model_validate(prepared)
         if self._provider_mode == "live":
             raise StripeM10NotWired(
@@ -339,6 +477,98 @@ class StripePaymentRuntimeAdapter:
             "probe_status": resolved.result_probe.status.value if resolved.result_probe is not None else None,
             "challenge_id": challenge_id,
         }
+
+    def _approval_specification(
+        self,
+        run: StripeM10PreparedRun,
+        challenge: StripeSubmissionChallenge,
+    ) -> ApprovalRequestSpecification:
+        approver = challenge.decision.required_approver or {}
+        return ApprovalRequestSpecification(
+            task_id=challenge.intent.task_id,
+            step_id=challenge.intent.step_id,
+            contract_id=challenge.contract.contract_id,
+            organization_id=run.user.org_id,
+            intent_id=challenge.intent.intent_id,
+            action_fingerprint=challenge.intent.action_fingerprint,
+            observation_hash=challenge.observation_hash,
+            requested_approval_route=(
+                f"{approver.get('department_id', PAYMENTS_DEPARTMENT_ID)}:"
+                f"{approver.get('role', 'approver')}"
+            ),
+            source_department_id=PAYMENTS_DEPARTMENT_ID,
+            business_line_id=BUSINESS_LINE_ID,
+            risk_level=challenge.decision.risk_level,
+            effect=challenge.intent.effect.value,
+            expires_at=challenge.contract.expires_at or self._clock() + timedelta(hours=1),
+            reason_code="BUSINESS_APPROVAL_REQUIRED",
+            redacted_description="Submit one approved Stripe test-mode payment",
+            policy_decision=challenge.decision.model_dump(mode="json"),
+        )
+
+    def _reference(self, run: StripeM10PreparedRun) -> PreparedRunReference:
+        return PreparedRunReference(
+            run_id=run.run_id,
+            tenant_id=run.admission_bundle.request.tenant_id,
+            request_id=run.admission_bundle.request.request_id,
+            pack_id=self.binding.pack_id,
+            pack_version=self.binding.pack_version,
+            adapter_id=self.binding.adapter_id,
+            admission_id=run.admission_bundle.admission_id,
+            contract_id=run.admission_bundle.contract.contract_id,
+            provider_mode=self._provider_mode,
+            opaque_payload=run.model_dump(mode="json"),
+        )
+
+    def _unwrap(self, prepared: PreparedRunReference) -> StripeM10PreparedRun:
+        if (
+            prepared.pack_id != self.binding.pack_id
+            or prepared.pack_version != self.binding.pack_version
+            or prepared.adapter_id != self.binding.adapter_id
+        ):
+            raise ValueError("Prepared run reference does not match this immutable adapter")
+        run = StripeM10PreparedRun.model_validate(prepared.opaque_payload)
+        if (
+            run.run_id != prepared.run_id
+            or run.admission_bundle.admission_id != prepared.admission_id
+            or run.admission_bundle.contract.contract_id != prepared.contract_id
+        ):
+            raise ValueError("Prepared run reference identity does not match its opaque payload")
+        return run
+
+    def _current_challenge(self, run: StripeM10PreparedRun) -> StripeSubmissionChallenge:
+        challenge_id = self._challenge_ids.get(run.run_id)
+        if challenge_id is None:
+            raise ValueError("Stripe run has no admitted challenge")
+        return self._harness_for(run).get_challenge(challenge_id)
+
+    @staticmethod
+    def _execution_checkpoint(challenge: StripeSubmissionChallenge) -> ExecutionCheckpoint:
+        permit = challenge.permit
+        attempt = challenge.attempt
+        if (
+            permit is None
+            or attempt is None
+            or attempt.status.value != "unknown"
+            or permit.task_id != attempt.task_id
+            or permit.step_id != attempt.step_id
+            or permit.action_fingerprint != attempt.action_fingerprint
+            or permit.observation_id != attempt.observation_hash
+            or not challenge.work_order.result_probe_ref
+        ):
+            raise ValueError("Stripe probe requires the exact UNKNOWN execution checkpoint")
+        return ExecutionCheckpoint(
+            permit_id=permit.permit_id,
+            attempt_id=attempt.attempt_id,
+            task_id=attempt.task_id,
+            step_id=attempt.step_id,
+            action_fingerprint=attempt.action_fingerprint,
+            observation_hash=attempt.observation_hash,
+            idempotency_key_digest=hashlib.sha256(attempt.idempotency_key.encode("utf-8")).hexdigest(),
+            execution_effect=challenge.intent.effect.value,
+            result_probe_ref=challenge.work_order.result_probe_ref,
+            attempt_status=attempt.status.value,
+        )
 
     async def _persist_admission(self, run: StripeM10PreparedRun) -> None:
         bundle = run.admission_bundle

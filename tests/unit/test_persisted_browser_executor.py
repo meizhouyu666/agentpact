@@ -150,7 +150,7 @@ def _decision() -> PolicyDecision:
     )
 
 
-async def _command(store: _SessionFactory) -> AuthorizedAction:
+async def _command(store: _SessionFactory, *, operation: str = "orders.submit") -> AuthorizedAction:
     async with store() as session:
         async with session.begin():
             permit = await issue_permit(
@@ -165,7 +165,7 @@ async def _command(store: _SessionFactory) -> AuthorizedAction:
                 execution_profile=PROFILE,
             )
     return AuthorizedAction(
-        action=BrowserAction(kind=ActionKind.CLICK, operation="orders.submit", element_id="ap-0001"),
+        action=BrowserAction(kind=ActionKind.CLICK, operation=operation, element_id="ap-0001"),
         action_fingerprint="action_fp",
         observation_id="observation_fp",
         expected_snapshot_hash="snapshot_fp",
@@ -196,11 +196,21 @@ async def test_preflight_failure_consumes_no_permit_and_creates_no_attempt() -> 
 
 
 @pytest.mark.asyncio
-async def test_executing_is_committed_before_exactly_one_browser_call_and_finishes_unknown() -> None:
+@pytest.mark.parametrize(
+    ("operation", "result_probe_ref"),
+    [
+        ("synthetic.payment.submit", "synthetic.payment.submit.result-probe.v1"),
+        ("stripe.payment.submit", "stripe.payment.submit.result-probe.v1"),
+    ],
+)
+async def test_two_pack_fixtures_share_the_persisted_execution_contract(
+    operation: str,
+    result_probe_ref: str,
+) -> None:
     store = _SessionFactory()
-    command = await _command(store)
+    command = await _command(store, operation=operation)
     runtime = _Runtime(store)
-    executor = PersistedBrowserExecutor(store, runtime, result_probe_ref="probe://orders/v1", clock=lambda: NOW)
+    executor = PersistedBrowserExecutor(store, runtime, result_probe_ref=result_probe_ref, clock=lambda: NOW)
 
     result = await executor.execute(command)
 
@@ -213,6 +223,7 @@ async def test_executing_is_committed_before_exactly_one_browser_call_and_finish
     assert result.execution_checkpoint is not None
     assert result.execution_checkpoint.attempt_id == store.attempts[0].attempt_id
     assert result.execution_checkpoint.idempotency_key_digest != command.authorization.idempotency_key
+    assert result.execution_checkpoint.result_probe_ref == result_probe_ref
 
 
 @pytest.mark.asyncio
