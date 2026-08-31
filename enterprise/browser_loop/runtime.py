@@ -83,7 +83,28 @@ class PlaywrightPageRuntime:
         )
 
     async def execute(self, command: AuthorizedAction) -> BrowserActionResult:
+        await self.preflight(command)
+        return await self.execute_preflighted(command)
+
+    async def preflight(self, command: AuthorizedAction) -> None:
+        """Perform only freshness, binding, profile, and selector checks."""
+
         await self._validate_command(command)
+        if command.action.kind in {
+            ActionKind.CLICK,
+            ActionKind.INPUT_TEXT,
+            ActionKind.SELECT_OPTION,
+            ActionKind.KEYPRESS,
+        }:
+            selector = self._selectors.get(command.action.element_id or "")
+            if selector is None:
+                raise StaleObservationError("Observed element is no longer addressable")
+            if await self._page.locator(selector).count() != 1:
+                raise StaleObservationError("Observed element is no longer unique")
+
+    async def execute_preflighted(self, command: AuthorizedAction) -> BrowserActionResult:
+        """Invoke the browser once after a caller has crossed its durable boundary."""
+
         action = command.action
         effect_started = False
         try:
@@ -98,10 +119,7 @@ class PlaywrightPageRuntime:
                     selector = self._selectors.get(action.element_id or "")
                     if selector is None:
                         raise StaleObservationError("Observed element is no longer addressable")
-                    candidates = self._page.locator(selector)
-                    if await candidates.count() != 1:
-                        raise StaleObservationError("Observed element is no longer unique")
-                    locator = candidates.first
+                    locator = self._page.locator(selector).first
                     effect_started = True
                     if action.kind is ActionKind.CLICK:
                         await locator.click()

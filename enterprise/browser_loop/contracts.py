@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from enterprise.governance.contracts import ExecutionAuthorization, ExecutionEffect
 from enterprise.governance.execution_profiles import ExecutionProfile
+from enterprise.governance.pack_runtime import ExecutionCheckpoint
 
 
 class ActionKind(StrEnum):
@@ -223,6 +224,14 @@ class BrowserActionResult(BaseModel):
     completed: bool
     effect_may_have_started: bool = False
     detail_code: str = Field(min_length=1, max_length=128, pattern=r"^[A-Z][A-Z0-9_]*$")
+    pending_result_probe: bool = False
+    execution_checkpoint: ExecutionCheckpoint | None = None
+
+    @model_validator(mode="after")
+    def validate_checkpoint(self) -> "BrowserActionResult":
+        if self.pending_result_probe != (self.execution_checkpoint is not None):
+            raise ValueError("Pending result probe requires exactly one execution checkpoint")
+        return self
 
 
 class VerificationRequest(BaseModel):
@@ -279,6 +288,7 @@ class BrowserLoopReport(BaseModel):
     actions_executed: int = Field(ge=0)
     last_observation_id: str | None = None
     approval_ref: str | None = None
+    execution_checkpoint: ExecutionCheckpoint | None = None
     events: tuple[BrowserLoopEvent, ...] = ()
 
 

@@ -13,6 +13,7 @@ from .contracts import (
     VerificationDisposition,
 )
 from .loop import AgentPactBrowserLoop
+from .persisted_executor import PersistedBrowserExecutor, recover_abandoned_persisted_executions
 
 __all__ = [
     "ActionDecision",
@@ -25,5 +26,7 @@ __all__ = [
     "BrowserLoopStatus",
     "DecisionKind",
     "PolicyDisposition",
+    "PersistedBrowserExecutor",
     "VerificationDisposition",
+    "recover_abandoned_persisted_executions",
 ]

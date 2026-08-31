@@ -7,6 +7,7 @@ crash after a remote commit can be indistinguishable from a failed response.
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
 from typing import Any
 
@@ -41,6 +42,7 @@ async def authorize_execution_attempt(
     effect: ExecutionEffect,
     execution_profile: ExecutionProfile,
     cua_execution_evidence: CUAExecutionEvidence | None = None,
+    result_probe_ref: str | None = None,
     now: datetime | None = None,
 ) -> ExecutionAttempt:
     """Consume a permit and durably register a not-yet-executing attempt.
@@ -98,10 +100,14 @@ async def authorize_execution_attempt(
         task_id=permit.task_id,
         step_id=permit.step_id,
         contract_id=permit.contract_id,
+        permit_id=permit.permit_id,
         action_fingerprint=permit.action_fingerprint,
         observation_hash=permit.observation_hash,
         status=ExecutionAttemptStatus.AUTHORIZED.value,
         idempotency_key=idempotency_key,
+        idempotency_key_digest=hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest(),
+        execution_effect=effect.value,
+        result_probe_ref=result_probe_ref,
     )
     db_session.add(model)
     await db_session.flush()
@@ -162,6 +168,25 @@ async def mark_execution_attempt_executing(
         attempt_id=attempt_id,
         from_status=ExecutionAttemptStatus.AUTHORIZED,
         to_status=ExecutionAttemptStatus.EXECUTING,
+        now=now,
+    )
+
+
+async def abandon_authorized_execution_attempt(
+    *,
+    db_session: Any,
+    attempt_id: str,
+    error_message: str = "Authorized execution was abandoned before browser invocation",
+    now: datetime | None = None,
+) -> ExecutionAttempt:
+    """Fail an abandoned AUTHORIZED attempt without ever invoking the browser."""
+
+    return await _transition_attempt(
+        db_session=db_session,
+        attempt_id=attempt_id,
+        from_status=ExecutionAttemptStatus.AUTHORIZED,
+        to_status=ExecutionAttemptStatus.FAILED,
+        error_message=error_message,
         now=now,
     )
 
@@ -291,9 +316,13 @@ def _to_contract(model: ExecutionAttemptModel) -> ExecutionAttempt:
         task_id=model.task_id,
         step_id=model.step_id,
         contract_id=model.contract_id,
+        permit_id=model.permit_id,
         action_fingerprint=model.action_fingerprint,
         observation_hash=model.observation_hash,
         idempotency_key=model.idempotency_key,
+        idempotency_key_digest=model.idempotency_key_digest,
+        execution_effect=ExecutionEffect(model.execution_effect) if model.execution_effect else None,
+        result_probe_ref=model.result_probe_ref,
         status=ExecutionAttemptStatus(model.status),
         started_at=model.started_at,
         completed_at=model.completed_at,

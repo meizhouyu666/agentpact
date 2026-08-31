@@ -170,9 +170,13 @@ class ExecutionAttempt(BaseModel):
     task_id: str
     step_id: str
     contract_id: str
+    permit_id: str | None = None
     action_fingerprint: str
     observation_hash: str
     idempotency_key: str
+    idempotency_key_digest: str | None = None
+    execution_effect: ExecutionEffect | None = None
+    result_probe_ref: str | None = None
     status: ExecutionAttemptStatus
     started_at: datetime | None = None
     completed_at: datetime | None = None
