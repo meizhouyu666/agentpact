@@ -125,6 +125,7 @@ def test_runtime_contract_and_fixed_attestation_match_offline_manifest():
         "pack_version": "0.1.0-draft.1",
         "display_name": "Stripe Payment (Test Mode) Domain Pack",
         "capability_ids": ("stripe.payment.read", "stripe.payment.submit"),
+        "adapter_id": "stripe.payment.agent-run-runtime.v1",
         "manifest_digest": manifest.manifest_digest,
     }
     assert attestation.status is ConformanceStatus.PASS
