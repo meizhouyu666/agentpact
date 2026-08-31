@@ -127,6 +127,16 @@ def test_generic_contract_sources_contain_no_payment_schema_or_pack_ids() -> Non
         "challenge_id",
         "synthetic.payment",
         "stripe.payment",
+        "run_m10_",
+        "m10-intent",
         'literal["precheck", "submit", "confirm"]',
     ):
         assert forbidden not in source
+
+
+def test_generic_run_identity_is_pack_neutral() -> None:
+    from enterprise.governance.pack_runtime import derive_pack_run_id
+
+    run_id = derive_pack_run_id(tenant_id="tenant-a", request_id="request-a")
+    assert run_id.startswith("run_")
+    assert not run_id.startswith("run_m10_")

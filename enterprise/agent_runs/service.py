@@ -260,7 +260,7 @@ class AgentRunService:
 
     async def create(self, request: AgentRunCreateRequest, *, user: UserContext) -> AgentRunProjection:
         _require_operator(user)
-        intent_digest = _digest(["m10-intent", request.intent])
+        intent_digest = _digest(["agent-run-intent", request.intent])
         try:
             selected = (
                 self._registry.require(pack_id=request.pack_id, pack_version=request.pack_version).binding
@@ -369,7 +369,7 @@ class AgentRunService:
                     )
                     .where(
                         TaskModel.organization_id == user.org_id,
-                        TaskModel.task_id.like("run_m10_%"),
+                        TaskModel.task_id.like("run_%"),
                     )
                 )
                 if boundary is not None:
@@ -1399,7 +1399,7 @@ def _decode_cursor(cursor: str) -> tuple[datetime, str]:
         if set(payload) != {"created_at", "run_id"} or not isinstance(payload["run_id"], str):
             raise ValueError
         created_at = datetime.fromisoformat(payload["created_at"])
-        if created_at.tzinfo is None or not payload["run_id"].startswith("run_m10_"):
+        if created_at.tzinfo is None or not payload["run_id"].startswith("run_"):
             raise ValueError
         return created_at.astimezone(timezone.utc).replace(tzinfo=None), payload["run_id"]
     except (ValueError, TypeError, KeyError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error) as exc:

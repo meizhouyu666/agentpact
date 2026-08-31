@@ -123,7 +123,7 @@ def test_prepare_run_compiles_one_trusted_plan_with_immutable_digests():
     prepared = _prepared(adapter)
 
     assert prepared.run_id == derive_stripe_agent_run_id(tenant_id=TENANT, request_id=REQUEST_ID)
-    assert prepared.run_id.startswith("run_m10_")
+    assert prepared.run_id.startswith("run_")
     assert prepared.compilation.proposal.capability_id == CAPABILITY_ID
     assert prepared.compilation.work_order.result_probe_ref == "stripe.payment.submit.result-probe.v1"
     assert prepared.business_inputs_digest

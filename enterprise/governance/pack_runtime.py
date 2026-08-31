@@ -298,4 +298,4 @@ def derive_pack_run_id(*, tenant_id: str, request_id: str) -> str:
         ensure_ascii=True,
         separators=(",", ":"),
     )
-    return "run_m10_" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+    return "run_" + hashlib.sha256(material.encode("utf-8")).hexdigest()

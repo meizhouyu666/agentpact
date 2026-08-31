@@ -94,7 +94,7 @@ class StripeM10NotWired(RuntimeError):
 
 
 def derive_stripe_agent_run_id(*, tenant_id: str, request_id: str) -> str:
-    return "run_m10_" + _digest(["agentpact-agent-run/v1", tenant_id, request_id])
+    return "run_" + _digest(["agentpact-agent-run/v1", tenant_id, request_id])
 
 
 def derive_stripe_admission_id(*, tenant_id: str, request_id: str) -> str:
