@@ -3,7 +3,7 @@
 set -e
 
 # Install enterprise dependencies not in base image
-pip install -q "passlib[bcrypt]>=1.7.4" "bcrypt==4.0.1" "PyJWT>=2.8.0" "minio>=7.2.0" 2>/dev/null || true
+pip install -q "passlib[bcrypt]>=1.7.4" "bcrypt==4.0.1" "PyJWT>=2.8.0" 2>/dev/null || true
 
 ALLOWED_SKIP_DB_MIGRATION_VERSION=${ALLOWED_SKIP_DB_MIGRATION_VERSION:-}
 

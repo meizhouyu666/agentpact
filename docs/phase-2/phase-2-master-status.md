@@ -421,13 +421,11 @@ these gates, not permission to bypass them:
 
 ## 9. Related Documents
 
-- `proposal.md`: Phase 2 Action Governance Bridge design.
 - `next-stage-proposal.md`: target controlled-orchestration architecture.
 - `foundation-closure.md`: exact current runtime and persistence closure.
 - `execution-entrypoints.md`: browser side-effect inventory and enforce gates.
 - `synthetic-benchmark.md`: synthetic-policy scope and benchmark limitations.
 - `synthetic-payment-domain-pack.md`: approved sandbox facts, policy, console, and acceptance evidence.
-- `review.md`: architectural review history and decisions.
 - `final-product-charter.md`: final open-source product scope, milestones, and change control.
 - `framework-first-replan.md`: framework-first rationale and Pack boundaries.
 - `.claude/plans/m2-pack-sdk-static-conformance.md`: completed M2 implementation handoff.

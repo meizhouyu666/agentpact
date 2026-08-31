@@ -30,11 +30,7 @@ import { WorkflowRunCode } from "@/routes/workflows/workflowRun/WorkflowRunCode"
 import { DebugStoreProvider } from "@/store/DebugStoreContext";
 import { CredentialsPage } from "@/routes/credentials/CredentialsPage.tsx";
 import { RunRouter } from "@/routes/runs/RunRouter";
-import { DashboardPage } from "@/routes/enterprise/dashboard/DashboardPage";
 import { ApprovalsPage } from "@/routes/enterprise/approvals/ApprovalsPage";
-import { AuditLogsPage } from "@/routes/enterprise/audit/AuditLogsPage";
-import { PermissionsPage } from "@/routes/enterprise/permissions/PermissionsPage";
-import { LLMMonitorPage } from "@/routes/enterprise/llm/LLMMonitorPage";
 import { AgentRunsPage } from "@/routes/enterprise/agent-runs/AgentRunsPage";
 import { LoginPage } from "@/routes/auth/LoginPage";
 import { AuthGuard } from "@/components/AuthGuard";
@@ -265,16 +261,6 @@ const router = createBrowserRouter([
         ],
       },
       {
-        path: "enterprise/dashboard",
-        element: <PageLayout />,
-        children: [
-          {
-            index: true,
-            element: <DashboardPage />,
-          },
-        ],
-      },
-      {
         path: "enterprise/agent-runs",
         element: <PageLayout />,
         children: [
@@ -291,36 +277,6 @@ const router = createBrowserRouter([
           {
             index: true,
             element: <ApprovalsPage />,
-          },
-        ],
-      },
-      {
-        path: "enterprise/audit",
-        element: <PageLayout />,
-        children: [
-          {
-            index: true,
-            element: <AuditLogsPage />,
-          },
-        ],
-      },
-      {
-        path: "enterprise/permissions",
-        element: <PageLayout />,
-        children: [
-          {
-            index: true,
-            element: <PermissionsPage />,
-          },
-        ],
-      },
-      {
-        path: "enterprise/llm",
-        element: <PageLayout />,
-        children: [
-          {
-            index: true,
-            element: <LLMMonitorPage />,
           },
         ],
       },

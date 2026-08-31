@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from enterprise.approval.pubsub import build_approval_request
+from enterprise.approval.requests import build_approval_request
 from enterprise.approval.routing import ApprovalRoute
 
 from .approval_pause_service import ApprovalPauseState, pause_for_approval
@@ -32,8 +32,7 @@ async def create_approval_pause(
 ) -> ApprovalPauseState:
     """Persist the complete approval pause in the caller's database transaction.
 
-    The caller must commit only after this returns. Redis notification, if any,
-    happens after commit and is deliberately outside this function.
+    The caller must commit only after this returns.
     """
 
     pending_action = await create_pending_action(

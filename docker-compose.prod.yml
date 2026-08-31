@@ -52,17 +52,6 @@ services:
           memory: 768M
 
   # ============================================================
-  # MinIO — Production settings
-  # ============================================================
-  minio:
-    restart: always
-    ports: []  # No exposed ports in production (accessed via internal network)
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-
-  # ============================================================
   # Skyvern API — Production mode
   # ============================================================
   skyvern:
@@ -115,4 +104,3 @@ services:
 volumes:
   postgres-data:
   redis-data:
-  minio-data:

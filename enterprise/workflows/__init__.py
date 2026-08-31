@@ -1,1 +1,0 @@
-"""Financial scenario workflow templates."""

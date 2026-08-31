@@ -1,12 +1,12 @@
-/**
- * Enterprise Approval Center — list pending approvals with approve/reject actions.
- */
+import {
+  CheckCircledIcon,
+  CrossCircledIcon,
+  ReloadIcon,
+} from "@radix-ui/react-icons";
+import { useCallback, useEffect, useState } from "react";
 
-import { useEffect, useState } from "react";
-import { GlassCard } from "@/components/enterprise/GlassCard";
-import { RiskBadge } from "@/components/enterprise/RiskBadge";
-import { Icon } from "@/components/Icon";
 import { useI18n } from "@/i18n/useI18n";
+import type { MessageKey } from "@/i18n/locales";
 import { authFetch } from "@/util/authFetch";
 
 type ApprovalRequest = {
@@ -17,235 +17,237 @@ type ApprovalRequest = {
   operation_description: string | null;
   department_id: string;
   business_line_id: string | null;
+  screenshot_path: string | null;
   requested_at: string;
-  screenshot_path?: string | null;
   status: string;
 };
 
-// Lookup maps matching seed_demo_data.sql
-const DEPT_NAMES: Record<string, string> = {
-  dept_corp_credit: "对公信贷部",
-  dept_personal_fin: "个人金融部",
-  dept_asset_mgmt: "资产管理部",
-  dept_risk_mgmt: "风险管理部",
-  dept_compliance: "合规审计部",
-  dept_it: "信息技术部",
-};
-const BL_NAMES: Record<string, string> = {
-  bl_corp_loan: "对公贷款",
-  bl_retail_credit: "零售信贷",
-  bl_wealth_mgmt: "财富管理",
-  bl_intl_settle: "国际结算",
+const riskLabels: Record<string, MessageKey> = {
+  low: "common.riskLow",
+  medium: "common.riskMedium",
+  high: "common.riskHigh",
+  critical: "common.riskCritical",
 };
 
-function demoApprovals(): ApprovalRequest[] {
-  return [
-    {
-      approval_id: "apr_001",
-      task_id: "tsk_demo_0245",
-      risk_level: "high",
-      risk_reason: "大额交易操作，金额超过100万元",
-      operation_description: "企业贷款申请材料审核",
-      department_id: "dept_corp_credit",
-      business_line_id: "bl_corp_loan",
-      requested_at: "2026-03-07T10:30:00",
-      status: "pending",
-    },
-    {
-      approval_id: "apr_002",
-      task_id: "tsk_demo_0248",
-      risk_level: "critical",
-      risk_reason: "核心数据库批量修改",
-      operation_description: "客户KYC信息更新",
-      department_id: "dept_personal_fin",
-      business_line_id: "bl_retail_credit",
-      requested_at: "2026-03-07T09:15:00",
-      status: "pending",
-    },
-    {
-      approval_id: "apr_003",
-      task_id: "tsk_demo_0250",
-      risk_level: "high",
-      risk_reason: "跨境交易金额异常",
-      operation_description: "跨境汇款合规审查",
-      department_id: "dept_corp_credit",
-      business_line_id: "bl_intl_settle",
-      requested_at: "2026-03-07T08:45:00",
-      status: "pending",
-    },
-  ];
-}
+const riskStyles: Record<string, string> = {
+  low: "border-emerald-200 bg-emerald-50 text-emerald-700",
+  medium: "border-amber-200 bg-amber-50 text-amber-700",
+  high: "border-orange-200 bg-orange-50 text-orange-700",
+  critical: "border-red-200 bg-red-50 text-red-700",
+};
 
 function ApprovalCard({
   item,
-  onApprove,
-  onReject,
+  deciding,
+  onDecision,
 }: {
   item: ApprovalRequest;
-  onApprove: (id: string) => void;
-  onReject: (id: string) => void;
+  deciding: boolean;
+  onDecision: (id: string, approved: boolean, note: string) => Promise<void>;
 }) {
   const { t } = useI18n();
-  const [remark, setRemark] = useState("");
+  const [note, setNote] = useState("");
+  const riskLabel = riskLabels[item.risk_level];
 
   return (
-    <GlassCard hoverable={false} padding="md" className="mb-4">
-      <div className="flex gap-6">
-        {/* Screenshot area */}
-        <div className="hidden w-48 shrink-0 sm:block">
-          {item.screenshot_path ? (
-            <img
-              src={item.screenshot_path}
-              alt="Task screenshot"
-              className="h-32 w-full rounded-lg border border-gray-200 object-cover"
-            />
-          ) : (
-            <div className="flex h-32 w-full items-center justify-center rounded-lg border border-dashed border-gray-300 bg-gray-50">
-              <span className="text-xs text-gray-400">{t("approvals.noScreenshot")}</span>
-            </div>
-          )}
-        </div>
-
-        {/* Content */}
-        <div className="flex-1">
-          <div className="mb-2 flex items-center gap-3">
-            <RiskBadge level={item.risk_level} />
-            <span className="text-xs" style={{ color: "var(--finrpa-text-muted)" }}>
-              {DEPT_NAMES[item.department_id] ?? item.department_id}
-              {item.business_line_id && ` / ${BL_NAMES[item.business_line_id] ?? item.business_line_id}`}
+    <article className="rounded-md border bg-background p-4 shadow-sm">
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_12rem]">
+        <div className="min-w-0 space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <span
+              className={`rounded border px-2 py-0.5 text-xs font-medium ${
+                riskStyles[item.risk_level] ?? "border-gray-200 bg-gray-50 text-gray-700"
+              }`}
+            >
+              {riskLabel ? t(riskLabel) : item.risk_level}
+            </span>
+            <span className="text-xs text-muted-foreground">
+              {item.department_id}
+              {item.business_line_id ? ` / ${item.business_line_id}` : ""}
             </span>
           </div>
 
-          <h3 className="text-sm font-semibold" style={{ color: "var(--finrpa-text-primary)" }}>
-            {item.operation_description ?? item.task_id}
-          </h3>
-
-          <p className="mt-1 text-sm" style={{ color: "var(--finrpa-text-secondary)" }}>
-            {item.risk_reason}
-          </p>
-
-          <div className="mt-2 flex items-center gap-4 text-xs" style={{ color: "var(--finrpa-text-muted)" }}>
-            <span>{t("approvals.task")}: {item.task_id}</span>
-            <span>{t("approvals.requested")}: {new Date(item.requested_at).toLocaleString()}</span>
+          <div>
+            <h2 className="text-sm font-semibold">
+              {item.operation_description ?? item.task_id}
+            </h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {item.risk_reason}
+            </p>
           </div>
+
+          <dl className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-muted-foreground">
+            <div>
+              <dt className="inline font-medium">{t("approvals.task")}: </dt>
+              <dd className="inline">{item.task_id}</dd>
+            </div>
+            <div>
+              <dt className="inline font-medium">{t("approvals.requested")}: </dt>
+              <dd className="inline">
+                {new Date(item.requested_at).toLocaleString()}
+              </dd>
+            </div>
+          </dl>
+
+          {item.screenshot_path ? (
+            <img
+              src={item.screenshot_path}
+              alt=""
+              className="max-h-64 rounded border object-contain"
+            />
+          ) : null}
         </div>
 
-        {/* Actions */}
-        <div className="flex shrink-0 flex-col gap-2" style={{ width: 180 }}>
+        <div className="flex flex-col gap-2">
           <input
-            className="glass-input text-xs"
+            className="h-9 rounded-md border bg-background px-3 text-sm"
             placeholder={t("approvals.remarkPlaceholder")}
-            value={remark}
-            onChange={(e) => setRemark(e.target.value)}
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            disabled={deciding}
           />
           <button
-            className="glass-btn-primary flex items-center justify-center gap-1 text-sm"
-            onClick={() => onApprove(item.approval_id)}
+            type="button"
+            className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground disabled:opacity-50"
+            onClick={() => void onDecision(item.approval_id, true, note)}
+            disabled={deciding}
           >
-            <Icon name="check-circle" size={16} color="white" />
+            {deciding ? (
+              <ReloadIcon className="size-4 animate-spin" />
+            ) : (
+              <CheckCircledIcon className="size-4" />
+            )}
             {t("approvals.approve")}
           </button>
           <button
-            className="flex items-center justify-center gap-1 rounded-lg border border-red-300 bg-white px-3 py-1.5 text-sm font-medium text-red-600 transition-colors hover:bg-red-50"
-            onClick={() => onReject(item.approval_id)}
+            type="button"
+            className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-red-300 px-3 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+            onClick={() => void onDecision(item.approval_id, false, note)}
+            disabled={deciding}
           >
-            <Icon name="x-circle" size={16} color="#DC2626" />
+            <CrossCircledIcon className="size-4" />
             {t("approvals.reject")}
           </button>
         </div>
       </div>
-    </GlassCard>
+    </article>
   );
 }
 
 export function ApprovalsPage() {
   const { t } = useI18n();
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [decidingId, setDecidingId] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await authFetch(
+        "/api/v1/enterprise/approvals/pending",
+      );
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      setApprovals((await response.json()) as ApprovalRequest[]);
+    } catch (loadError) {
+      setApprovals([]);
+      setError(
+        loadError instanceof Error ? loadError.message : t("common.unknownError"),
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, [t]);
 
   useEffect(() => {
-    async function load() {
-      try {
-        const resp = await authFetch("/api/v1/enterprise/approvals/pending");
-        if (resp.ok) {
-          const data = await resp.json();
-          setApprovals(data);
-          return;
-        }
-      } catch {
-        // fall through to demo
-      }
-      setApprovals(demoApprovals());
-    }
-    load();
-  }, []);
+    void load();
+  }, [load]);
 
-  async function handleApprove(id: string) {
+  async function decide(
+    approvalId: string,
+    approved: boolean,
+    note: string,
+  ) {
+    setDecidingId(approvalId);
+    setError(null);
     try {
-      const resp = await authFetch(`/api/v1/enterprise/approvals/${id}/approve`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ note: "" }),
-      });
-      if (resp.ok) {
-        setApprovals((prev) => prev.filter((a) => a.approval_id !== id));
+      const action = approved ? "approve" : "reject";
+      const response = await authFetch(
+        `/api/v1/enterprise/approvals/${approvalId}/${action}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ note }),
+        },
+      );
+      if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as
+          | { detail?: string }
+          | null;
+        throw new Error(body?.detail ?? `HTTP ${response.status}`);
       }
-    } catch {
-      // In demo mode, just remove from local state
-      setApprovals((prev) => prev.filter((a) => a.approval_id !== id));
-    }
-  }
-
-  async function handleReject(id: string) {
-    try {
-      const resp = await authFetch(`/api/v1/enterprise/approvals/${id}/reject`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ note: "" }),
-      });
-      if (resp.ok) {
-        setApprovals((prev) => prev.filter((a) => a.approval_id !== id));
-      }
-    } catch {
-      setApprovals((prev) => prev.filter((a) => a.approval_id !== id));
+      setApprovals((current) =>
+        current.filter((item) => item.approval_id !== approvalId),
+      );
+    } catch (decisionError) {
+      setError(
+        decisionError instanceof Error
+          ? decisionError.message
+          : t("common.unknownError"),
+      );
+    } finally {
+      setDecidingId(null);
     }
   }
 
   return (
-    <div className="space-y-6 p-6">
-      <div className="flex items-center gap-3">
-        <Icon name="approval" size={24} color="var(--finrpa-blue)" />
-        <h1 className="text-xl font-bold" style={{ color: "var(--finrpa-blue)" }}>
-          {t("approvals.title")}
-        </h1>
-        <span
-          className="ml-2 rounded-full px-2.5 py-0.5 text-xs font-bold"
-          style={{
-            background: "var(--finrpa-gold)",
-            color: "white",
-          }}
+    <div className="space-y-4 p-6">
+      <header className="flex items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <h1 className="text-xl font-semibold">{t("approvals.title")}</h1>
+          <span className="rounded-full border px-2 py-0.5 text-xs font-medium">
+            {approvals.length}
+          </span>
+        </div>
+        <button
+          type="button"
+          className="inline-flex size-9 items-center justify-center rounded-md border hover:bg-muted"
+          onClick={() => void load()}
+          disabled={loading}
+          title={t("common.refresh")}
         >
-          {approvals.length}
-        </span>
-      </div>
+          <ReloadIcon className={`size-4 ${loading ? "animate-spin" : ""}`} />
+        </button>
+      </header>
 
-      {approvals.length === 0 ? (
-        <GlassCard hoverable={false} padding="lg">
-          <div className="flex flex-col items-center justify-center py-12">
-            <Icon name="check-circle" size={48} color="var(--status-completed)" />
-            <p className="mt-4 text-sm font-medium" style={{ color: "var(--finrpa-text-secondary)" }}>
-              {t("approvals.allCaughtUp")}
-            </p>
-          </div>
-        </GlassCard>
+      {error ? (
+        <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          {t("common.error")}: {error}
+        </div>
+      ) : null}
+
+      {loading ? (
+        <div className="py-12 text-center text-sm text-muted-foreground">
+          {t("common.loading")}
+        </div>
+      ) : approvals.length === 0 ? (
+        <div className="rounded-md border border-dashed py-12 text-center text-sm text-muted-foreground">
+          {t("approvals.allCaughtUp")}
+        </div>
       ) : (
-        approvals.map((item) => (
-          <ApprovalCard
-            key={item.approval_id}
-            item={item}
-            onApprove={handleApprove}
-            onReject={handleReject}
-          />
-        ))
+        <div className="space-y-3">
+          {approvals.map((item) => (
+            <ApprovalCard
+              key={item.approval_id}
+              item={item}
+              deciding={decidingId === item.approval_id}
+              onDecision={decide}
+            />
+          ))}
+        </div>
       )}
     </div>
   );
