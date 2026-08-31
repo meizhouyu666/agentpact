@@ -94,18 +94,24 @@ Action execution is AgentPact-owned Playwright code even when this adapter is
 used. The direct `PlaywrightPageRuntime` has no Skyvern dependency, so callers
 can migrate immediately when they already own browser lifecycle/session setup.
 
-No Skyvern product-shell code is removed in this change. The old Forge loop is
-still used by legacy callers, and the new slice supplies replacement evidence
-only for new AgentPact-owned entrypoints. Removing Forge routes, workflows,
-Task/Step persistence, or `ActionHandler` would therefore be premature.
+The synthetic Agent Run now routes its `precheck` and `confirm` Domain Pack
+steps through this loop with direct Playwright observation, deterministic Pack
+decisions, independent verification, and durable redacted events. Browser
+lifecycle still comes from the injected Skyvern browser manager, and the
+state-changing `submit` step still uses the legacy `ActionHandler` because it
+currently owns the proven Permit consumption and crash-safe Attempt boundary.
+Removing Forge routes, workflows, Task/Step persistence, or `ActionHandler`
+would therefore still be premature.
 
 ## Next Extraction Step
 
 Move browser lifecycle/session ownership behind a new AgentPact runtime factory
 and port the remaining Skyvern scraper behavior needed in production (iframe
-enumeration, interactable-tree normalization, and split screenshots). Then
-switch Agent Run/Domain Pack composition to construct `AgentPactBrowserLoop`
-with its durable policy, permit, event, and result-probe adapters. Once all
-callers use that path, remove `SkyvernScraperRuntimeAdapter` and demonstrate
-that no AgentPact entrypoint imports `skyvern.forge.agent` or
-`skyvern.webeye.actions.handler` before deleting any legacy product shell.
+enumeration, interactable-tree normalization, and split screenshots). Next,
+add an AgentPact-owned persisted execution runtime that validates freshness,
+consumes the Permit, commits the Attempt before the browser call, and exposes
+the exact Attempt to result-probe recovery. Only then switch the synthetic
+`submit` step away from `ActionHandler`. Once all callers use that path, remove
+`SkyvernScraperRuntimeAdapter` and demonstrate that no AgentPact entrypoint
+imports `skyvern.forge.agent` or `skyvern.webeye.actions.handler` before
+deleting any legacy product shell.

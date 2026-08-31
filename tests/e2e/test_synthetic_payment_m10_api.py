@@ -23,7 +23,12 @@ from enterprise.auth.models import BusinessLineModel, DepartmentModel
 from enterprise.auth.schemas import DepartmentRole, UserContext
 from enterprise.domains.synthetic_payment.constants import BUSINESS_LINE_ID, PAYMENTS_DEPARTMENT_ID
 from enterprise.domains.synthetic_payment.m10_runtime import SyntheticPaymentRuntimeAdapter
-from enterprise.governance.models import ExecutionAttemptModel, ExecutionPermitModel, PendingActionModel
+from enterprise.governance.models import (
+    ExecutionAttemptModel,
+    ExecutionPermitModel,
+    GovernanceAuditEventModel,
+    PendingActionModel,
+)
 from skyvern.forge.sdk.db.models import OrganizationModel
 
 ORGANIZATION_ID = "org-m10-agent-run-api"
@@ -230,6 +235,23 @@ def test_m10_recorded_api_uses_boot_driver_reobserves_permits_and_probes_once() 
                         permits = list((await session.scalars(select(ExecutionPermitModel))).all())
                         attempts = list((await session.scalars(select(ExecutionAttemptModel))).all())
                         pending = list((await session.scalars(select(PendingActionModel))).all())
+                        browser_events = list(
+                            (
+                                await session.scalars(
+                                    select(GovernanceAuditEventModel).where(
+                                        GovernanceAuditEventModel.event_type.like("browser.loop.%")
+                                    )
+                                )
+                            ).all()
+                        )
+                    assert Counter(event.event_type for event in browser_events) == {
+                        "browser.loop.observation": 2,
+                        "browser.loop.decision": 2,
+                        "browser.loop.verification": 2,
+                        "browser.loop.terminal": 2,
+                    }
+                    assert len({event.task_id for event in browser_events}) == 2
+                    assert all(event.action_fingerprint is None for event in browser_events)
                     return {
                         "fresh_observation": pending[0].observation_hash != permits[0].observation_hash,
                         "effect_count": len(attempts),

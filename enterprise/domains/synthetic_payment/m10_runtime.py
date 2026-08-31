@@ -22,7 +22,28 @@ from enterprise.agent.constrained_planner import (
 )
 from enterprise.agent.interactions import CapabilityRequest, CapabilityRequestKind, EntryMode
 from enterprise.auth.schemas import DepartmentRole, UserContext
-from enterprise.governance.admission import AdmissionAuditRecord, GovernedTaskDraft, TaskAdmissionBundle
+from enterprise.browser_loop.contracts import (
+    ActionDecision,
+    BrowserLoopConfig,
+    BrowserLoopRunContext,
+    BrowserLoopStatus,
+    DecisionKind,
+    ModelInput,
+    PolicyAuthorization,
+    PolicyDisposition,
+    VerificationDisposition,
+    VerificationRequest,
+    VerificationResult,
+)
+from enterprise.browser_loop.integrations import SqlAlchemyBrowserLoopEventSink
+from enterprise.browser_loop.loop import AgentPactBrowserLoop
+from enterprise.browser_loop.runtime import PlaywrightPageRuntime
+from enterprise.governance.admission import (
+    AdmissionAuditRecord,
+    GovernedTaskDraft,
+    TaskAdmissionBundle,
+    canonical_task_admission_payload,
+)
 from enterprise.governance.audit import observation_hash
 from enterprise.governance.capabilities import CapabilityDataScope
 from enterprise.governance.classification import action_fingerprint
@@ -321,6 +342,86 @@ class _M10FreshPermitAuthorizer:
         )
 
 
+class _UnavailableBrowserActionModel:
+    async def decide(self, _model_input: ModelInput) -> ActionDecision:
+        raise RuntimeError("Synthetic read steps require a deterministic Domain Pack decision")
+
+
+class _SyntheticReadPolicy:
+    async def prepare_model_input(
+        self,
+        *,
+        run: BrowserLoopRunContext,
+        observation: Any,
+    ) -> ModelInput:
+        return ModelInput(
+            observation_id=observation.observation_id,
+            goal=run.goal,
+            url=observation.url,
+            dom=observation.model_dom,
+            screenshots=observation.screenshots,
+            allowed_action_kinds=(),
+        )
+
+    async def authorize_action(self, **_kwargs: Any) -> PolicyAuthorization:
+        return PolicyAuthorization(
+            disposition=PolicyDisposition.DENY,
+            reason_code="READ_STEP_ACTION_DENIED",
+        )
+
+
+class _SyntheticReadActions:
+    binding = PackRuntimeBinding(
+        pack_id=PACK_ID,
+        pack_version=PACK_VERSION,
+        capability_ids=(CAPABILITY_ID,),
+        adapter_id="synthetic.payment.browser-read.v1",
+    )
+
+    async def decide(
+        self,
+        *,
+        run: BrowserLoopRunContext,
+        observation: Any,
+    ) -> ActionDecision:
+        role = run.metadata.get("step_role")
+        if role not in {"precheck", "confirm"}:
+            return ActionDecision(
+                kind=DecisionKind.FAILURE,
+                observation_id=observation.observation_id,
+                reason_code="UNSUPPORTED_READ_STEP",
+            )
+        return ActionDecision(
+            kind=DecisionKind.SUCCESS,
+            observation_id=observation.observation_id,
+            reason_code="DOMAIN_PAGE_READY",
+        )
+
+
+class _SyntheticReadVerifier:
+    _REQUIRED_CONTROLS = {
+        "Create synthetic payment challenge",
+        "Execute synthetic payment once",
+    }
+
+    def __init__(self, *, target_url: str) -> None:
+        self._target_url = target_url.rstrip("/")
+
+    async def verify(self, request: VerificationRequest) -> VerificationResult:
+        names = {element.name for element in request.after.elements if element.name}
+        valid = (
+            request.source.value == "domain_pack"
+            and request.decision.kind is DecisionKind.SUCCESS
+            and request.after.url.rstrip("/") == self._target_url
+            and self._REQUIRED_CONTROLS <= names
+        )
+        return VerificationResult(
+            disposition=(VerificationDisposition.SUCCEEDED if valid else VerificationDisposition.FAILED),
+            reason_code="DOMAIN_PAGE_VERIFIED" if valid else "DOMAIN_PAGE_MISMATCH",
+            evidence_refs=("agentpact://synthetic.payment/page-contract/v1",) if valid else (),
+        )
+
+
 class TrustedSyntheticM10Driver:
     """Trusted recorded-mode native composition used by the mounted application."""
 
@@ -346,6 +447,7 @@ class TrustedSyntheticM10Driver:
     ) -> NativeWorkOutcome:
         role = compilation.work_order.navigation_goal.split(" governed ", 1)[1].split(" for ", 1)[0]
         if role != "submit":
+            await self._execute_read_step(compilation=compilation, binding=binding, role=role)
             await self._complete_read(binding)
             return NativeWorkOutcome(kind=NativeWorkOutcomeKind.COMPLETED)
         if not self._hmac_secret:
@@ -353,6 +455,46 @@ class TrustedSyntheticM10Driver:
         if resume:
             return await self._execute_after_approval(compilation=compilation, binding=binding)
         return await self._request_approval(compilation=compilation, binding=binding)
+
+    async def _execute_read_step(
+        self,
+        *,
+        compilation: Any,
+        binding: NativeSkyvernBinding,
+        role: str,
+    ) -> None:
+        _task, _step, page, _browser_state = await self._browser_context(binding)
+        loop = AgentPactBrowserLoop(
+            runtime=PlaywrightPageRuntime(page, capture_screenshot=False, clock=self._clock),
+            model=_UnavailableBrowserActionModel(),
+            policy=_SyntheticReadPolicy(),
+            verifier=_SyntheticReadVerifier(target_url=self._target_url),
+            event_sink=SqlAlchemyBrowserLoopEventSink(
+                self._session_factory,
+                organization_id=binding.organization_id,
+                contract_id=binding.contract_id,
+                policy_version=POLICY_VERSION,
+            ),
+            integrity_secret=self._hmac_secret,
+            domain_actions=_SyntheticReadActions(),
+            config=BrowserLoopConfig(max_iterations=1, max_retries=0),
+            clock=self._clock,
+        )
+        report = await loop.run(
+            BrowserLoopRunContext(
+                run_id=compilation.business_plan.task_id,
+                task_id=binding.native_task_id,
+                step_id=binding.native_step_id,
+                goal=compilation.work_order.navigation_goal,
+                pack_id=PACK_ID,
+                pack_version=PACK_VERSION,
+                capability_id=CAPABILITY_ID,
+                contract_id=binding.contract_id,
+                metadata={"step_role": role},
+            )
+        )
+        if report.status is not BrowserLoopStatus.SUCCEEDED:
+            raise ValueError(f"M10 read step browser loop failed: {report.reason_code}")
 
     async def probe(
         self,
@@ -950,7 +1092,7 @@ class SyntheticPaymentRuntimeAdapter:
                     if TaskAdmissionBundle.model_validate(existing.bundle_payload) != bundle:
                         raise ValueError("M10 request id was reused with different trusted semantics")
                     return
-                payload = bundle.model_dump(mode="json")
+                payload = canonical_task_admission_payload(bundle)
                 session.add(
                     GovernedTaskAdmissionModel(
                         admission_id=bundle.admission_id,

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import pytest
 
 from enterprise.browser_loop.contracts import (
     ActionDecision,
+    BrowserLoopEvent,
     BrowserLoopRunContext,
     BrowserObservation,
     DecisionKind,
@@ -15,7 +17,11 @@ from enterprise.browser_loop.contracts import (
     VerificationDisposition,
     VerificationRequest,
 )
-from enterprise.browser_loop.integrations import BusinessResultProbeVerifier, ResultProbeBinding
+from enterprise.browser_loop.integrations import (
+    BusinessResultProbeVerifier,
+    ResultProbeBinding,
+    SqlAlchemyBrowserLoopEventSink,
+)
 from enterprise.governance.result_probes import ResultProbeEvidence, ResultProbeStatus
 
 
@@ -90,3 +96,59 @@ async def test_business_result_probe_status_is_authoritative(
     assert result.disposition is expected
     assert result.evidence_refs == ("enterprise.work.result-probe.v1", "c" * 64)
     assert probe.calls == [("resource-001", "idem-001")]
+
+
+class _Transaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return None
+
+
+class _Session:
+    def __init__(self) -> None:
+        self.added = []
+
+    def begin(self):
+        return _Transaction()
+
+    def add(self, value) -> None:
+        self.added.append(value)
+
+
+@pytest.mark.asyncio
+async def test_sqlalchemy_event_sink_persists_only_redacted_loop_contract() -> None:
+    session = _Session()
+
+    @asynccontextmanager
+    async def session_factory():
+        yield session
+
+    sink = SqlAlchemyBrowserLoopEventSink(
+        session_factory,
+        organization_id="org-browser-001",
+        contract_id="contract-browser-001",
+        policy_version="policy-v1",
+    )
+    event = BrowserLoopEvent(
+        sequence=1,
+        run_id="run-browser-001",
+        task_id="task-browser-001",
+        step_id="step-browser-001",
+        stage="observation",
+        code="OBSERVATION_CAPTURED",
+        occurred_at=datetime(2026, 8, 31, tzinfo=timezone.utc),
+        observation_id="a" * 64,
+        details={"sequence": 1},
+    )
+
+    await sink.emit(event)
+
+    assert len(session.added) == 1
+    stored = session.added[0]
+    assert stored.event_type == "browser.loop.observation"
+    assert stored.organization_id == "org-browser-001"
+    assert stored.contract_id == "contract-browser-001"
+    assert stored.payload == event.model_dump(mode="json")
+    assert stored.policy_version == "policy-v1"

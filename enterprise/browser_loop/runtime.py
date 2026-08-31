@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -28,12 +29,20 @@ from .ports import BrowserRuntimeError, StaleObservationError
 class PlaywrightPageRuntime:
     """Operate an injected Playwright-compatible page without product services."""
 
-    def __init__(self, page: Any, *, capture_screenshot: bool = True, max_elements: int = 500) -> None:
+    def __init__(
+        self,
+        page: Any,
+        *,
+        capture_screenshot: bool = True,
+        max_elements: int = 500,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         if max_elements < 1:
             raise ValueError("max_elements must be positive")
         self._page = page
         self._capture_screenshot = capture_screenshot
         self._max_elements = max_elements
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._selectors: dict[str, str] = {}
 
     async def observe(self) -> RawBrowserObservation:
@@ -70,7 +79,7 @@ class PlaywrightPageRuntime:
             model_dom=json.dumps(model_elements, ensure_ascii=True, separators=(",", ":")),
             screenshots=screenshots,
             elements=tuple(elements),
-            captured_at=datetime.now(timezone.utc),
+            captured_at=self._clock(),
         )
 
     async def execute(self, command: AuthorizedAction) -> BrowserActionResult:
@@ -157,8 +166,14 @@ class SkyvernScraperRuntimeAdapter(PlaywrightPageRuntime):
         *,
         capture_screenshot: bool = True,
         max_elements: int = 500,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
-        super().__init__(page=None, capture_screenshot=capture_screenshot, max_elements=max_elements)
+        super().__init__(
+            page=None,
+            capture_screenshot=capture_screenshot,
+            max_elements=max_elements,
+            clock=clock,
+        )
         self._browser_state = browser_state
 
     async def observe(self) -> RawBrowserObservation:
@@ -201,7 +216,7 @@ class SkyvernScraperRuntimeAdapter(PlaywrightPageRuntime):
             model_dom=scraped.build_element_tree(),
             screenshots=tuple(scraped.screenshots),
             elements=tuple(elements),
-            captured_at=datetime.now(timezone.utc),
+            captured_at=self._clock(),
         )
 
 

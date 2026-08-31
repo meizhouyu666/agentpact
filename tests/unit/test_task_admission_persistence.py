@@ -11,7 +11,11 @@ from sqlalchemy import inspect
 from enterprise.domains.synthetic_payment.admission_entry import SyntheticPaymentTaskAdmissionEntry
 from enterprise.domains.synthetic_payment.constants import CAPABILITY_ID, TENANT_ID
 from enterprise.domains.synthetic_payment.models import PaymentFacts
-from enterprise.governance.admission import GovernedTaskAdmissionService
+from enterprise.governance.admission import (
+    GovernedTaskAdmissionService,
+    TaskAdmissionBundle,
+    canonical_task_admission_payload,
+)
 from enterprise.governance.admission_persistence import (
     SqlAlchemyTaskAdmissionRepository,
     TaskAdmissionConflict,
@@ -148,6 +152,22 @@ def test_repository_requires_explicit_nonempty_scope_allowlists():
         )
 
 
+def test_canonical_admission_payload_is_stable_across_unordered_json_round_trip() -> None:
+    bundle = _bundle()
+    expected = canonical_task_admission_payload(bundle)
+    reordered = bundle.model_dump(mode="json")
+    reordered["contract"]["allowed_operations"].reverse()
+    reordered["request"]["resource_refs"].reverse()
+    reordered["grants"][0]["allowed_dimensions"].reverse()
+    for work_order in reordered["work_orders"]:
+        work_order["allowed_operations"].reverse()
+        work_order["prohibited_operations"].reverse()
+
+    restored = TaskAdmissionBundle.model_validate(reordered)
+
+    assert canonical_task_admission_payload(restored) == expected
+
+
 @pytest.mark.asyncio
 async def test_repository_rejects_a_tenant_or_capability_outside_its_allowlist():
     bundle = _bundle()
@@ -188,6 +208,9 @@ async def test_repository_commits_admission_and_redacted_outbox_in_one_transacti
     assert store.flush_count == 2
     assert len(store.admissions) == 1
     assert len(store.outboxes) == 1
+    assert store.admissions[(TENANT_ID, bundle.request.request_id)].bundle_payload == canonical_task_admission_payload(
+        bundle
+    )
     assert store.outboxes[0].admission_id == receipt.admission_id
     assert "typed_inputs" not in str(store.outboxes[0].payload)
     assert store.outboxes[0].status == "pending"

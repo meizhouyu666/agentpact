@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from enterprise.agent.work_orders import ExecutionWorkOrder, SkyvernPreparationReceipt
-from enterprise.governance.admission import TaskAdmissionBundle
+from enterprise.governance.admission import TaskAdmissionBundle, canonical_task_admission_payload
 from enterprise.governance.contracts import (
     ActionIntent,
     DecisionOutcome,
@@ -342,7 +342,7 @@ class NativeSkyvernWorkOrderAdapter:
             "adapter_ref": SYNTHETIC_ADAPTER_REF,
             "result_probe_ref": work_order.result_probe_ref,
             "navigation_payload_digest": _canonical_digest(self._navigation_payload),
-            "admission_bundle_digest": _canonical_digest(bundle),
+            "admission_bundle_digest": _canonical_digest(canonical_task_admission_payload(bundle)),
             "compilation_digest": _canonical_digest(compilation),
             "expires_at": execution_binding.expires_at,
         }
@@ -950,7 +950,10 @@ async def _load_admission(
         or admission.request_id != binding.request_id
         or admission.task_id != expected_plan_task_id
         or admission.contract_id != expected_authority_contract_id
-        or _canonical_digest(admission.bundle_payload) != binding.admission_bundle_digest
+        or _canonical_digest(
+            canonical_task_admission_payload(TaskAdmissionBundle.model_validate(admission.bundle_payload))
+        )
+        != binding.admission_bundle_digest
     ):
         raise NativePublicationConflict("M7 durable admission does not match the native binding")
     return admission

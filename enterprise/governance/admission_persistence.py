@@ -16,6 +16,7 @@ from enterprise.governance.admission import (
     TaskAdmissionBundle,
     TaskAdmissionReceipt,
     TaskAdmissionRepository,
+    canonical_task_admission_payload,
 )
 from enterprise.governance.contracts import GovernanceMode
 from enterprise.governance.models import GovernanceOutboxModel, GovernedTaskAdmissionModel
@@ -67,7 +68,7 @@ class SqlAlchemyTaskAdmissionRepository(TaskAdmissionRepository):
         if not capability_ids <= self._allowed_capability_ids:
             raise ValueError("Task admission capability is outside the repository allowlist")
 
-        payload = bundle.model_dump(mode="json")
+        payload = canonical_task_admission_payload(bundle)
         admission_fingerprint = _admission_fingerprint(bundle)
         bundle_fingerprint = _fingerprint(payload)
         committed_at = self._clock()
@@ -175,7 +176,7 @@ def _to_receipt(model: GovernedTaskAdmissionModel, *, duplicate: bool) -> TaskAd
 
 
 def _admission_fingerprint(bundle: TaskAdmissionBundle) -> str:
-    payload = bundle.model_dump(mode="json")
+    payload = canonical_task_admission_payload(bundle)
     payload["request"].pop("submitted_at", None)
     payload["creation_snapshot"].pop("created_at", None)
     payload["contract"].pop("expires_at", None)

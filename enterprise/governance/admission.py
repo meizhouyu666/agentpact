@@ -79,6 +79,30 @@ class TaskAdmissionBundle(BaseModel):
     audit_record: AdmissionAuditRecord
 
 
+def canonical_task_admission_payload(bundle: TaskAdmissionBundle) -> dict[str, Any]:
+    """Return the stable JSON representation used by persistence and bindings."""
+
+    payload = bundle.model_dump(mode="json")
+    payload["contract"]["allowed_operations"] = sorted(bundle.contract.allowed_operations)
+    _sort_scope_resources(payload["contract"]["data_scope"])
+    payload["request"]["resource_refs"] = sorted(bundle.request.resource_refs)
+    _sort_scope_resources(payload["request"]["requested_scope"])
+    _sort_scope_resources(payload["plan"]["data_scope"])
+    for grant_payload, grant in zip(payload["grants"], bundle.grants, strict=True):
+        grant_payload["allowed_dimensions"] = sorted(dimension.value for dimension in grant.allowed_dimensions)
+        _sort_scope_resources(grant_payload["data_scope"])
+    for work_order_payload, work_order in zip(payload["work_orders"], bundle.work_orders, strict=True):
+        work_order_payload["allowed_operations"] = sorted(work_order.allowed_operations)
+        work_order_payload["prohibited_operations"] = sorted(work_order.prohibited_operations)
+    return payload
+
+
+def _sort_scope_resources(scope_payload: dict[str, Any]) -> None:
+    resource_ids = scope_payload.get("resource_ids")
+    if isinstance(resource_ids, list):
+        scope_payload["resource_ids"] = sorted(resource_ids)
+
+
 class TaskAdmissionReceipt(BaseModel):
     """Repository acknowledgement after the atomic transaction commits."""
 
