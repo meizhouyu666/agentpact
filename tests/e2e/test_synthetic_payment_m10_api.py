@@ -247,13 +247,22 @@ def test_m10_recorded_api_uses_boot_driver_reobserves_permits_and_probes_once() 
                             ).all()
                         )
                     assert Counter(event.event_type for event in browser_events) == {
-                        "browser.loop.observation": 2,
-                        "browser.loop.decision": 2,
-                        "browser.loop.verification": 2,
-                        "browser.loop.terminal": 2,
+                        "browser.loop.observation": 3,
+                        "browser.loop.decision": 3,
+                        "browser.loop.policy": 1,
+                        "browser.loop.action": 2,
+                        "browser.loop.verification": 3,
+                        "browser.loop.terminal": 3,
                     }
-                    assert len({event.task_id for event in browser_events}) == 2
-                    assert all(event.action_fingerprint is None for event in browser_events)
+                    assert len({event.task_id for event in browser_events}) == 3
+                    assert any(
+                        event.event_type == "browser.loop.policy" and event.action_fingerprint
+                        for event in browser_events
+                    )
+                    assert any(
+                        event.event_type == "browser.loop.action" and event.action_fingerprint
+                        for event in browser_events
+                    )
                     return {
                         "fresh_observation": pending[0].observation_hash != permits[0].observation_hash,
                         "effect_count": len(attempts),

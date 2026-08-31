@@ -25,7 +25,6 @@ from enterprise.auth.schemas import DepartmentRole, UserContext
 from enterprise.browser_loop.contracts import (
     ActionDecision,
     ActionKind,
-    AuthorizedAction,
     BrowserAction,
     BrowserLoopConfig,
     BrowserLoopRunContext,
@@ -197,7 +196,7 @@ def _recorded_provider(planner_input: M9PlanInput) -> M9PlannerProvider:
 
 
 def derive_agent_run_id(*, tenant_id: str, request_id: str) -> str:
-    return "run_m10_" + _digest(["agentpact-agent-run/v1", tenant_id, request_id])
+    return "run_" + _digest(["agentpact-agent-run/v1", tenant_id, request_id])
 
 
 def derive_admission_id(*, tenant_id: str, request_id: str) -> str:
@@ -644,6 +643,7 @@ class TrustedSyntheticM10Driver:
             task=task,
             step=step,
         )
+
         observed_inputs = await self._observed_business_inputs(page=page, compilation=compilation)
         decision = await _M10ApprovalEvaluator(approved=False).evaluate(
             intent=intent,
@@ -675,52 +675,52 @@ class TrustedSyntheticM10Driver:
         await self._mark_step_running(binding)
         task, step, page, _browser_state = await self._browser_context(binding)
         await page.evaluate("document.body.dataset.m10FreshObservation = 'approved'")
-        runtime, observation, action, execution_binding, intent = await self._fresh_submit_context(
-            compilation=compilation,
-            binding=binding,
-            page=page,
-            task=task,
-            step=step,
-        )
-        observed_inputs = await self._observed_business_inputs(page=page, compilation=compilation)
-        decision = await _M10ApprovalEvaluator(approved=True).evaluate(
-            intent=intent,
-            observed_business_inputs=observed_inputs,
-        )
-        if decision.outcome is not DecisionOutcome.ALLOW:
-            raise ValueError("M10 resume did not produce fresh Permit-backed authority")
-        facts = PaymentFacts.model_validate(compilation.business_plan.steps[0].inputs)
-        authorization, profile = await _M10FreshPermitAuthorizer(
-            self._session_factory,
-            payment_id=facts.payment_id,
-            clock=self._clock,
-            hmac_secret=self._hmac_secret,
-        ).authorize_agentpact(
-            task_id=task.task_id,
-            step_id=step.step_id,
-            action=action,
-            observation=observation,
-            binding=binding,
-            execution_binding=execution_binding,
-        )
-        result = await PersistedBrowserExecutor(
+        runtime = PlaywrightPageRuntime(page, capture_screenshot=False, clock=self._clock)
+        persisted_runtime = PersistedBrowserExecutor(
             self._session_factory,
             runtime,
             result_probe_ref=binding.result_probe_ref,
             clock=self._clock,
-        ).execute(
-            AuthorizedAction(
-                action=action,
-                action_fingerprint=authorization.action_fingerprint,
-                observation_id=observation.observation_id,
-                expected_snapshot_hash=observation.snapshot_hash,
-                authorization=authorization,
-                execution_profile=profile,
+        )
+        loop = AgentPactBrowserLoop(
+            runtime=persisted_runtime,
+            model=_UnavailableBrowserActionModel(),
+            policy=_SyntheticSubmitPolicy(
+                page=page,
+                compilation=compilation,
+                binding=binding,
+                session_factory=self._session_factory,
+                hmac_secret=self._hmac_secret,
+                clock=self._clock,
+            ),
+            verifier=_SyntheticSubmitVerifier(),
+            event_sink=SqlAlchemyBrowserLoopEventSink(
+                self._session_factory,
+                organization_id=binding.organization_id,
+                contract_id=binding.contract_id,
+                policy_version=POLICY_VERSION,
+            ),
+            integrity_secret=self._hmac_secret,
+            domain_actions=_SyntheticSubmitActions(action_builder=self._submit_action),
+            config=BrowserLoopConfig(max_iterations=1, max_retries=0),
+            clock=self._clock,
+        )
+        report = await loop.run(
+            BrowserLoopRunContext(
+                run_id=compilation.business_plan.task_id,
+                task_id=binding.native_task_id,
+                step_id=binding.native_step_id,
+                goal=compilation.work_order.navigation_goal,
+                pack_id=PACK_ID,
+                pack_version=PACK_VERSION,
+                capability_id=CAPABILITY_ID,
+                contract_id=binding.contract_id,
+                metadata={"step_role": "submit"},
             )
         )
-        checkpoint = result.execution_checkpoint
-        if not result.pending_result_probe or checkpoint is None:
-            raise ValueError("M10 native effect did not enter the exact UNKNOWN probe boundary")
+        checkpoint = report.execution_checkpoint
+        if report.status is not BrowserLoopStatus.UNKNOWN or checkpoint is None:
+            raise ValueError("M10 unified browser loop did not enter the exact UNKNOWN probe boundary")
         async with self._session_factory() as session:
             async with session.begin():
                 await suspend_unknown_execution_for_probe(
@@ -949,6 +949,143 @@ class TrustedSyntheticM10Driver:
             session.expunge(permit)
             session.expunge(attempt)
         return permit, attempt
+
+
+class _SyntheticSubmitActions:
+    """Deterministic Pack action proposal used by the unified browser loop."""
+
+    def __init__(self, *, action_builder: Callable[[BrowserObservation], BrowserAction]) -> None:
+        self._action_builder = action_builder
+        self.binding = PackRuntimeBinding(
+            pack_id=PACK_ID,
+            pack_version=PACK_VERSION,
+            capability_ids=(CAPABILITY_ID,),
+            adapter_id="synthetic.payment.browser-submit.v1",
+        )
+
+    async def decide(
+        self,
+        *,
+        run: BrowserLoopRunContext,
+        observation: BrowserObservation,
+    ) -> ActionDecision | None:
+        return ActionDecision(
+            kind=DecisionKind.ACTION,
+            observation_id=observation.observation_id,
+            action=self._action_builder(observation),
+            reason_code="PACK_SUBMIT_ACTION_PROPOSED",
+        )
+
+
+class _SyntheticSubmitPolicy:
+    """Re-evaluate current facts and issue fresh authority inside the loop."""
+
+    def __init__(
+        self,
+        *,
+        page: Any,
+        compilation: Any,
+        binding: NativeSkyvernBinding,
+        session_factory: Callable[[], AbstractAsyncContextManager[Any]],
+        hmac_secret: str,
+        clock: Callable[[], datetime],
+    ) -> None:
+        self._page = page
+        self._compilation = compilation
+        self._binding = binding
+        self._session_factory = session_factory
+        self._hmac_secret = hmac_secret
+        self._clock = clock
+
+    async def prepare_model_input(self, *, run: BrowserLoopRunContext, observation: BrowserObservation) -> ModelInput:
+        return ModelInput(
+            observation_id=observation.observation_id,
+            goal=run.goal,
+            url=observation.url,
+            dom=observation.model_dom,
+            screenshots=observation.screenshots,
+            allowed_action_kinds=(),
+        )
+
+    async def authorize_action(
+        self,
+        *,
+        run: BrowserLoopRunContext,
+        observation: BrowserObservation,
+        action: BrowserAction,
+        action_fingerprint: str,
+    ) -> PolicyAuthorization:
+        facts = PaymentFacts.model_validate(
+            {
+                "payment_id": await self._page.input_value("#paymentId"),
+                "beneficiary_id": await self._page.input_value("#beneficiary"),
+                "amount": await self._page.input_value("#amount"),
+                "currency": await self._page.input_value("#currency"),
+                "reference": await self._page.input_value("#reference"),
+                "object_version": self._compilation.business_plan.steps[0].inputs["object_version"],
+            }
+        )
+        intent = ActionIntent(
+            intent_id=f"synthetic-submit-intent:{action_fingerprint}",
+            task_id=run.task_id,
+            step_id=run.step_id,
+            action_fingerprint=action_fingerprint,
+            observation_id=observation.observation_id,
+            operation=CAPABILITY_ID,
+            effect=ExecutionEffect.EXTERNAL_WRITE,
+            target={"kind": "synthetic-payment-submit"},
+            confidence=1.0,
+            evidence=["fresh-agentpact-observation"],
+        )
+        decision = await _M10ApprovalEvaluator(approved=True).evaluate(
+            intent=intent,
+            observed_business_inputs=facts.model_dump(mode="json"),
+        )
+        if decision.outcome is not DecisionOutcome.ALLOW:
+            return PolicyAuthorization(
+                disposition=PolicyDisposition.DENY,
+                reason_code="FRESH_BUSINESS_FACTS_REJECTED",
+            )
+        observed_binding = bind_compilation_for_execution(
+            self._compilation,
+            observed_business_inputs=facts.model_dump(mode="json"),
+            work_order_id=self._binding.work_order_id,
+            now=self._clock(),
+        )
+        authorization, profile = await _M10FreshPermitAuthorizer(
+            self._session_factory,
+            payment_id=facts.payment_id,
+            clock=self._clock,
+            hmac_secret=self._hmac_secret,
+        ).authorize_agentpact(
+            task_id=run.task_id,
+            step_id=run.step_id,
+            action=action,
+            observation=observation,
+            binding=self._binding,
+            execution_binding=observed_binding,
+        )
+        return PolicyAuthorization(
+            disposition=PolicyDisposition.ALLOW,
+            reason_code="FRESH_BUSINESS_FACTS_ALLOWED",
+            authorization=authorization,
+            execution_profile=profile,
+        )
+
+
+class _SyntheticSubmitVerifier:
+    async def verify(self, request: VerificationRequest) -> VerificationResult:
+        if request.action_result is not None and request.action_result.pending_result_probe:
+            return VerificationResult(
+                disposition=VerificationDisposition.UNKNOWN,
+                reason_code="RESULT_PROBE_DEFERRED",
+                evidence_refs=(RESULT_PROBE_REF,),
+            )
+        return VerificationResult(
+            disposition=VerificationDisposition.UNKNOWN,
+            reason_code="RESULT_PROBE_REQUIRED",
+            evidence_refs=(RESULT_PROBE_REF,),
+        )
 
 
 class M10PauseHandler(Protocol):

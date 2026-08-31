@@ -235,6 +235,18 @@ class AgentPactBrowserLoop:
             )
             if action_result.pending_result_probe:
                 state.effect_may_have_started = True
+                # Record the deferred business-verification boundary before
+                # suspending orchestration on the exact persisted checkpoint.
+                await self._verify(
+                    state=state,
+                    before=observation,
+                    after=observation,
+                    decision=decision,
+                    source=source,
+                    action_result=action_result,
+                    authorized_effect=command.authorization.effect,
+                    action_fingerprint=fingerprint,
+                )
                 return await self._terminal(
                     state,
                     BrowserLoopStatus.UNKNOWN,
