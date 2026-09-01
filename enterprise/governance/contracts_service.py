@@ -7,7 +7,6 @@ from typing import Any
 from sqlalchemy import select
 
 from .creation_snapshot import TrustedTaskCreationSnapshot
-
 from .models import TaskContractModel
 
 

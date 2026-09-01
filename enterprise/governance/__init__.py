@@ -1,6 +1,13 @@
 """Phase 2 governance contracts and audit-only foundations."""
 
-from .classification import DataClassification, ModelEgressPolicy, action_fingerprint, hmac_fingerprint
+from .browser_audit import (
+    BrowserAuditEvidenceManifest,
+    BrowserAuditPolicy,
+    BrowserSemanticActionRef,
+    BrowserSemanticFieldRef,
+    build_browser_audit_manifest,
+    collect_browser_audit_evidence,
+)
 from .capabilities import (
     AccessDisposition,
     AuthorizationDimension,
@@ -14,33 +21,26 @@ from .capabilities import (
     CapabilityResolver,
     ScopeDimension,
 )
+from .classification import DataClassification, ModelEgressPolicy, action_fingerprint, hmac_fingerprint
 from .contracts import (
     ActionIntent,
     DecisionOutcome,
-    ExecutionAuthorization,
-    ExecutionAttemptStatus,
     ExecutionAttempt,
+    ExecutionAttemptStatus,
+    ExecutionAuthorization,
     ExecutionEffect,
     ExecutionPermit,
     GovernanceMode,
     ObservationContext,
+    PageReadiness,
     PendingAction,
     PendingActionStatus,
-    PageReadiness,
     PolicyDecision,
     TaskContract,
 )
-from .governor import GovernanceBatchPlan, GovernedActionCandidate, build_governance_batch_plan
-from .browser_audit import (
-    BrowserAuditEvidenceManifest,
-    BrowserAuditPolicy,
-    BrowserSemanticActionRef,
-    BrowserSemanticFieldRef,
-    build_browser_audit_manifest,
-    collect_browser_audit_evidence,
-)
-from .recovery import ExecutionFailureClass, ExecutionFailureEvent, RecoveryDecision, RecoveryLevel, decide_recovery
 from .domain_packs import DomainPackKind, DomainPackManifest, DomainPackRegistry
+from .governor import GovernanceBatchPlan, GovernedActionCandidate, build_governance_batch_plan
+from .recovery import ExecutionFailureClass, ExecutionFailureEvent, RecoveryDecision, RecoveryLevel, decide_recovery
 from .result_probes import BusinessResultProbe, ResultProbeEvidence, ResultProbeStatus
 
 __all__ = [

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 from html.parser import HTMLParser
-import re
 
 from pydantic import BaseModel, Field
 
