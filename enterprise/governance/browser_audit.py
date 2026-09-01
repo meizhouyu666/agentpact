@@ -8,6 +8,8 @@ reachable from this collector.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -59,15 +61,58 @@ class BrowserAuditEvidenceManifest(BaseModel):
     captured_at: datetime
 
 
-_ACTION_LABELS = {
-    "create_challenge": "create challenge",
-    "approve_payment": "approve payment",
-    "execute_payment": "execute payment",
-    "probe_payment_result": "probe result",
-    "clear_probe_fault": "clear probe fault",
-}
-_SYNTHETIC_PAGE_MARKER = "synthetic-payment-console"
-_SYNTHETIC_DOMAIN_PACK_MARKER = "synthetic.payment"
+@dataclass(frozen=True)
+class BrowserAuditPolicy:
+    """Caller-owned trust policy for one browser-audit target.
+
+    The default policy keeps collection limited to a loopback HTTP console.
+    Deployments and test packs can opt into another isolated origin and bind
+    the expected page and Pack markers without making the platform know those
+    identifiers.
+    """
+
+    allowed_schemes: frozenset[str] = frozenset({"http"})
+    allowed_hosts: frozenset[str] = frozenset({"127.0.0.1", "localhost", "::1"})
+    allowed_paths: frozenset[str] | None = frozenset({"/"})
+    expected_page_marker: str | None = None
+    expected_domain_pack: str | None = None
+    action_labels: Mapping[str, str] = field(default_factory=dict)
+
+    def validate_url(self, url: str) -> None:
+        parsed = urlparse(url)
+        try:
+            parsed.port
+        except ValueError as exc:
+            raise ValueError("Browser audit target URL has an invalid port") from exc
+        path = parsed.path or "/"
+        if (
+            parsed.scheme.lower() not in {scheme.lower() for scheme in self.allowed_schemes}
+            or not parsed.hostname
+            or parsed.hostname.lower() not in {host.lower() for host in self.allowed_hosts}
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or (self.allowed_paths is not None and path not in self.allowed_paths)
+        ):
+            raise ValueError("Browser audit target URL is outside the configured isolated origin")
+
+    def validate_snapshot(self, snapshot: Mapping[str, Any]) -> None:
+        page_marker = snapshot.get("page_marker")
+        domain_pack = snapshot.get("domain_pack")
+        if not page_marker or not domain_pack:
+            raise ValueError("Browser audit target is missing trusted governance page markers")
+        if self.expected_page_marker is not None and page_marker != self.expected_page_marker:
+            raise ValueError("Browser audit target page marker does not match the configured policy")
+        if self.expected_domain_pack is not None and domain_pack != self.expected_domain_pack:
+            raise ValueError("Browser audit target Domain Pack marker does not match the configured policy")
+
+    def label_action(self, semantic_action: str) -> str:
+        configured = self.action_labels.get(semantic_action)
+        if configured is not None:
+            return configured
+        label = semantic_action.replace("_", " ")
+        return "probe result" if label.startswith("probe ") else label
 
 
 async def collect_browser_audit_evidence(
@@ -79,6 +124,7 @@ async def collect_browser_audit_evidence(
     hmac_secret: str | bytes,
     timeout_ms: int = 15_000,
     executable_path: str | None = None,
+    policy: BrowserAuditPolicy | None = None,
 ) -> BrowserAuditEvidenceManifest:
     """Open a browser page and return a redacted audit manifest.
 
@@ -88,7 +134,8 @@ async def collect_browser_audit_evidence(
 
     if not hmac_secret:
         raise ValueError("Browser audit collection requires a non-empty HMAC secret")
-    _validate_synthetic_url(page_url)
+    policy = policy or BrowserAuditPolicy()
+    policy.validate_url(page_url)
 
     from playwright.async_api import async_playwright
 
@@ -112,6 +159,7 @@ async def collect_browser_audit_evidence(
                 step_id=step_id,
                 hmac_secret=hmac_secret,
                 network_idle_reached=network_idle_reached,
+                policy=policy,
             )
         finally:
             await browser.close()
@@ -126,6 +174,7 @@ async def collect_browser_page_audit(
     step_id: str,
     hmac_secret: str | bytes,
     network_idle_reached: bool = True,
+    policy: BrowserAuditPolicy | None = None,
 ) -> BrowserAuditEvidenceManifest:
     """Collect from a Playwright-compatible page object.
 
@@ -133,11 +182,12 @@ async def collect_browser_page_audit(
     with a fake page while the end-to-end test uses a real Chromium page.
     """
 
+    policy = policy or BrowserAuditPolicy()
     final_url = str(getattr(page, "url", page_url))
-    _validate_synthetic_url(page_url)
-    _validate_synthetic_url(final_url)
+    policy.validate_url(page_url)
+    policy.validate_url(final_url)
     if _canonical_url(page_url) != _canonical_url(final_url):
-        raise ValueError("Synthetic browser audit rejected a redirected page")
+        raise ValueError("Browser audit rejected a redirected page")
     html = await page.content()
     screenshot = await page.screenshot(type="png")
     snapshot = await page.evaluate(_DOM_SNAPSHOT_SCRIPT)
@@ -153,6 +203,7 @@ async def collect_browser_page_audit(
         page_title=page_title,
         hmac_secret=hmac_secret,
         network_idle_reached=network_idle_reached,
+        policy=policy,
     )
 
 
@@ -168,6 +219,7 @@ def build_browser_audit_manifest(
     hmac_secret: str | bytes,
     page_title: str | None = None,
     network_idle_reached: bool = True,
+    policy: BrowserAuditPolicy | None = None,
 ) -> BrowserAuditEvidenceManifest:
     """Build a manifest from already-captured browser artifacts.
 
@@ -175,8 +227,9 @@ def build_browser_audit_manifest(
     stable references and never copied into the returned model.
     """
 
-    _validate_synthetic_url(page_url)
-    _require_trusted_page_marker(dom_snapshot)
+    policy = policy or BrowserAuditPolicy()
+    policy.validate_url(page_url)
+    policy.validate_snapshot(dom_snapshot)
     readiness, readiness_confidence = _parse_readiness(
         dom_snapshot,
         network_idle_reached=network_idle_reached,
@@ -187,7 +240,7 @@ def build_browser_audit_manifest(
         _BrowserActionCandidate(
             element_id=action["element_id"],
             semantic_action=action["semantic_action"],
-            description=_ACTION_LABELS.get(action["semantic_action"], action["semantic_action"].replace("_", " ")),
+            description=policy.label_action(action["semantic_action"]),
         )
         for action in raw_actions
     ]
@@ -303,8 +356,6 @@ def _raw_semantic_actions(raw_actions: Any) -> list[dict[str, Any]]:
     for raw in raw_actions or []:
         if not isinstance(raw, dict) or not raw.get("semantic_action") or not raw.get("element_id"):
             continue
-        if str(raw["semantic_action"]) not in _ACTION_LABELS:
-            continue
         actions.append(
             {
                 "semantic_action": str(raw["semantic_action"]),
@@ -332,29 +383,8 @@ def _semantic_fingerprint(kind: str, value: str, secret: str | bytes) -> str:
 
 def _canonical_url(url: str) -> str:
     parsed = urlparse(url)
-    return f"{parsed.scheme}://{parsed.hostname}:{parsed.port or 80}{parsed.path or '/'}"
-
-
-def _validate_synthetic_url(url: str) -> None:
-    parsed = urlparse(url)
-    if (
-        parsed.scheme != "http"
-        or parsed.hostname != "127.0.0.1"
-        or parsed.username
-        or parsed.password
-        or parsed.query
-        or parsed.fragment
-        or (parsed.path or "/") != "/"
-    ):
-        raise ValueError("Browser audit only accepts the isolated synthetic localhost console")
-
-
-def _require_trusted_page_marker(snapshot: dict[str, Any]) -> None:
-    if (
-        snapshot.get("page_marker") != _SYNTHETIC_PAGE_MARKER
-        or snapshot.get("domain_pack") != _SYNTHETIC_DOMAIN_PACK_MARKER
-    ):
-        raise ValueError("Browser audit target is missing the trusted synthetic page marker")
+    default_port = 443 if parsed.scheme.lower() == "https" else 80
+    return f"{parsed.scheme.lower()}://{parsed.hostname.lower()}:{parsed.port or default_port}{parsed.path or '/'}"
 
 
 _DOM_SNAPSHOT_SCRIPT = """
