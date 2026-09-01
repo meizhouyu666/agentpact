@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from enterprise.governance.browser_audit import build_browser_audit_manifest
+from enterprise.governance.browser_audit import BrowserAuditPolicy, build_browser_audit_manifest
 from enterprise.governance.contracts import DecisionOutcome, PageReadiness
 
 
@@ -119,8 +119,38 @@ def test_unsettled_network_observation_is_transitioning_and_requires_human():
     assert execute_decision.outcome is DecisionOutcome.NEEDS_HUMAN
 
 
+def test_browser_manifest_accepts_a_configured_non_payment_pack_target():
+    snapshot = _snapshot()
+    snapshot["page_marker"] = "orders-console"
+    snapshot["domain_pack"] = "orders.fixture"
+    snapshot["actions"] = [
+        {"semantic_action": "submit_order", "element_id": "submit-order", "enabled": True},
+    ]
+
+    manifest = build_browser_audit_manifest(
+        page_url="https://orders.test/app",
+        scenario_id="orders-audit",
+        task_id="task-orders-audit",
+        step_id="step-submit",
+        html="<html></html>",
+        screenshot=b"png",
+        dom_snapshot=snapshot,
+        hmac_secret="browser-audit-test-secret",
+        policy=BrowserAuditPolicy(
+            allowed_schemes=frozenset({"https"}),
+            allowed_hosts=frozenset({"orders.test"}),
+            allowed_paths=frozenset({"/app"}),
+            expected_page_marker="orders-console",
+            expected_domain_pack="orders.fixture",
+        ),
+    )
+
+    assert [action.semantic_action for action in manifest.action_candidates] == ["submit_order"]
+    assert len(manifest.action_fingerprints) == 1
+
+
 def test_browser_manifest_rejects_untrusted_url_or_page_marker():
-    with pytest.raises(ValueError, match="localhost console"):
+    with pytest.raises(ValueError, match="configured isolated origin"):
         build_browser_audit_manifest(
             page_url="https://example.com/",
             scenario_id="untrusted",
@@ -134,7 +164,7 @@ def test_browser_manifest_rejects_untrusted_url_or_page_marker():
 
     untrusted = _snapshot()
     untrusted["domain_pack"] = "other.pack"
-    with pytest.raises(ValueError, match="trusted synthetic page marker"):
+    with pytest.raises(ValueError, match="configured policy"):
         build_browser_audit_manifest(
             page_url="http://127.0.0.1:18081/",
             scenario_id="untrusted",
@@ -144,4 +174,8 @@ def test_browser_manifest_rejects_untrusted_url_or_page_marker():
             screenshot=b"png",
             dom_snapshot=untrusted,
             hmac_secret="browser-audit-test-secret",
+            policy=BrowserAuditPolicy(
+                expected_page_marker="synthetic-payment-console",
+                expected_domain_pack="synthetic.payment",
+            ),
         )

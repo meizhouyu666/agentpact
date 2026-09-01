@@ -33,6 +33,7 @@ from .contracts import (
 from .governor import GovernanceBatchPlan, GovernedActionCandidate, build_governance_batch_plan
 from .browser_audit import (
     BrowserAuditEvidenceManifest,
+    BrowserAuditPolicy,
     BrowserSemanticActionRef,
     BrowserSemanticFieldRef,
     build_browser_audit_manifest,
@@ -80,6 +81,7 @@ __all__ = [
     "RecoveryLevel",
     "BusinessResultProbe",
     "BrowserAuditEvidenceManifest",
+    "BrowserAuditPolicy",
     "BrowserSemanticActionRef",
     "BrowserSemanticFieldRef",
     "ResultProbeEvidence",

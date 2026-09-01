@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from enterprise.governance.capabilities import CapabilityDefinition
+from enterprise.governance.domain_packs import DomainPackKind, DomainPackManifest
 from enterprise.governance.pack_runtime import (
     ApprovalRequestSpecification,
     PackAdvanceResult,
@@ -108,6 +110,7 @@ def test_platform_runtime_packages_do_not_import_concrete_packs() -> None:
     for package in (
         root / "enterprise" / "agent_runs",
         root / "enterprise" / "browser_loop",
+        root / "enterprise" / "evaluation",
         root / "enterprise" / "governance",
     ):
         for path in package.rglob("*.py"):
@@ -117,6 +120,34 @@ def test_platform_runtime_packages_do_not_import_concrete_packs() -> None:
                 or name.startswith("enterprise.domains.stripe_payment")
                 for name in imports
             ), path
+
+
+def test_synthetic_kind_accepts_owner_defined_pack_namespace_but_stays_nonproduction() -> None:
+    capability = CapabilityDefinition(
+        capability_id="orders.read",
+        version="1.0.0",
+        domain="orders",
+        display_name="Read orders",
+        access_policy_ref="policy://orders/read",
+        risk_policy_ref="policy://orders/read",
+        work_order_template_ref="template://orders/read",
+        result_probe_ref="probe://orders/read",
+    )
+    manifest = DomainPackManifest(
+        pack_id="fixture.orders",
+        version="1.0.0",
+        kind=DomainPackKind.SYNTHETIC,
+        display_name="Order Fixture",
+        owner="fixture-owner",
+        capabilities=[capability],
+    )
+
+    assert manifest.pack_id == "fixture.orders"
+    with pytest.raises(ValueError, match="never be production eligible"):
+        DomainPackManifest(
+            **manifest.model_dump(exclude={"production_eligible"}),
+            production_eligible=True,
+        )
 
 
 def test_synthetic_agent_run_composition_is_test_fixture_only() -> None:

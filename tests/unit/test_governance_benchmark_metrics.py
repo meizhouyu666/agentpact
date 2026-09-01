@@ -1,6 +1,6 @@
 """Task 6 synthetic metric and fault-replay tests."""
 
-from enterprise.governance.benchmark import BenchmarkRecord, replay_fault, summarize
+from enterprise.evaluation.benchmark import BenchmarkRecord, replay_fault, summarize
 from enterprise.governance.recovery import ExecutionFailureClass, ExecutionFailureEvent, RecoveryLevel
 
 

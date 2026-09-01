@@ -5,10 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from enterprise.governance.benchmark import replay_fault
+from enterprise.evaluation.benchmark import replay_fault
 from enterprise.governance.contracts import ExecutionAttemptStatus
 from enterprise.governance.recovery import ExecutionFailureClass, ExecutionFailureEvent
-
 
 SCENARIOS = json.loads(
     (Path(__file__).parents[1] / "fixtures" / "governance_fault_replay.json").read_text(encoding="utf-8")

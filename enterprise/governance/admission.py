@@ -1,8 +1,8 @@
 """Audit-only governed Task admission boundary.
 
-Only the isolated synthetic admission API calls this module. The repository
-protocol deliberately owns one atomic transaction; the service never persists
-a partial or runnable Skyvern Task.
+Callers provide trusted task, authorization, and Pack contracts. The
+repository protocol deliberately owns one atomic transaction; the service
+never persists a partial or runnable Skyvern Task.
 """
 
 from __future__ import annotations
