@@ -36,7 +36,6 @@ skyvern-frontend/dist/
 
 # Docker & Runtime Artifacts
 artifacts/
-artifacts/m5/
 videos/
 har/
 log/

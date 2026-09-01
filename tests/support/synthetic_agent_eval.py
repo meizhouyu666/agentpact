@@ -1,21 +1,12 @@
-"""M12 deterministic recorded and explicit planning-only live evaluation CLI."""
-
-# ruff: noqa: E402, I001
+"""Test-only Synthetic planner evaluation harness."""
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
-import sys
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
-
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 from enterprise.agent.constrained_planner import OpenAICompatiblePlanner, PlannerTransport
 from enterprise.auth.schemas import DepartmentRole, UserContext
@@ -24,7 +15,6 @@ from enterprise.domains.synthetic_payment.constants import (
     PAYMENTS_DEPARTMENT_ID,
     TENANT_ID,
 )
-from enterprise.domains.synthetic_payment.m10_runtime import SyntheticPaymentRuntimeAdapter
 from enterprise.domains.synthetic_payment.m9_runtime import (
     AgentEvalReport,
     M9StepRole,
@@ -35,22 +25,23 @@ from enterprise.domains.synthetic_payment.m9_runtime import (
     redact_replan_evidence,
     run_agent_eval,
 )
+from enterprise.domains.synthetic_payment.m10_runtime import SyntheticPaymentRuntimeAdapter
 
-RECORDED_CASES = ROOT / "tests" / "fixtures" / "m9_agent_eval_cases.json"
-LIVE_CASES = ROOT / "tests" / "fixtures" / "m12_live_eval_cases.json"
-ARTIFACT_DIR = ROOT / "artifacts" / "m12"
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
+RECORDED_CASES = FIXTURES / "m9_agent_eval_cases.json"
+LIVE_CASES = FIXTURES / "m12_live_eval_cases.json"
 
 
 def _context() -> tuple[object, object, object, object]:
     def no_session() -> object:
-        raise AssertionError("M12 evaluation is planning-only and must not touch persistence")
+        raise AssertionError("Synthetic evaluation must not touch persistence")
 
     class NoEffectDriver:
         async def execute(self, **_trusted_inputs: object) -> object:
-            raise AssertionError("M12 evaluation must not execute a business effect")
+            raise AssertionError("Synthetic evaluation must not execute a business effect")
 
         async def probe(self, **_trusted_inputs: object) -> object:
-            raise AssertionError("M12 evaluation must not use a browser Probe")
+            raise AssertionError("Synthetic evaluation must not use a browser Probe")
 
     user = UserContext(
         user_id="m12-eval-operator",
@@ -140,62 +131,3 @@ def canonical_json(report: AgentEvalReport) -> bytes:
     return (
         json.dumps(report.model_dump(mode="json"), ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n"
     ).encode("utf-8")
-
-
-def markdown(report: AgentEvalReport) -> bytes:
-    rows = [
-        "# AgentPact M12 Agent evaluation",
-        "",
-        f"Digest: `{report.report_digest}`",
-        "",
-        "| Case | Kind | Expected | Actual | Compile | Calls | Repairs | Pass |",
-        "|---|---|---|---|---|---:|---:|---|",
-    ]
-    rows.extend(
-        f"| {item.case_id} | {item.kind} | {item.expected_disposition.value} | "
-        f"{item.actual_disposition.value} | {item.trusted_compile_result} | {item.provider_calls} | "
-        f"{item.repair_count} | {'yes' if item.passed else 'no'} |"
-        for item in report.cases
-    )
-    rows.extend(("", "## Limitations", ""))
-    rows.extend(f"- {item}" for item in report.limitations)
-    return ("\n".join(rows) + "\n").encode("utf-8")
-
-
-def _atomic_write(path: Path, content: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
-        temporary = Path(handle.name)
-        handle.write(content)
-        handle.flush()
-        os.fsync(handle.fileno())
-    temporary.replace(path)
-
-
-def write_artifacts(report: AgentEvalReport, *, mode: Literal["recorded", "live"]) -> tuple[Path, Path]:
-    json_path = ARTIFACT_DIR / f"agent-eval-{mode}.json"
-    markdown_path = ARTIFACT_DIR / f"agent-eval-{mode}.md"
-    _atomic_write(json_path, canonical_json(report))
-    _atomic_write(markdown_path, markdown(report))
-    return json_path, markdown_path
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("recorded", "live"))
-    args = parser.parse_args()
-    if args.mode == "recorded":
-        report = evaluate("recorded")
-    else:
-        report = evaluate(
-            "live",
-            endpoint=os.environ.get("OPENAI_COMPATIBLE_API_BASE"),
-            model=os.environ.get("OPENAI_COMPATIBLE_MODEL_NAME"),
-        )
-    paths = write_artifacts(report, mode=args.mode)
-    print(json.dumps({"digest": report.report_digest, "artifacts": [str(item) for item in paths]}, sort_keys=True))
-    return 0 if report.passed_case_count == report.case_count else 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

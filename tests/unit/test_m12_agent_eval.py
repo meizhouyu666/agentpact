@@ -1,4 +1,4 @@
-"""Focused M12 deterministic and manual-live planning-only evaluation tests."""
+"""Focused M12 deterministic and live-provider planning tests."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from scripts.agentpact_eval import canonical_json, evaluate, markdown
+from tests.support.synthetic_agent_eval import canonical_json, evaluate
 
 
 def test_recorded_eval_is_byte_identical_and_digest_stable() -> None:
@@ -15,7 +15,6 @@ def test_recorded_eval_is_byte_identical_and_digest_stable() -> None:
 
     assert first == second
     assert canonical_json(first) == canonical_json(second)
-    assert markdown(first) == markdown(second)
     assert first.passed_case_count == first.case_count
     assert all(item.trusted_compile_result != "rejected" for item in first.cases)
 
