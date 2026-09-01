@@ -90,26 +90,44 @@ def test_approval_spec_contains_no_executable_action_shape() -> None:
     assert "challenge_id" not in ApprovalRequestSpecification.model_fields
 
 
-def test_agent_run_and_browser_loop_do_not_import_concrete_packs() -> None:
+def _imports(path: Path) -> tuple[str, ...]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return tuple(
+        [node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
+        + [
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        ]
+    )
+
+
+def test_platform_runtime_packages_do_not_import_concrete_packs() -> None:
     root = Path(__file__).resolve().parents[2]
-    for package in (root / "enterprise" / "agent_runs", root / "enterprise" / "browser_loop"):
-        for path in package.glob("*.py"):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            imports = [
-                node.module or ""
-                for node in ast.walk(tree)
-                if isinstance(node, ast.ImportFrom)
-            ] + [
-                alias.name
-                for node in ast.walk(tree)
-                if isinstance(node, ast.Import)
-                for alias in node.names
-            ]
+    for package in (
+        root / "enterprise" / "agent_runs",
+        root / "enterprise" / "browser_loop",
+        root / "enterprise" / "governance",
+    ):
+        for path in package.rglob("*.py"):
+            imports = _imports(path)
             assert not any(
                 name.startswith("enterprise.domains.synthetic_payment")
                 or name.startswith("enterprise.domains.stripe_payment")
                 for name in imports
             ), path
+
+
+def test_synthetic_agent_run_composition_is_application_owned() -> None:
+    root = Path(__file__).resolve().parents[2]
+    old_path = root / "enterprise" / "domains" / "synthetic_payment" / "agent_run_composition.py"
+    composition = root / "enterprise" / "applications" / "synthetic_payment_agent_runs.py"
+
+    assert not old_path.exists()
+    imports = _imports(composition)
+    assert any(name.startswith("enterprise.agent_runs") for name in imports)
+    assert any(name.startswith("enterprise.domains.synthetic_payment") for name in imports)
 
 
 def test_generic_contract_sources_contain_no_payment_schema_or_pack_ids() -> None:

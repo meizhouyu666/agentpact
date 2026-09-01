@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from enterprise.applications.agent_run_recovery import recover_abandoned_agent_run_executions
 from enterprise.browser_loop.contracts import (
     ActionKind,
     AuthorizedAction,
@@ -18,7 +19,6 @@ from enterprise.browser_loop.persisted_executor import (
     recover_abandoned_persisted_executions,
 )
 from enterprise.browser_loop.ports import StaleObservationError
-from enterprise.domains.synthetic_payment.agent_run_composition import recover_abandoned_agent_run_executions
 from enterprise.governance.contracts import (
     DecisionOutcome,
     ExecutionAttemptStatus,

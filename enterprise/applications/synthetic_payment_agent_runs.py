@@ -1,44 +1,51 @@
-"""Explicit synthetic Agent Run composition kept outside platform core."""
+"""Compose the Agent Run application with the synthetic.payment Domain Pack."""
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
-from datetime import datetime, timedelta
 from typing import Any, Literal
 
 from fastapi import FastAPI
 
+from enterprise.agent.constrained_planner import OpenAICompatiblePlanner, PlannerTransport
 from enterprise.agent_runs.routes import mount_agent_run_api
 from enterprise.agent_runs.service import AgentRunService
-from enterprise.browser_loop.persisted_executor import (
-    PersistedExecutionRecoveryReport,
-    recover_abandoned_persisted_executions,
+from enterprise.domains.synthetic_payment.m6_runtime import SYNTHETIC_RUNTIME_CONTRACT
+from enterprise.domains.synthetic_payment.m9_runtime import OpenAICompatibleM9Provider
+from enterprise.domains.synthetic_payment.m10_runtime import (
+    M9ProviderFactory,
+    SyntheticPaymentRuntimeAdapter,
+    TrustedSyntheticM10Driver,
+    recorded_m10_provider,
 )
 from enterprise.governance.pack_runtime import PackRuntimeRegistry
 
-from .m6_runtime import SYNTHETIC_RUNTIME_CONTRACT
-from .m10_runtime import SyntheticPaymentRuntimeAdapter, TrustedSyntheticM10Driver, build_m10_provider_factory
 
-
-async def recover_abandoned_agent_run_executions(
-    session_factory: Callable[[], AbstractAsyncContextManager[Any]],
+def build_m10_provider_factory(
+    provider_mode: Literal["recorded", "live"],
     *,
-    minimum_age: timedelta,
-    now: datetime | None = None,
-) -> PersistedExecutionRecoveryReport:
-    """Owner-invoked application recovery hook for abandoned browser effects.
+    endpoint: str | None = None,
+    model: str | None = None,
+    api_key_env: str = "OPENAI_COMPATIBLE_API_KEY",
+    transport: PlannerTransport | None = None,
+) -> M9ProviderFactory:
+    """Build the configured provider edge; live mode never falls back."""
 
-    The application worker or scheduler owns when this boundary runs. The
-    generic scanner row-locks stale attempts, fails AUTHORIZED attempts, and
-    moves EXECUTING attempts to UNKNOWN for probing; it never replays a write.
-    """
-
-    return await recover_abandoned_persisted_executions(
-        session_factory,
-        minimum_age=minimum_age,
-        now=now,
+    if provider_mode == "recorded":
+        return recorded_m10_provider
+    if provider_mode != "live":
+        raise ValueError("Agent Run provider mode must be recorded or live")
+    if not endpoint or not model or not api_key_env or not os.environ.get(api_key_env):
+        raise ValueError("Live Agent Run provider configuration is incomplete")
+    planner = OpenAICompatiblePlanner(
+        endpoint=endpoint,
+        model=model,
+        api_key_env=api_key_env,
+        transport=transport,
     )
+    return lambda _planner_input: OpenAICompatibleM9Provider(planner)
 
 
 def compose_synthetic_agent_run_service(

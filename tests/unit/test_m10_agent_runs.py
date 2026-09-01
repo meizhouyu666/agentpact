@@ -22,6 +22,7 @@ from enterprise.agent_runs.service import (
     AgentRunState,
     AgentRunSummary,
 )
+from enterprise.applications.synthetic_payment_agent_runs import build_m10_provider_factory
 from enterprise.auth.dependencies import get_current_user
 from enterprise.auth.schemas import DepartmentRole, UserContext
 from enterprise.domains.synthetic_payment.constants import (
@@ -33,7 +34,6 @@ from enterprise.domains.synthetic_payment.m6_runtime import SYNTHETIC_RUNTIME_CO
 from enterprise.domains.synthetic_payment.m10_runtime import (
     M10PlanningError,
     SyntheticPaymentRuntimeAdapter,
-    build_m10_provider_factory,
     derive_agent_run_id,
 )
 from enterprise.domains.synthetic_payment.sdk_manifest import build_pack_sdk_manifest

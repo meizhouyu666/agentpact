@@ -17,12 +17,12 @@ from fastapi import FastAPI, Header
 from sqlalchemy import select
 
 from enterprise.agent_runs.routes import reset_agent_run_service
+from enterprise.applications.synthetic_payment_agent_runs import mount_synthetic_agent_run_api
 from enterprise.approval.models import ApprovalRequestModel
 from enterprise.auth.dependencies import get_current_user
 from enterprise.auth.models import BusinessLineModel, DepartmentModel
 from enterprise.auth.schemas import DepartmentRole, UserContext
 from enterprise.domains.synthetic_payment.constants import BUSINESS_LINE_ID, PAYMENTS_DEPARTMENT_ID
-from enterprise.domains.synthetic_payment.agent_run_composition import mount_synthetic_agent_run_api
 from enterprise.domains.synthetic_payment.m10_runtime import SyntheticPaymentRuntimeAdapter
 from enterprise.governance.models import (
     ExecutionAttemptModel,
