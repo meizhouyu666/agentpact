@@ -124,6 +124,8 @@ M12 在既有 M9-M11 治理链上增加只读证据面，不引入新的执行�
 - 确定性与 live-provider 评估通过测试夹具覆盖，不作为应用、演示或发布命令暴露；这些评估不会创建 Task、数据库记录、审批、Permit、Attempt、交互会话或业务副作用。
 - 操作工作台仅为所选 Run 加载紧凑 Decision trace，并继续只依据权威详情的 `legal_actions` 渲染命令。
 
+量化指标、Benchmark Case 和分阶段验收边界见 [`docs/architecture/agentpact-evaluation-metrics.md`](docs/architecture/agentpact-evaluation-metrics.md)。
+
 ## 当前能力
 
 | 里程碑 | 状态 | 已交付能力 |
