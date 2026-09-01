@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timedelta, timezone
@@ -16,9 +15,7 @@ from sqlalchemy import select
 
 from enterprise.agent.constrained_planner import (
     DeterministicPlanner,
-    OpenAICompatiblePlanner,
     PlannerObservation,
-    PlannerTransport,
 )
 from enterprise.agent.interactions import CapabilityRequest, CapabilityRequestKind, EntryMode
 from enterprise.auth.schemas import DepartmentRole, UserContext
@@ -139,7 +136,6 @@ from .m9_runtime import (
     M9PlannerEngine,
     M9PlannerProvider,
     M9StepRole,
-    OpenAICompatibleM9Provider,
     PlanProposal,
     RecordedM9Provider,
     build_m9_plan_input,
@@ -158,32 +154,9 @@ class M10PlanningError(PackLifecycleError, ValueError):
         super().__init__(code)
 
 
-def build_m10_provider_factory(
-    provider_mode: Literal["recorded", "live"],
-    *,
-    endpoint: str | None = None,
-    model: str | None = None,
-    api_key_env: str = "OPENAI_COMPATIBLE_API_KEY",
-    transport: PlannerTransport | None = None,
-) -> M9ProviderFactory:
-    """Build one explicit provider composition; live mode never falls back."""
+def recorded_m10_provider(planner_input: M9PlanInput) -> M9PlannerProvider:
+    """Return the deterministic provider that implements synthetic Pack semantics."""
 
-    if provider_mode == "recorded":
-        return _recorded_provider
-    if provider_mode != "live":
-        raise ValueError("Agent Run provider mode must be recorded or live")
-    if not endpoint or not model or not api_key_env or not os.environ.get(api_key_env):
-        raise ValueError("Live Agent Run provider configuration is incomplete")
-    planner = OpenAICompatiblePlanner(
-        endpoint=endpoint,
-        model=model,
-        api_key_env=api_key_env,
-        transport=transport,
-    )
-    return lambda _planner_input: OpenAICompatibleM9Provider(planner)
-
-
-def _recorded_provider(planner_input: M9PlanInput) -> M9PlannerProvider:
     return RecordedM9Provider(
         [
             {
@@ -1101,7 +1074,7 @@ class M10PauseHandler(Protocol):
 
 
 class SyntheticPaymentRuntimeAdapter:
-    """The one explicitly composed synthetic implementation of the generic adapter."""
+    """Synthetic Domain Pack implementation of the generic runtime adapter."""
 
     def __init__(
         self,
@@ -1115,7 +1088,9 @@ class SyntheticPaymentRuntimeAdapter:
         self._session_factory = session_factory
         self._driver = driver
         self._provider_mode = provider_mode
-        self._provider_factory = provider_factory or build_m10_provider_factory(provider_mode)
+        if provider_factory is None and provider_mode != "recorded":
+            raise ValueError("Live Agent Run provider factory must be supplied by application composition")
+        self._provider_factory = provider_factory or recorded_m10_provider
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     @property
