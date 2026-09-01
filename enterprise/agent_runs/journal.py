@@ -12,11 +12,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from enterprise.agent.work_orders import RecoveryLevel
-from enterprise.governance.contracts import ExecutionAttemptStatus
-from enterprise.governance.models import ExecutionAttemptModel, ExecutionPermitModel, GovernanceAuditEventModel
-from skyvern.forge.sdk.db.models import StepModel, TaskModel
-from skyvern.forge.sdk.models import StepStatus
-from skyvern.forge.sdk.schemas.tasks import TaskStatus
+from enterprise.governance.models import GovernanceAuditEventModel
+
+from .persistence import AgentRunNativeStore
 
 PLAN_APPLICATION_MARKER = "agentpact:m8:plan:v1"
 PLAN_JOURNAL_SCHEMA = "agentpact.plan-journal/v1"
@@ -187,6 +185,8 @@ def replay_plan_journal(events: list[PlanJournalEvent]) -> GovernedPlanCheckpoin
 async def append_agent_run_transition(
     session: Any,
     *,
+    native_store: AgentRunNativeStore,
+    organization_id: str,
     checkpoint: GovernedPlanCheckpoint,
     transition: PlanJournalTransition,
     authority_digests: dict[str, str],
@@ -203,11 +203,12 @@ async def append_agent_run_transition(
         PlanJournalTransition.RUN_CANCELLED,
     }:
         raise GovernedPlanError("Agent Run append accepts only orchestration-owned transitions")
-    root = (
-        await session.scalars(
-            select(TaskModel).where(TaskModel.task_id == checkpoint.root_task_id).with_for_update()
-        )
-    ).first()
+    root = await native_store.get_root(
+        session,
+        run_id=checkpoint.root_task_id,
+        organization_id=organization_id,
+        lock=True,
+    )
     if root is None or root.application != PLAN_APPLICATION_MARKER:
         raise GovernedPlanError("Agent Run transition root Task is missing or untrusted")
     events = await _load_events(session, checkpoint.root_task_id)
@@ -226,7 +227,15 @@ async def append_agent_run_transition(
             ):
                 return restored
         raise GovernedPlanError("Agent Run stale, conflicting, or one-sided transition detected")
-    await _verify_checkpoint_native_state(session, checkpoint, transition=transition)
+    try:
+        await native_store.verify_checkpoint_native_state(
+            session,
+            checkpoint,
+            transition=transition,
+            organization_id=organization_id,
+        )
+    except ValueError as exc:
+        raise GovernedPlanError(str(exc)) from exc
     event = _event(
         checkpoint=checkpoint,
         transition=transition,
@@ -322,109 +331,39 @@ def _validate_transition_checkpoint(
         raise GovernedPlanError("Nonterminal Agent Run checkpoint is missing its active child")
 
 
-async def _verify_checkpoint_native_state(
-    session: Any,
-    checkpoint: GovernedPlanCheckpoint,
-    *,
-    transition: PlanJournalTransition,
-) -> None:
-    refs = (
-        *checkpoint.completed_prefix,
-        *((checkpoint.active_step,) if checkpoint.active_step is not None else ()),
-        *checkpoint.remaining_suffix,
-        *checkpoint.superseded_suffix,
-    )
-    task_ids = tuple(dict.fromkeys(item.native_task_id for item in refs))
-    if not task_ids:
-        return
-    tasks = {
-        item.task_id: item
-        for item in (await session.scalars(select(TaskModel).where(TaskModel.task_id.in_(task_ids)))).all()
-    }
-    steps = {
-        item.task_id: item
-        for item in (await session.scalars(select(StepModel).where(StepModel.task_id.in_(task_ids)))).all()
-    }
-    for item in checkpoint.completed_prefix:
-        task = tasks.get(item.native_task_id)
-        step = steps.get(item.native_task_id)
-        if (
-            task is None
-            or step is None
-            or task.status != TaskStatus.completed.value
-            or step.status != StepStatus.completed.value
-            or step.step_id != item.native_step_id
-        ):
-            raise GovernedPlanError("Completed prefix disagrees with native Task/Step state")
-        await _verify_attempt_identity(session, item, expected_status=ExecutionAttemptStatus.CONFIRMED)
-    for item in checkpoint.remaining_suffix:
-        if item.native_task_id in tasks or item.native_task_id in steps:
-            raise GovernedPlanError("Non-current suffix child became runnable")
-    for item in checkpoint.superseded_suffix:
-        task = tasks.get(item.native_task_id)
-        step = steps.get(item.native_task_id)
-        if task is not None and task.status != TaskStatus.canceled.value:
-            raise GovernedPlanError("Superseded native Task remains runnable")
-        if step is not None and step.status != StepStatus.canceled.value:
-            raise GovernedPlanError("Superseded native Step remains runnable")
-    active = checkpoint.active_step
-    if active is None:
-        return
-    task = tasks.get(active.native_task_id)
-    step = steps.get(active.native_task_id)
-    if (task is None) != (step is None) or task is None or step is None:
-        raise GovernedPlanError("Active native Task/Step state is partial or missing")
-    if step.step_id != active.native_step_id:
-        raise GovernedPlanError("Active native Step identity disagrees with checkpoint")
-    if transition is PlanJournalTransition.PROBE_BLOCKED:
-        if (
-            task.status != TaskStatus.pending_result_probe.value
-            or step.status != StepStatus.pending_result_probe.value
-            or not active.attempt_id
-            or not active.permit_id
-        ):
-            raise GovernedPlanError("Probe-blocked checkpoint lacks exact native state")
-        await _verify_attempt_identity(session, active, expected_status=ExecutionAttemptStatus.UNKNOWN)
-    elif transition is PlanJournalTransition.APPROVAL_REQUIRED:
-        if task.status != TaskStatus.pending_approval.value or step.status != StepStatus.pending_approval.value:
-            raise GovernedPlanError("Approval checkpoint lacks exact pending native state")
-    elif transition is PlanJournalTransition.APPROVAL_RESUMED:
-        if task.status != TaskStatus.resuming.value or step.status != StepStatus.resuming.value:
-            raise GovernedPlanError("Resume checkpoint lacks exact resuming native state")
-    elif transition in {PlanJournalTransition.APPROVAL_REJECTED, PlanJournalTransition.RUN_CANCELLED}:
-        if task.status != TaskStatus.canceled.value or step.status != StepStatus.canceled.value:
-            raise GovernedPlanError("Terminal non-effect checkpoint lacks exact cancelled native state")
+class AgentRunJournal:
+    """M8 journal façade bound to an AgentPact native persistence store."""
 
+    def __init__(self, native_store: AgentRunNativeStore) -> None:
+        self.native_store = native_store
 
-async def _verify_attempt_identity(
-    session: Any,
-    item: GovernedPlanStepRef,
-    *,
-    expected_status: ExecutionAttemptStatus,
-) -> None:
-    if item.attempt_id is None and item.permit_id is None:
-        return
-    if item.attempt_id is None or item.permit_id is None:
-        raise GovernedPlanError("Effect checkpoint has partial Permit/Attempt identity")
-    attempt = (
-        await session.scalars(select(ExecutionAttemptModel).where(ExecutionAttemptModel.attempt_id == item.attempt_id))
-    ).first()
-    permit = (
-        await session.scalars(select(ExecutionPermitModel).where(ExecutionPermitModel.permit_id == item.permit_id))
-    ).first()
-    if (
-        attempt is None
-        or permit is None
-        or attempt.task_id != item.native_task_id
-        or attempt.step_id != item.native_step_id
-        or attempt.contract_id != item.native_contract_id
-        or attempt.status != expected_status.value
-        or permit.task_id != item.native_task_id
-        or permit.step_id != item.native_step_id
-        or permit.contract_id != item.native_contract_id
-        or permit.status != "consumed"
-    ):
-        raise GovernedPlanError("Checkpoint disagrees with authoritative Permit/Attempt state")
+    async def load_events(self, session: Any, root_task_id: str) -> list[PlanJournalEvent]:
+        return await _load_events(session, root_task_id)
+
+    def replay(self, events: list[PlanJournalEvent]) -> GovernedPlanCheckpoint:
+        return replay_plan_journal(events)
+
+    async def append(
+        self,
+        session: Any,
+        *,
+        organization_id: str,
+        checkpoint: GovernedPlanCheckpoint,
+        transition: PlanJournalTransition,
+        authority_digests: dict[str, str],
+        operation_key: str,
+        created_at: datetime,
+    ) -> GovernedPlanCheckpoint:
+        return await append_agent_run_transition(
+            session,
+            native_store=self.native_store,
+            organization_id=organization_id,
+            checkpoint=checkpoint,
+            transition=transition,
+            authority_digests=authority_digests,
+            operation_key=operation_key,
+            created_at=created_at,
+        )
 
 
 def _event_model(event: PlanJournalEvent, organization_id: str) -> GovernanceAuditEventModel:

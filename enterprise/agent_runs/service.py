@@ -14,18 +14,17 @@ from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import and_, or_, select, text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from enterprise.agent_runs.journal import (
+    PLAN_APPLICATION_MARKER,
     GovernedPlanCheckpoint,
     GovernedPlanError,
     PlanJournalEvent,
     PlanJournalTransition,
     PlanRunState,
     PlanStepState,
-    append_agent_run_transition,
-    replay_plan_journal,
 )
 from enterprise.approval.models import ApprovalRequestModel, ApprovalStatus
 from enterprise.approval.persistence import decide_approval_request
@@ -38,7 +37,6 @@ from enterprise.governance.contracts import ActionIntent, ExecutionEffect, Polic
 from enterprise.governance.models import (
     ExecutionAttemptModel,
     ExecutionPermitModel,
-    GovernanceAuditEventModel,
     GovernedTaskAdmissionModel,
     PendingActionModel,
 )
@@ -53,9 +51,14 @@ from enterprise.governance.pack_runtime import (
     PreparedRunReference,
     derive_pack_run_id,
 )
-from skyvern.forge.sdk.db.models import StepModel, TaskModel
-from skyvern.forge.sdk.models import StepStatus
-from skyvern.forge.sdk.schemas.tasks import TaskStatus
+
+from .journal import AgentRunJournal
+from .persistence import (
+    AgentRunNativeStore,
+    AgentRunStepStatus,
+    AgentRunTaskSnapshot,
+    AgentRunTaskStatus,
+)
 
 
 class AgentRunError(RuntimeError):
@@ -231,8 +234,15 @@ class AgentRunService:
         provider_timeout_seconds: float = 30.0,
         create_gate_factory: CreateGateFactory | None = None,
         clock: Callable[[], datetime] | None = None,
+        native_store: AgentRunNativeStore | None = None,
     ) -> None:
         self._session_factory = session_factory
+        if native_store is None:
+            from enterprise.integrations.skyvern_agent_run_store import SkyvernAgentRunStore
+
+            native_store = SkyvernAgentRunStore()
+        self._native_store = native_store
+        self._journal = AgentRunJournal(native_store)
         self._registry = runtime_registry
         self._target_url = target_url
         adapter = runtime_registry.require(
@@ -273,13 +283,12 @@ class AgentRunService:
         existing_run_id = derive_pack_run_id(tenant_id=user.org_id, request_id=request.request_id)
         async with self._create_gate_factory(user.org_id, request.request_id) as session:
             async with session.begin():
-                root = (
-                    await session.scalars(
-                        select(TaskModel)
-                        .where(TaskModel.task_id == existing_run_id, TaskModel.organization_id == user.org_id)
-                        .with_for_update()
-                    )
-                ).first()
+                root = await self._native_store.get_root(
+                    session,
+                    run_id=existing_run_id,
+                    organization_id=user.org_id,
+                    lock=True,
+                )
                 admission = (
                     await session.scalars(
                         select(GovernedTaskAdmissionModel)
@@ -358,34 +367,13 @@ class AgentRunService:
         boundary = _decode_cursor(cursor) if cursor else None
         async with self._session_factory() as session:
             async with session.begin():
-                statement = (
-                    select(TaskModel)
-                    .join(
-                        GovernedTaskAdmissionModel,
-                        and_(
-                            GovernedTaskAdmissionModel.task_id == TaskModel.task_id,
-                            GovernedTaskAdmissionModel.organization_id == TaskModel.organization_id,
-                        ),
-                    )
-                    .where(
-                        TaskModel.organization_id == user.org_id,
-                        TaskModel.task_id.like("run_%"),
-                    )
-                )
-                if boundary is not None:
-                    created_at, run_id = boundary
-                    statement = statement.where(
-                        or_(
-                            TaskModel.created_at < created_at,
-                            and_(TaskModel.created_at == created_at, TaskModel.task_id < run_id),
-                        )
-                    )
                 roots = list(
-                    (
-                        await session.scalars(
-                            statement.order_by(TaskModel.created_at.desc(), TaskModel.task_id.desc()).limit(limit + 1)
-                        )
-                    ).all()
+                    await self._native_store.list_roots(
+                        session,
+                        organization_id=user.org_id,
+                        boundary=boundary,
+                        limit=limit + 1,
+                    )
                 )
                 items: list[AgentRunSummary] = []
                 for root in roots[:limit]:
@@ -493,8 +481,9 @@ class AgentRunService:
                         predecessor=locked.checkpoint.journal_digest,
                     )
                     active = locked.checkpoint.model_copy(update={"state": PlanRunState.ACTIVE})
-                    await append_agent_run_transition(
+                    await self._journal.append(
                         session,
+                        organization_id=user.org_id,
                         checkpoint=active,
                         transition=PlanJournalTransition.APPROVAL_RESUMED,
                         authority_digests=locked.authority_digests,
@@ -544,15 +533,16 @@ class AgentRunService:
                     decision_note=_safe_reason(command.reason),
                     now=self._clock(),
                 )
-                await _cancel_native_pair(session, locked.checkpoint, user.org_id)
+                await self._cancel_native_pair(session, locked.checkpoint, user.org_id)
                 rejected = locked.checkpoint.model_copy(
                     update={
                         "state": PlanRunState.REJECTED,
                         "active_step": locked.checkpoint.active_step.model_copy(update={"state": PlanStepState.FAILED}),
                     }
                 )
-                await append_agent_run_transition(
+                await self._journal.append(
                     session,
+                    organization_id=user.org_id,
                     checkpoint=rejected,
                     transition=PlanJournalTransition.APPROVAL_REJECTED,
                     authority_digests=locked.authority_digests,
@@ -585,15 +575,16 @@ class AgentRunService:
                     raise AgentRunError("ILLEGAL_ACTION")
                 if await _effect_may_have_started(session, locked.checkpoint):
                     raise AgentRunError("CANCEL_EFFECT_BOUNDARY_CROSSED")
-                await _cancel_native_pair(session, locked.checkpoint, user.org_id)
+                await self._cancel_native_pair(session, locked.checkpoint, user.org_id)
                 cancelled = locked.checkpoint.model_copy(
                     update={
                         "state": PlanRunState.CANCELLED,
                         "active_step": locked.checkpoint.active_step.model_copy(update={"state": PlanStepState.FAILED}),
                     }
                 )
-                await append_agent_run_transition(
+                await self._journal.append(
                     session,
+                    organization_id=user.org_id,
                     checkpoint=cancelled,
                     transition=PlanJournalTransition.RUN_CANCELLED,
                     authority_digests=locked.authority_digests,
@@ -651,7 +642,14 @@ class AgentRunService:
         )
         async with self._session_factory() as session:
             async with session.begin():
-                await _require_root_lock(session, prepared.run_id, prepared.tenant_id)
+                root = await self._native_store.get_root(
+                    session,
+                    run_id=prepared.run_id,
+                    organization_id=prepared.tenant_id,
+                    lock=True,
+                )
+                if root is None or root.application != PLAN_APPLICATION_MARKER:
+                    raise AgentRunError("STATE_CONFLICT")
                 admission = (
                     await session.scalars(
                         select(GovernedTaskAdmissionModel).where(
@@ -661,23 +659,8 @@ class AgentRunService:
                     )
                 ).one()
                 bundle = TaskAdmissionBundle.model_validate(admission.bundle_payload)
-                events = tuple(
-                    sorted(
-                        (
-                            PlanJournalEvent.model_validate(item.payload)
-                            for item in (
-                                await session.scalars(
-                                    select(GovernanceAuditEventModel).where(
-                                        GovernanceAuditEventModel.task_id == prepared.run_id,
-                                        GovernanceAuditEventModel.event_type.like("m8.plan.%"),
-                                    )
-                                )
-                            ).all()
-                        ),
-                        key=lambda item: item.sequence,
-                    )
-                )
-                current = replay_plan_journal(list(events))
+                events = tuple(await self._journal.load_events(session, prepared.run_id))
+                current = self._journal.replay(list(events))
                 active = current.active_step
                 if (
                     active is None
@@ -731,14 +714,36 @@ class AgentRunService:
                     ttl_seconds=max(1, int((specification.expires_at - self._clock()).total_seconds())),
                 )
                 paused = current.model_copy(update={"state": PlanRunState.APPROVAL_REQUIRED})
-                return await append_agent_run_transition(
+                return await self._journal.append(
                     session,
+                    organization_id=prepared.tenant_id,
                     checkpoint=paused,
                     transition=PlanJournalTransition.APPROVAL_REQUIRED,
                     authority_digests=events[-1].authority_digests,
                     operation_key=operation_key,
                     created_at=self._clock(),
                 )
+
+    async def _cancel_native_pair(
+        self,
+        session: Any,
+        checkpoint: GovernedPlanCheckpoint,
+        organization_id: str,
+    ) -> None:
+        active = checkpoint.active_step
+        if active is None:
+            raise AgentRunError("STATE_CONFLICT")
+        try:
+            cancelled = await self._native_store.cancel_native_pair(
+                session,
+                task_id=active.native_task_id,
+                step_id=active.native_step_id,
+                organization_id=organization_id,
+            )
+        except ValueError as exc:
+            raise AgentRunError("STATE_CONFLICT") from exc
+        if not cancelled:
+            raise AgentRunError("STATE_CONFLICT")
 
     async def _load_locked(
         self,
@@ -748,7 +753,16 @@ class AgentRunService:
         user: UserContext,
         lock_root: bool = True,
     ) -> "_LockedRun":
-        root = await _require_root(session, run_id, user.org_id, lock=lock_root)
+        root = await self._native_store.get_root(
+            session,
+            run_id=run_id,
+            organization_id=user.org_id,
+            lock=lock_root,
+        )
+        if root is None:
+            raise AgentRunError("RUN_NOT_FOUND", status_code=404)
+        if root.application != PLAN_APPLICATION_MARKER:
+            raise AgentRunError("STATE_CONFLICT")
         admission = (
             await session.scalars(
                 select(GovernedTaskAdmissionModel).where(
@@ -763,21 +777,9 @@ class AgentRunService:
         expected_run_id = derive_pack_run_id(tenant_id=user.org_id, request_id=bundle.request.request_id)
         if root.task_id != expected_run_id or bundle.task.task_id != expected_run_id:
             raise AgentRunError("STATE_CONFLICT")
-        models = list(
-            (
-                await session.scalars(
-                    select(GovernanceAuditEventModel).where(
-                        GovernanceAuditEventModel.task_id == run_id,
-                        GovernanceAuditEventModel.event_type.like("m8.plan.%"),
-                    )
-                )
-            ).all()
-        )
+        events = tuple(await self._journal.load_events(session, run_id))
         try:
-            events = tuple(
-                sorted((PlanJournalEvent.model_validate(item.payload) for item in models), key=lambda x: x.sequence)
-            )
-            checkpoint = replay_plan_journal(list(events))
+            checkpoint = self._journal.replay(list(events))
         except (ValueError, GovernedPlanError) as exc:
             raise AgentRunError("STATE_CONFLICT") from exc
         return _LockedRun(
@@ -810,7 +812,15 @@ class AgentRunService:
             return self._state_conflict(
                 checkpoint.root_task_id, plan, completed, bundle=locked.bundle
             )
-        task, step = await _native_pair(session, active.native_task_id, active.native_step_id)
+        try:
+            task, step = await self._native_store.get_native_pair(
+                session,
+                task_id=active.native_task_id,
+                step_id=active.native_step_id,
+                organization_id=locked.root.organization_id,
+            )
+        except ValueError as exc:
+            raise AgentRunError("STATE_CONFLICT") from exc
         pending, approval = await _pending_approval(session, checkpoint)
         attempts = list(
             (
@@ -836,8 +846,8 @@ class AgentRunService:
             if (
                 task is not None
                 and step is not None
-                and task.status == TaskStatus.pending_result_probe.value
-                and step.status == StepStatus.pending_result_probe.value
+                and task.status == AgentRunTaskStatus.PENDING_RESULT_PROBE
+                and step.status == AgentRunStepStatus.PENDING_RESULT_PROBE
                 and len(exact_attempt) == 1
                 and len(exact_permit) == 1
                 and exact_attempt[0].action_fingerprint == exact_permit[0].action_fingerprint
@@ -862,8 +872,8 @@ class AgentRunService:
                 checkpoint.state is PlanRunState.REJECTED
                 and task is not None
                 and step is not None
-                and task.status == TaskStatus.canceled.value
-                and step.status == StepStatus.canceled.value
+                and task.status == AgentRunTaskStatus.CANCELED
+                and step.status == AgentRunStepStatus.CANCELED
                 and pending is not None
                 and approval is not None
                 and pending.status == "rejected"
@@ -890,8 +900,8 @@ class AgentRunService:
                 checkpoint.state is PlanRunState.CANCELLED
                 and task is not None
                 and step is not None
-                and task.status == TaskStatus.canceled.value
-                and step.status == StepStatus.canceled.value
+                and task.status == AgentRunTaskStatus.CANCELED
+                and step.status == AgentRunStepStatus.CANCELED
                 and not attempts
                 and not any(item.status == "consumed" for item in permits)
             ):
@@ -913,8 +923,8 @@ class AgentRunService:
             if (
                 task is not None
                 and step is not None
-                and task.status == TaskStatus.pending_approval.value
-                and step.status == StepStatus.pending_approval.value
+                and task.status == AgentRunTaskStatus.PENDING_APPROVAL
+                and step.status == AgentRunStepStatus.PENDING_APPROVAL
                 and pending is not None
                 and approval is not None
                 and pending.status == "pending"
@@ -962,12 +972,20 @@ class AgentRunService:
             if (
                 task is not None
                 and step is not None
-                and task.status in {TaskStatus.created.value, TaskStatus.running.value, TaskStatus.resuming.value}
-                and step.status in {StepStatus.created.value, StepStatus.running.value, StepStatus.resuming.value}
+                and task.status in {
+                    AgentRunTaskStatus.CREATED,
+                    AgentRunTaskStatus.RUNNING,
+                    AgentRunTaskStatus.RESUMING,
+                }
+                and step.status in {
+                    AgentRunStepStatus.CREATED,
+                    AgentRunStepStatus.RUNNING,
+                    AgentRunStepStatus.RESUMING,
+                }
                 and not attempts
                 and not any(item.status == "consumed" for item in permits)
             ):
-                legal = () if task.status == TaskStatus.resuming.value else (AgentRunAction.CANCEL,)
+                legal = () if task.status == AgentRunTaskStatus.RESUMING else (AgentRunAction.CANCEL,)
                 return self._projection(
                     bundle=locked.bundle,
                     provider_mode=locked.bundle.provider_mode,
@@ -1049,7 +1067,7 @@ class AgentRunService:
 class _LockedRun(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    root: Any
+    root: AgentRunTaskSnapshot
     bundle: TaskAdmissionBundle
     checkpoint: GovernedPlanCheckpoint
     events: tuple[PlanJournalEvent, ...]
@@ -1098,30 +1116,6 @@ async def _postgres_advisory_gate(
                     raise AgentRunError("CREATE_LOCK_RELEASE_FAILED", status_code=503)
 
 
-async def _require_root(session: Any, run_id: str, organization_id: str, *, lock: bool) -> TaskModel:
-    statement = select(TaskModel).where(TaskModel.task_id == run_id, TaskModel.organization_id == organization_id)
-    if lock:
-        statement = statement.with_for_update()
-    root = (await session.scalars(statement)).first()
-    if root is None:
-        raise AgentRunError("RUN_NOT_FOUND", status_code=404)
-    return root
-
-
-async def _require_root_lock(session: Any, run_id: str, organization_id: str) -> TaskModel:
-    return await _require_root(session, run_id, organization_id, lock=True)
-
-
-async def _native_pair(session: Any, task_id: str, step_id: str) -> tuple[TaskModel | None, StepModel | None]:
-    task = (await session.scalars(select(TaskModel).where(TaskModel.task_id == task_id))).first()
-    step = (
-        await session.scalars(select(StepModel).where(StepModel.step_id == step_id, StepModel.task_id == task_id))
-    ).first()
-    if (task is None) != (step is None):
-        raise AgentRunError("STATE_CONFLICT")
-    return task, step
-
-
 async def _pending_approval(
     session: Any,
     checkpoint: GovernedPlanCheckpoint,
@@ -1164,24 +1158,6 @@ async def _require_pending_by_id(session: Any, pending_action_id: str) -> Pendin
     if pending is None:
         raise AgentRunError("STATE_CONFLICT")
     return pending
-
-
-async def _cancel_native_pair(session: Any, checkpoint: GovernedPlanCheckpoint, organization_id: str) -> None:
-    if checkpoint.active_step is None:
-        raise AgentRunError("STATE_CONFLICT")
-    task, step = await _native_pair(
-        session, checkpoint.active_step.native_task_id, checkpoint.active_step.native_step_id
-    )
-    if (
-        task is None
-        or step is None
-        or task.organization_id != organization_id
-        or step.organization_id != organization_id
-    ):
-        raise AgentRunError("STATE_CONFLICT")
-    task.status = TaskStatus.canceled.value
-    step.status = StepStatus.canceled.value
-    await session.flush()
 
 
 async def _effect_may_have_started(session: Any, checkpoint: GovernedPlanCheckpoint) -> bool:
