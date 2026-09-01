@@ -92,3 +92,17 @@ def test_m4_review_scope_is_exact_and_documentation_retains_prior_milestones() -
     assert "## Status and Boundary" in documentation
     assert "## Browser audit perception (audit-only)" in documentation
     assert "## M3 offline SDK conformance" in documentation
+
+
+def test_m4_discovery_remains_windows_and_posix_aware() -> None:
+    support = SUPPORT.read_text(encoding="utf-8")
+    assert 'return f"{name}.exe" if os.name == "nt" else name' in support
+    assert '"chromium-*/chrome-win/chrome.exe"' in support
+    assert '"chromium-*/chrome-linux/chrome"' in support
+    assert 'shutil.which(postgres_executable("initdb"))' in support
+    assert 'postgres_bin / "initdb.exe"' not in support
+    assert 'postgres_bin / "pg_ctl.exe"' not in support
+    assert 'postgres_socket = root / "postgres-socket"' in support
+    assert 'postgres_options += f" -k {postgres_socket}"' in support
+    assert 'postgres log:\\n{server_log}' in support
+    assert "capture_output=False" in support

@@ -121,8 +121,7 @@ M12 在既有 M9-M11 治理链上增加只读证据面，不引入新的执行�
 - 一次结构 repair 成功后的 proposal 会进入与首次接受相同的可信编译路径；权限、浏览器字段和语义越权仍然终止并 fail closed。
 - Agent Run 提供租户隔离、root-locked 的非权威 Decision trace，有限阶段为 provider、validation、compilation、admission、approval、execution 和 recovery。轨迹只用于解释与导航，不包含 `legal_actions`，也不参与审批、Permit、Attempt、Replan 或 Probe 判断。
 - 下载报告升级为包含同一脱敏轨迹的版本化安全投影；旧 Admission 没有历史 Planner 观察时明确显示 `not_recorded`，不会伪造调用、耗时或 token 数据。
-- `python scripts/agentpact_eval.py recorded` 运行确定性、无凭据、无副作用的逐案例评估，并在 `artifacts/m12/` 写入版本化 JSON/Markdown。CI 只在主 Python 版本运行一次 recorded 模式。
-- `python scripts/agentpact_eval.py live` 是显式手工、planning-only 的信息性模式；配置不完整时失败，且不会创建 Task、数据库记录、审批、Permit、Attempt、交互会话或业务副作用。
+- 确定性与 live-provider 评估通过测试夹具覆盖，不作为应用、演示或发布命令暴露；这些评估不会创建 Task、数据库记录、审批、Permit、Attempt、交互会话或业务副作用。
 - 操作工作台仅为所选 Run 加载紧凑 Decision trace，并继续只依据权威详情的 `legal_actions` 渲染命令。
 
 ## 当前能力
@@ -133,14 +132,14 @@ M12 在既有 M9-M11 治理链上增加只读证据面，不引入新的执行�
 | M2 Pack SDK | Offline | 类型化契约、效果、证据、版本规则与确定性 Conformance Kit |
 | M3 参考 Pack | Offline | `synthetic.payment` 参考实现和有效/无效 Conformance 夹具 |
 | M4 治理 E2E | Offline | loopback Chromium、持久化 Attempt、`UNKNOWN`、禁止重放与独立 recorded Probe |
-| M5 开发者体验 | Offline | 跨平台 CLI、版本锁定、机器可读报告和发布前检查入口 |
+| M5 开发者体验 | Historical | 合成 CLI、版本锁定和发布证据保留为历史里程碑记录，不再作为当前入口 |
 | M6 受约束 Runtime | Interface-only | 安装、身份、租户/RBAC、CapabilityGrant 投影和可信编译接口 |
 | M7 原生 Agent 闭环 | Interface-only | ForgeAgent/Chromium、原生 Task/Step、Permit/Attempt 和 Probe 关联接口 |
 | M8 顺序 Agent Loop | Interface-only | 多步骤计划、不可变完成前缀、有界后缀 Replan 和持久 Journal 接口 |
 | M9 模型安全 Planner | Offline | 值隔离、终止优先拒绝、单次结构修复和确定性评估边界 |
 | M10 Agent Run API | Active runtime | recorded 默认适配器；Stripe hosted Checkout 仍是显式 smoke，未接入 M10 governed runtime |
 | M11 操作工作台 | Interface-only | recorded/live 服务器组合和安全投影接口；不打开生产 enforce |
-| M12 评估与决策轨迹 | Offline | 安全 Planner 观察、非权威 Decision trace 和确定性 recorded 评估 |
+| M12 评估与决策轨迹 | Offline tests | 安全 Planner 观察、非权威 Decision trace 和确定性评估夹具 |
 
 ## 演进方向
 
@@ -153,41 +152,32 @@ M12 在既有 M9-M11 治理链上增加只读证据面，不引入新的执行�
 
 长期目标不是让模型获得无限执行权，而是在可验证的领域契约内实现受约束自治。
 
-## 安装与运行合成验证
+## 安装与开发验证
 
-支持 Python 3.11、3.12 和 3.13。PostgreSQL 14+ 需要在 `PATH` 中提供 `initdb`、`pg_ctl`、`createdb` 和 `pg_isready`。以下命令均在仓库根目录执行，并使用虚拟环境中的 Python；统一入口为 `scripts/finrpa_release.py`。
+支持 Python 3.11、3.12 和 3.13。以下命令安装开发依赖并运行通用平台测试；Synthetic 仅作为测试夹具，不提供 demo、evaluation 或 release CLI。
 
 ### Windows PowerShell
 ```powershell
 py -3.11 -m venv .venv
 $VenvPython = (Resolve-Path .venv\Scripts\python.exe).Path
-& $VenvPython -m pip install -e . -r requirements-m5-demo.lock
-& $VenvPython -m playwright install chromium
-& $VenvPython scripts\finrpa_release.py doctor
-& $VenvPython scripts\finrpa_release.py conformance
-& $VenvPython scripts\agentpact_eval.py recorded
-& $VenvPython scripts\finrpa_release.py demo
-& $VenvPython scripts\finrpa_release.py report
+& $VenvPython -m pip install -e ".[dev]"
+& $VenvPython -m pytest tests\unit\test_governance_benchmark.py tests\unit\test_governance_benchmark_metrics.py tests\unit\test_pack_sdk_static_conformance.py -q
+& $VenvPython -m ruff check enterprise\evaluation enterprise\governance\benchmark.py tests\unit\test_governance_benchmark.py tests\unit\test_governance_benchmark_metrics.py tests\unit\test_pack_sdk_static_conformance.py
 ```
 ### Linux/WSL
 ```bash
 python3.11 -m venv .venv
 VENV_PYTHON="$(pwd)/.venv/bin/python"
-"$VENV_PYTHON" -m pip install -e . -r requirements-m5-demo.lock
-"$VENV_PYTHON" -m playwright install chromium
-"$VENV_PYTHON" scripts/finrpa_release.py doctor
-"$VENV_PYTHON" scripts/finrpa_release.py conformance
-"$VENV_PYTHON" scripts/agentpact_eval.py recorded
-"$VENV_PYTHON" scripts/finrpa_release.py demo
-"$VENV_PYTHON" scripts/finrpa_release.py report
+"$VENV_PYTHON" -m pip install -e ".[dev]"
+"$VENV_PYTHON" -m pytest tests/unit/test_governance_benchmark.py tests/unit/test_governance_benchmark_metrics.py tests/unit/test_pack_sdk_static_conformance.py -q
+"$VENV_PYTHON" -m ruff check enterprise/evaluation enterprise/governance/benchmark.py tests/unit/test_governance_benchmark.py tests/unit/test_governance_benchmark_metrics.py tests/unit/test_pack_sdk_static_conformance.py
 ```
-macOS 仅提供尽力支持，不作为发布门禁。自动发现不可用时，可将 `FINRPA_POSTGRES_BIN` 指向 PostgreSQL 二进制目录，或将 `FINRPA_CHROMIUM_EXECUTABLE` 指向已安装的 Chromium 可执行文件。这些配置项只接受可执行路径，不用于传递凭据。
 
-命令成功时返回 `0`；缺少前置条件、条件不安全或证据无效时返回 `2`；`conformance` 或 `demo` 检查失败时返回 `3`。生成的 `finrpa.release-report/v1` JSON/Markdown 证据写入已忽略的 `artifacts/m5/` 目录。
+需要 PostgreSQL 或浏览器的场景由对应测试显式配置，不参与默认应用启动。
 
 ### 可选 live Provider 配置
 
-CI 和默认本地验证始终使用确定性的 `recorded` 模式，不调用外部模型。只有显式配置完整的服务器环境时才启用 `live`：
+默认本地验证使用确定性的 `recorded` 模式，不调用外部模型。只有显式配置完整的服务器环境时才启用 `live`：
 
 ```powershell
 $env:AGENT_RUN_PROVIDER_MODE = "live"
@@ -207,12 +197,12 @@ $env:OPENAI_COMPATIBLE_API_KEY = "<environment-secret>"
 ## 边界与限制
 
 - 当前只有 `synthetic.payment` 合成 Domain Pack，没有生产 Pack、真实支付连接器或生产业务数据。
-- `live` Provider 是可选服务器配置；CI、Conformance 和发布基线保持确定性的 `recorded` 模式，不依赖外部网络。
+- `live` Provider 是可选服务器配置；测试夹具与默认本地验证保持确定性的 `recorded` 模式，不依赖外部网络。
 - 不包含生产凭据管理、租户安装、迁移、生产 rollout、全局 enforce 或可运营金融系统能力。
 - 浏览器传输成功不会被直接视为业务结果确认；`UNKNOWN` 必须通过独立 Probe 解决。
 - 本仓库是开发参考实现和证据验证工具，尚未达到生产就绪状态。
 
-更详细的复现步骤、限制和上游声明请参阅 [M5 开发者指南](docs/phase-2/m5-developer-release-guide.md)、[产品章程](docs/phase-2/final-product-charter.md) 和 [NOTICE](NOTICE.md)。公开仓库地址为 [meizhouyu666/agentpact](https://github.com/meizhouyu666/agentpact)。
+历史 M5 复现步骤和当时的兼容性声明保留在 [M5 开发者指南](docs/phase-2/m5-developer-release-guide.md) 与 [产品章程](docs/phase-2/final-product-charter.md) 中，不代表当前支持的命令。上游声明请参阅 [NOTICE](NOTICE.md)。公开仓库地址为 [meizhouyu666/agentpact](https://github.com/meizhouyu666/agentpact)。
 
 ## 许可证与声明
 
