@@ -28,6 +28,18 @@ from enterprise.agent.work_orders import (
     validate_work_order,
 )
 from enterprise.auth.schemas import UserContext
+from enterprise.domains.synthetic_payment.constants import (
+    CAPABILITY_ID,
+    PACK_CAPABILITY_IDS,
+    PACK_CONFORMANCE_MANIFEST_DIGEST,
+    PACK_DISPLAY_NAME,
+    PACK_ID,
+    PACK_VERSION,
+    POLICY_VERSION,
+    RESULT_PROBE_REF,
+)
+from enterprise.domains.synthetic_payment.definition import build_manifest
+from enterprise.domains.synthetic_payment.models import PaymentFacts
 from enterprise.governance.capabilities import (
     CapabilityDataScope,
     CapabilityGrant,
@@ -43,19 +55,6 @@ from enterprise.governance.domain_pack_installations import (
 )
 from enterprise.governance.pack_conformance import ConformanceStatus, StaticConformanceReport
 from enterprise.governance.pack_runtime import PackRuntimeContract
-
-from .constants import (
-    CAPABILITY_ID,
-    PACK_CAPABILITY_IDS,
-    PACK_CONFORMANCE_MANIFEST_DIGEST,
-    PACK_DISPLAY_NAME,
-    PACK_ID,
-    PACK_VERSION,
-    POLICY_VERSION,
-    RESULT_PROBE_REF,
-)
-from .definition import build_manifest
-from .models import PaymentFacts
 
 SYNTHETIC_ADAPTER_REF = "synthetic.payment.skyvern-locator-adapter.v1"
 SYNTHETIC_RUNTIME_CONTRACT = PackRuntimeContract(

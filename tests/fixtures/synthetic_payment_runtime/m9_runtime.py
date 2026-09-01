@@ -22,13 +22,13 @@ from enterprise.agent.constrained_planner import (
     PlannerUsage,
 )
 from enterprise.agent.work_orders import RecoveryLevel
-from enterprise.domains.synthetic_payment.m6_runtime import SyntheticM6Compilation
-from enterprise.domains.synthetic_payment.m8_runtime import (
+from enterprise.domains.synthetic_payment.models import PaymentFacts
+from tests.fixtures.synthetic_payment_runtime.m6_runtime import SyntheticM6Compilation
+from tests.fixtures.synthetic_payment_runtime.m8_runtime import (
     SyntheticM8Compilation,
     build_replacement_suffix,
     build_synthetic_m8_compilation,
 )
-from enterprise.domains.synthetic_payment.models import PaymentFacts
 
 
 class M9StepRole(StrEnum):

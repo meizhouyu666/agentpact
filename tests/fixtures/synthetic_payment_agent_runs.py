@@ -12,15 +12,15 @@ from fastapi import FastAPI
 from enterprise.agent.constrained_planner import OpenAICompatiblePlanner, PlannerTransport
 from enterprise.agent_runs.routes import mount_agent_run_api
 from enterprise.agent_runs.service import AgentRunService
-from enterprise.domains.synthetic_payment.m6_runtime import SYNTHETIC_RUNTIME_CONTRACT
-from enterprise.domains.synthetic_payment.m9_runtime import OpenAICompatibleM9Provider
-from enterprise.domains.synthetic_payment.m10_runtime import (
+from enterprise.governance.pack_runtime import PackRuntimeRegistry
+from tests.fixtures.synthetic_payment_runtime.m6_runtime import SYNTHETIC_RUNTIME_CONTRACT
+from tests.fixtures.synthetic_payment_runtime.m9_runtime import OpenAICompatibleM9Provider
+from tests.fixtures.synthetic_payment_runtime.m10_runtime import (
     M9ProviderFactory,
     SyntheticPaymentRuntimeAdapter,
     TrustedSyntheticM10Driver,
     recorded_m10_provider,
 )
-from enterprise.governance.pack_runtime import PackRuntimeRegistry
 
 
 def build_m10_provider_factory(

@@ -19,10 +19,6 @@ from enterprise.domains.synthetic_payment.constants import (
     RISK_POLICY_REF,
 )
 from enterprise.domains.synthetic_payment.definition import build_manifest
-from enterprise.domains.synthetic_payment.m6_runtime import (
-    SYNTHETIC_RUNTIME_CONTRACT,
-    build_synthetic_conformance_attestation,
-)
 from enterprise.domains.synthetic_payment.models import PaymentFacts, PaymentStatus
 from enterprise.domains.synthetic_payment.sdk_manifest import build_pack_sdk_manifest
 from enterprise.governance.capabilities import AuthorizationDimension
@@ -33,6 +29,10 @@ from enterprise.governance.pack_conformance import (
     evaluate_static_pack_conformance,
 )
 from enterprise.governance.pack_sdk import PackEffectClass, PackEvidenceKind, PackSdkManifest
+from tests.fixtures.synthetic_payment_runtime.m6_runtime import (
+    SYNTHETIC_RUNTIME_CONTRACT,
+    build_synthetic_conformance_attestation,
+)
 
 ROOT = Path(__file__).parents[2]
 SDK_MANIFEST_PATH = ROOT / "enterprise" / "domains" / "synthetic_payment" / "sdk_manifest.py"

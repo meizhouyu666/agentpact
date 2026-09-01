@@ -39,6 +39,17 @@ from enterprise.browser_loop.integrations import SqlAlchemyBrowserLoopEventSink
 from enterprise.browser_loop.loop import AgentPactBrowserLoop
 from enterprise.browser_loop.persisted_executor import PersistedBrowserExecutor
 from enterprise.browser_loop.runtime import PlaywrightPageRuntime
+from enterprise.domains.synthetic_payment.constants import (
+    BUSINESS_LINE_ID,
+    CAPABILITY_ID,
+    PACK_ID,
+    PACK_VERSION,
+    PAYMENTS_DEPARTMENT_ID,
+    POLICY_VERSION,
+    RESULT_PROBE_REF,
+)
+from enterprise.domains.synthetic_payment.models import PaymentFacts
+from enterprise.domains.synthetic_payment.policy import require_approval_decision
 from enterprise.governance.admission import (
     AdmissionAuditRecord,
     GovernedTaskDraft,
@@ -90,15 +101,6 @@ from skyvern.forge.sdk.db.models import StepModel, TaskModel
 from skyvern.forge.sdk.models import StepStatus
 from skyvern.forge.sdk.schemas.tasks import TaskStatus
 
-from .constants import (
-    BUSINESS_LINE_ID,
-    CAPABILITY_ID,
-    PACK_ID,
-    PACK_VERSION,
-    PAYMENTS_DEPARTMENT_ID,
-    POLICY_VERSION,
-    RESULT_PROBE_REF,
-)
 from .m6_runtime import (
     SYNTHETIC_RUNTIME_CONTRACT,
     SyntheticM6TrustedContext,
@@ -141,8 +143,6 @@ from .m9_runtime import (
     build_m9_plan_input,
     compile_m9_plan,
 )
-from .models import PaymentFacts
-from .policy import require_approval_decision
 
 M10_ADAPTER_ID = "synthetic.payment.agent-run-runtime.v1"
 M9ProviderFactory = Callable[[M9PlanInput], M9PlannerProvider]

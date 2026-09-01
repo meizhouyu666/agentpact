@@ -29,18 +29,18 @@ from enterprise.domains.synthetic_payment.constants import (
     PAYMENTS_DEPARTMENT_ID,
     TENANT_ID,
 )
-from enterprise.domains.synthetic_payment.m6_runtime import SYNTHETIC_RUNTIME_CONTRACT
-from enterprise.domains.synthetic_payment.m10_runtime import (
-    M10PlanningError,
-    SyntheticPaymentRuntimeAdapter,
-    derive_agent_run_id,
-)
 from enterprise.domains.synthetic_payment.sdk_manifest import build_pack_sdk_manifest
 from enterprise.governance.admission import TaskAdmissionBundle
 from enterprise.governance.contracts import ActionIntent, DecisionOutcome, ExecutionEffect, PolicyDecision
 from enterprise.governance.pack_runtime import PackRuntimeBinding, PackRuntimeRegistry
 from skyvern.forge.native_action import NativeActionDisposition, NativeActionResolution
 from tests.fixtures.synthetic_payment_agent_runs import build_m10_provider_factory
+from tests.fixtures.synthetic_payment_runtime.m6_runtime import SYNTHETIC_RUNTIME_CONTRACT
+from tests.fixtures.synthetic_payment_runtime.m10_runtime import (
+    M10PlanningError,
+    SyntheticPaymentRuntimeAdapter,
+    derive_agent_run_id,
+)
 
 INPUTS = {
     "payment_id": "m10-secret-payment",
@@ -295,7 +295,7 @@ def test_old_admission_defaults_recorded_and_restore_never_calls_provider() -> N
 
 def test_structurally_repaired_plan_uses_the_same_trusted_compiler() -> None:
     def repaired_provider(planner_input):
-        from enterprise.domains.synthetic_payment.m9_runtime import RecordedM9Provider
+        from tests.fixtures.synthetic_payment_runtime.m9_runtime import RecordedM9Provider
 
         return RecordedM9Provider(
             [

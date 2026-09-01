@@ -10,7 +10,7 @@ import pytest
 from enterprise.agent.constrained_planner import OpenAICompatiblePlanner
 from enterprise.agent.work_orders import RecoveryLevel
 from enterprise.domains.synthetic_payment.constants import CAPABILITY_ID
-from enterprise.domains.synthetic_payment.m9_runtime import (
+from tests.fixtures.synthetic_payment_runtime.m9_runtime import (
     M9PlannerCode,
     M9PlannerDisposition,
     M9PlannerEngine,

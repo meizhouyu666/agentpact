@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from enterprise.agent.work_orders import ExecutionWorkOrder, SkyvernPreparationReceipt
+from enterprise.domains.synthetic_payment.constants import CAPABILITY_ID, RESULT_PROBE_REF
 from enterprise.governance.admission import TaskAdmissionBundle, canonical_task_admission_payload
 from enterprise.governance.contracts import (
     ActionIntent,
@@ -45,7 +46,6 @@ from skyvern.webeye.actions.action_types import ActionType
 from skyvern.webeye.actions.actions import Action, CompleteAction, InputTextAction, SelectOptionAction
 from skyvern.webeye.scraper.scraped_page import ScrapedPage
 
-from .constants import CAPABILITY_ID, RESULT_PROBE_REF
 from .m6_runtime import (
     SYNTHETIC_ADAPTER_REF,
     SyntheticM6Compilation,
