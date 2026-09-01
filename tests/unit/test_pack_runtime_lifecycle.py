@@ -119,15 +119,23 @@ def test_platform_runtime_packages_do_not_import_concrete_packs() -> None:
             ), path
 
 
-def test_synthetic_agent_run_composition_is_application_owned() -> None:
+def test_synthetic_agent_run_composition_is_test_fixture_only() -> None:
     root = Path(__file__).resolve().parents[2]
-    old_path = root / "enterprise" / "domains" / "synthetic_payment" / "agent_run_composition.py"
-    composition = root / "enterprise" / "applications" / "synthetic_payment_agent_runs.py"
+    production_path = root / "enterprise" / "applications" / "synthetic_payment_agent_runs.py"
+    composition = root / "tests" / "fixtures" / "synthetic_payment_agent_runs.py"
 
-    assert not old_path.exists()
+    assert not production_path.exists()
     imports = _imports(composition)
     assert any(name.startswith("enterprise.agent_runs") for name in imports)
     assert any(name.startswith("enterprise.domains.synthetic_payment") for name in imports)
+
+
+def test_formal_api_startup_does_not_import_or_mount_synthetic_application() -> None:
+    root = Path(__file__).resolve().parents[2]
+    source = (root / "skyvern" / "forge" / "api_app.py").read_text(encoding="utf-8")
+
+    assert "synthetic_payment" not in source
+    assert "mount_synthetic_agent_run_api" not in source
 
 
 def test_generic_contract_sources_contain_no_payment_schema_or_pack_ids() -> None:

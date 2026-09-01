@@ -22,7 +22,6 @@ from enterprise.agent_runs.service import (
     AgentRunState,
     AgentRunSummary,
 )
-from enterprise.applications.synthetic_payment_agent_runs import build_m10_provider_factory
 from enterprise.auth.dependencies import get_current_user
 from enterprise.auth.schemas import DepartmentRole, UserContext
 from enterprise.domains.synthetic_payment.constants import (
@@ -41,6 +40,7 @@ from enterprise.governance.admission import TaskAdmissionBundle
 from enterprise.governance.contracts import ActionIntent, DecisionOutcome, ExecutionEffect, PolicyDecision
 from enterprise.governance.pack_runtime import PackRuntimeBinding, PackRuntimeRegistry
 from skyvern.forge.native_action import NativeActionDisposition, NativeActionResolution
+from tests.fixtures.synthetic_payment_agent_runs import build_m10_provider_factory
 
 INPUTS = {
     "payment_id": "m10-secret-payment",

@@ -1,4 +1,4 @@
-"""Audit-only synthetic caller for the governed Task admission boundary."""
+"""Test-only synthetic caller for the governed Task admission boundary."""
 
 from __future__ import annotations
 
@@ -15,6 +15,19 @@ from enterprise.agent.interactions import (
     build_grant_projection,
 )
 from enterprise.agent.work_orders import BusinessPlan, BusinessPlanStep, ExecutionWorkOrder, RecoveryLevel
+from enterprise.domains.synthetic_payment.accounts import require_synthetic_account
+from enterprise.domains.synthetic_payment.constants import (
+    BUSINESS_LINE_ID,
+    CAPABILITY_ID,
+    PACK_ID,
+    PACK_VERSION,
+    PAYMENTS_DEPARTMENT_ID,
+    POLICY_VERSION,
+    RESULT_PROBE_REF,
+    TENANT_ID,
+)
+from enterprise.domains.synthetic_payment.definition import build_manifest
+from enterprise.domains.synthetic_payment.models import PaymentFacts
 from enterprise.governance.admission import (
     GovernedTaskAdmissionService,
     GovernedTaskDraft,
@@ -31,20 +44,6 @@ from enterprise.governance.capabilities import (
 )
 from enterprise.governance.contracts import GovernanceMode, TaskContract
 from enterprise.governance.creation_snapshot import TaskCreationPath, TrustedTaskCreationSnapshot
-
-from .accounts import require_synthetic_account
-from .constants import (
-    BUSINESS_LINE_ID,
-    CAPABILITY_ID,
-    PACK_ID,
-    PACK_VERSION,
-    PAYMENTS_DEPARTMENT_ID,
-    POLICY_VERSION,
-    RESULT_PROBE_REF,
-    TENANT_ID,
-)
-from .definition import build_manifest
-from .models import PaymentFacts
 
 SYNTHETIC_ADMISSION_CALLER_ID = "synthetic_payment_admission_api"
 SYNTHETIC_WORKLOAD_PRINCIPAL_ID = "synthetic_payment_admission_service"

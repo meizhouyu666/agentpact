@@ -728,7 +728,7 @@ def is_loopback_port_open(port: int) -> bool:
 
 @contextmanager
 def isolated_m4_environment(
-    console_module: str = "enterprise.domains.synthetic_payment.app:app",
+    console_module: str = "tests.fixtures.synthetic_payment_app:app",
     expected_health: dict[str, object] | None = None,
 ) -> Iterator[IsolatedM4Environment]:
     repository = repository_root()

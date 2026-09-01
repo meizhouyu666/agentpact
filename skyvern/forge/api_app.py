@@ -207,19 +207,7 @@ def create_api_app() -> FastAPI:
     # Enterprise extension routes
     from enterprise.approval.routes import router as enterprise_approval_router
     from enterprise.auth.routes import router as enterprise_auth_router
-    from enterprise.domains.synthetic_payment.agent_run_composition import mount_synthetic_agent_run_api
     from enterprise.tenant.routes import router as enterprise_tenant_router
-
-    mount_synthetic_agent_run_api(
-        fastapi_app,
-        session_factory=forge_app.DATABASE.Session,
-        target_url=settings.SKYVERN_APP_URL,
-        hmac_secret=settings.GOVERNANCE_AUDIT_HMAC_SECRET,
-        provider_mode=settings.AGENT_RUN_PROVIDER_MODE,
-        provider_endpoint=settings.OPENAI_COMPATIBLE_API_BASE,
-        provider_model=settings.OPENAI_COMPATIBLE_MODEL_NAME,
-        provider_timeout_seconds=settings.AGENT_RUN_PROVIDER_TIMEOUT_SECONDS,
-    )
 
     fastapi_app.include_router(enterprise_auth_router, prefix="/api/v1")
     fastapi_app.include_router(enterprise_tenant_router, prefix="/api/v1")

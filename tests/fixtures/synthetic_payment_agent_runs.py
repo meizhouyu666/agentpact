@@ -1,4 +1,4 @@
-"""Compose the Agent Run application with the synthetic.payment Domain Pack."""
+"""Test-only composition for the synthetic.payment Agent Run evidence path."""
 
 from __future__ import annotations
 

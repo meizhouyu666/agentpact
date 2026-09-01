@@ -1,4 +1,4 @@
-"""Recorded-provider M10 proof through the mounted application composition."""
+"""Recorded-provider M10 proof through the test-only application fixture."""
 
 # ruff: noqa: E402, I001
 
@@ -17,7 +17,7 @@ from fastapi import FastAPI, Header
 from sqlalchemy import select
 
 from enterprise.agent_runs.routes import reset_agent_run_service
-from enterprise.applications.synthetic_payment_agent_runs import mount_synthetic_agent_run_api
+from tests.fixtures.synthetic_payment_agent_runs import mount_synthetic_agent_run_api
 from enterprise.approval.models import ApprovalRequestModel
 from enterprise.auth.dependencies import get_current_user
 from enterprise.auth.models import BusinessLineModel, DepartmentModel

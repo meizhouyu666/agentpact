@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 from sqlalchemy import inspect
 
-from enterprise.domains.synthetic_payment.admission_entry import SyntheticPaymentTaskAdmissionEntry
 from enterprise.domains.synthetic_payment.constants import CAPABILITY_ID, TENANT_ID
 from enterprise.domains.synthetic_payment.models import PaymentFacts
 from enterprise.governance.admission import (
@@ -21,6 +20,7 @@ from enterprise.governance.admission_persistence import (
     TaskAdmissionConflict,
 )
 from enterprise.governance.models import GovernanceOutboxModel, GovernedTaskAdmissionModel
+from tests.fixtures.synthetic_payment_admission import SyntheticPaymentTaskAdmissionEntry
 
 NOW = datetime(2026, 7, 25, tzinfo=timezone.utc)
 
