@@ -137,7 +137,7 @@ M12 在既有 M9-M11 治理链上增加只读证据面，不引入新的执行�
 | M7 原生 Agent 闭环 | Interface-only | ForgeAgent/Chromium、原生 Task/Step、Permit/Attempt 和 Probe 关联接口 |
 | M8 顺序 Agent Loop | Interface-only | 多步骤计划、不可变完成前缀、有界后缀 Replan 和持久 Journal 接口 |
 | M9 模型安全 Planner | Offline | 值隔离、终止优先拒绝、单次结构修复和确定性评估边界 |
-| M10 Agent Run API | Active runtime | recorded 默认适配器；Stripe hosted Checkout 仍是显式 smoke，未接入 M10 governed runtime |
+| M10 Agent Run API | Interface-only | Generic Agent Run contracts remain available; Synthetic composition is test-only and is not mounted by formal application startup |
 | M11 操作工作台 | Interface-only | recorded/live 服务器组合和安全投影接口；不打开生产 enforce |
 | M12 评估与决策轨迹 | Offline tests | 安全 Planner 观察、非权威 Decision trace 和确定性评估夹具 |
 
