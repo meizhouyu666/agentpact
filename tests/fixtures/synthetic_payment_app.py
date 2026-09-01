@@ -1,4 +1,4 @@
-"""FastAPI console for the isolated synthetic payment harness."""
+"""Test-only FastAPI console for the isolated synthetic payment harness."""
 
 from __future__ import annotations
 
@@ -9,12 +9,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
+from enterprise.domains.synthetic_payment.accounts import SYNTHETIC_ACCOUNTS, require_synthetic_account
+from enterprise.domains.synthetic_payment.harness import SyntheticPaymentEnforceHarness
+from enterprise.domains.synthetic_payment.models import FaultMode, PaymentFacts, SyntheticPaymentError
 from enterprise.governance.admission_persistence import TaskAdmissionConflict
-
-from .accounts import SYNTHETIC_ACCOUNTS, require_synthetic_account
-from .admission_entry import SyntheticPaymentTaskAdmissionEntry
-from .harness import SyntheticPaymentEnforceHarness
-from .models import FaultMode, PaymentFacts, SyntheticPaymentError
+from tests.fixtures.synthetic_payment_admission import SyntheticPaymentTaskAdmissionEntry
 
 
 class CreateChallengeRequest(BaseModel):

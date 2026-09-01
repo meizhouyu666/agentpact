@@ -2,14 +2,14 @@ from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
 
-from enterprise.domains.synthetic_payment.admission_entry import SyntheticPaymentTaskAdmissionEntry
-from enterprise.domains.synthetic_payment.app import create_app
 from enterprise.domains.synthetic_payment.harness import SyntheticPaymentEnforceHarness
 from enterprise.governance.admission import (
     GovernedTaskAdmissionService,
     TaskAdmissionReceipt,
 )
 from enterprise.governance.admission_persistence import TaskAdmissionConflict
+from tests.fixtures.synthetic_payment_admission import SyntheticPaymentTaskAdmissionEntry
+from tests.fixtures.synthetic_payment_app import create_app
 
 
 class _ApiAdmissionRepository:

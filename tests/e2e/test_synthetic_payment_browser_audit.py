@@ -1,9 +1,10 @@
 import asyncio
 import os
 import subprocess
+import sys
 import time
-from urllib.request import urlopen
 from pathlib import Path
+from urllib.request import urlopen
 
 import pytest
 
@@ -23,14 +24,14 @@ def test_real_synthetic_page_produces_audit_manifest_without_execution():
         pytest.skip("Playwright Chromium binary is not installed")
 
     repository = Path(__file__).resolve().parents[2]
-    python = repository / ".venv" / "Scripts" / "python.exe"
+    python = Path(sys.executable)
     port = "18083"
     process = subprocess.Popen(
         [
             str(python),
             "-m",
             "uvicorn",
-            "enterprise.domains.synthetic_payment.app:app",
+            "tests.fixtures.synthetic_payment_app:app",
             "--host",
             "127.0.0.1",
             "--port",
