@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import pytest
 
 from enterprise.agent.work_orders import ReplanReason
-from enterprise.domains.synthetic_payment.m8_runtime import (
+from tests.fixtures.synthetic_payment_runtime.m8_runtime import (
     GovernedPlanError,
     GovernedPlanCheckpoint,
     PlanJournalTransition,
@@ -23,8 +23,8 @@ from enterprise.domains.synthetic_payment.m8_runtime import (
     build_synthetic_m8_compilation,
     initial_checkpoint,
 )
-from enterprise.domains.synthetic_payment.m7_runtime import NativeSkyvernBinding
-from enterprise.domains.synthetic_payment.m6_runtime import SyntheticM6Compilation
+from tests.fixtures.synthetic_payment_runtime.m7_runtime import NativeSkyvernBinding
+from tests.fixtures.synthetic_payment_runtime.m6_runtime import SyntheticM6Compilation
 from enterprise.governance.contracts import ExecutionAttemptStatus
 from enterprise.governance.execution_profiles import ExecutionMechanism, ExecutionProfile
 from enterprise.governance.contracts import ExecutionAuthorization, ExecutionEffect
@@ -163,7 +163,7 @@ def test_m8_journal_rejects_reorder_corruption_and_transition_after_terminal():
     completed = restored
     for _ in range(3):
         completed = _complete_active(completed, __import__(
-            "enterprise.domains.synthetic_payment.m8_runtime", fromlist=["NativeWorkOutcome"]
+            "tests.fixtures.synthetic_payment_runtime.m8_runtime", fromlist=["NativeWorkOutcome"]
         ).NativeWorkOutcome(kind="completed"))
     terminal = _event(
         checkpoint=completed,
@@ -190,12 +190,12 @@ async def test_m8_replan_accepts_l3_suffix_and_revokes_only_superseded_suffix():
     compilation, bundle = _m8()
     checkpoint = initial_checkpoint(compilation)
     checkpoint = _complete_active(checkpoint, __import__(
-        "enterprise.domains.synthetic_payment.m8_runtime", fromlist=["NativeWorkOutcome"]
+        "tests.fixtures.synthetic_payment_runtime.m8_runtime", fromlist=["NativeWorkOutcome"]
     ).NativeWorkOutcome(kind="completed"))
     checkpoint = checkpoint.model_copy(update={"state": PlanRunState.REPLAN_REQUIRED, "journal_sequence": 1, "journal_digest": "d" * 64})
     replacement = build_replacement_suffix(compilation, completed_prefix_length=1)
     replacement_bundle = build_m8_admission_bundle(bundle, replacement)
-    from enterprise.domains.synthetic_payment.m8_runtime import GovernedPlanCoordinator
+    from tests.fixtures.synthetic_payment_runtime.m8_runtime import GovernedPlanCoordinator
 
     coordinator = GovernedPlanCoordinator(_MemoryJournal(), adapter_factory=lambda *_: None, runner=None)
     receipt = await coordinator.apply_replan(
@@ -219,7 +219,7 @@ async def test_m8_replan_expansion_fails_closed_at_l4():
     replacement = build_replacement_suffix(compilation, completed_prefix_length=0)
     replacement.business_plan.steps[1].inputs = {"amount": "forged"}
     replacement_bundle = build_m8_admission_bundle(bundle, replacement)
-    from enterprise.domains.synthetic_payment.m8_runtime import GovernedPlanCoordinator
+    from tests.fixtures.synthetic_payment_runtime.m8_runtime import GovernedPlanCoordinator
 
     coordinator = GovernedPlanCoordinator(_MemoryJournal(), adapter_factory=lambda *_: None, runner=None)
     receipt = await coordinator.apply_replan(

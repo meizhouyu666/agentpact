@@ -8,15 +8,6 @@ import pytest
 from enterprise.agent.constrained_planner import DeterministicPlanner
 from enterprise.auth.schemas import DepartmentRole, UserContext
 from enterprise.domains.synthetic_payment.constants import BUSINESS_LINE_ID, PAYMENTS_DEPARTMENT_ID
-from enterprise.domains.synthetic_payment.m6_runtime import (
-    M6TraceStage,
-    SyntheticM6TrustedContext,
-    append_execution_trace,
-    bind_compilation_for_execution,
-    bind_permit_to_execution,
-    build_synthetic_installation,
-    compile_synthetic_request,
-)
 from enterprise.domains.synthetic_payment.sdk_manifest import build_pack_sdk_manifest
 from enterprise.governance.capabilities import CapabilityDataScope
 from enterprise.governance.contracts import ExecutionAttemptStatus
@@ -47,6 +38,15 @@ from tests.e2e.m4_synthetic_support import (
     scrape_current_page,
     seed_governance_context,
     select_action,
+)
+from tests.fixtures.synthetic_payment_runtime.m6_runtime import (
+    M6TraceStage,
+    SyntheticM6TrustedContext,
+    append_execution_trace,
+    bind_compilation_for_execution,
+    bind_permit_to_execution,
+    build_synthetic_installation,
+    compile_synthetic_request,
 )
 
 

@@ -27,12 +27,12 @@ from enterprise.domains.synthetic_payment.constants import (
     PAYMENTS_DEPARTMENT_ID,
     POLICY_VERSION,
 )
-from enterprise.domains.synthetic_payment.m6_runtime import (
+from tests.fixtures.synthetic_payment_runtime.m6_runtime import (
     SyntheticM6TrustedContext,
     build_synthetic_installation,
     compile_synthetic_request,
 )
-from enterprise.domains.synthetic_payment.m7_runtime import (
+from tests.fixtures.synthetic_payment_runtime.m7_runtime import (
     M7_APPLICATION_MARKER,
     NativeBoundStateDenied,
     NativeProbeOutcome,

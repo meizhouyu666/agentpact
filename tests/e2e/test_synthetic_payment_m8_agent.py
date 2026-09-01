@@ -25,14 +25,14 @@ from tests.e2e.test_synthetic_payment_native_agent import (
     _select_fault,
 )
 
-from enterprise.domains.synthetic_payment.m7_runtime import (
+from tests.fixtures.synthetic_payment_runtime.m7_runtime import (
     NativeSkyvernBinding,
     NativeSkyvernWorkOrderAdapter,
     SqlAlchemyNativePublicationRepository,
     SyntheticNativeActionContextResolver,
     build_native_probe_evidence,
 )
-from enterprise.domains.synthetic_payment.m8_runtime import (
+from tests.fixtures.synthetic_payment_runtime.m8_runtime import (
     GovernedPlanError,
     GovernedPlanCoordinator,
     NativeWorkOutcome,
@@ -45,7 +45,7 @@ from enterprise.domains.synthetic_payment.m8_runtime import (
     build_replacement_suffix,
     build_synthetic_m8_compilation,
 )
-from enterprise.domains.synthetic_payment.m9_runtime import (
+from tests.fixtures.synthetic_payment_runtime.m9_runtime import (
     M9PlannerDisposition,
     M9PlannerEngine,
     M9ReplanPreconditions,

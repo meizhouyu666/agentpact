@@ -158,7 +158,7 @@ def test_synthetic_agent_run_composition_is_test_fixture_only() -> None:
     assert not production_path.exists()
     imports = _imports(composition)
     assert any(name.startswith("enterprise.agent_runs") for name in imports)
-    assert any(name.startswith("enterprise.domains.synthetic_payment") for name in imports)
+    assert any(name.startswith("tests.fixtures.synthetic_payment_runtime") for name in imports)
 
 
 def test_formal_api_startup_does_not_import_or_mount_synthetic_application() -> None:

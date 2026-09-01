@@ -14,8 +14,6 @@ from enterprise.domains.stripe_payment.constants import TENANT_ID as STRIPE_TENA
 from enterprise.domains.stripe_payment.m6_runtime import STRIPE_RUNTIME_CONTRACT
 from enterprise.domains.stripe_payment.m10_runtime import StripePaymentRuntimeAdapter
 from enterprise.domains.synthetic_payment import constants as synthetic_constants
-from enterprise.domains.synthetic_payment.m6_runtime import SYNTHETIC_RUNTIME_CONTRACT
-from enterprise.domains.synthetic_payment.m10_runtime import SyntheticPaymentRuntimeAdapter
 from enterprise.governance.admission import TaskAdmissionBundle
 from enterprise.governance.pack_runtime import (
     PackRunRequest,
@@ -25,6 +23,8 @@ from enterprise.governance.pack_runtime import (
     PackRuntimeRegistry,
     PreparedRunReference,
 )
+from tests.fixtures.synthetic_payment_runtime.m6_runtime import SYNTHETIC_RUNTIME_CONTRACT
+from tests.fixtures.synthetic_payment_runtime.m10_runtime import SyntheticPaymentRuntimeAdapter
 
 NOW = datetime(2026, 8, 31, 14, 0, tzinfo=timezone.utc)
 

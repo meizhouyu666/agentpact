@@ -41,6 +41,7 @@ from enterprise.agent_runs.journal import (
 from enterprise.agent_runs.journal import (
     replay_plan_journal as _replay,
 )
+from enterprise.domains.synthetic_payment.constants import RESULT_PROBE_REF
 from enterprise.governance.admission import TaskAdmissionBundle
 from enterprise.governance.contracts import ExecutionAttemptStatus
 from enterprise.governance.models import (
@@ -57,7 +58,6 @@ from skyvern.forge.sdk.db.models import StepModel, TaskModel
 from skyvern.forge.sdk.models import StepStatus
 from skyvern.forge.sdk.schemas.tasks import TaskStatus
 
-from .constants import RESULT_PROBE_REF
 from .m6_runtime import SyntheticM6Compilation
 from .m7_runtime import (
     NativeProbeEvidence,

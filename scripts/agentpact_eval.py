@@ -24,8 +24,8 @@ from enterprise.domains.synthetic_payment.constants import (
     PAYMENTS_DEPARTMENT_ID,
     TENANT_ID,
 )
-from enterprise.domains.synthetic_payment.m10_runtime import SyntheticPaymentRuntimeAdapter
-from enterprise.domains.synthetic_payment.m9_runtime import (
+from tests.fixtures.synthetic_payment_runtime.m10_runtime import SyntheticPaymentRuntimeAdapter
+from tests.fixtures.synthetic_payment_runtime.m9_runtime import (
     AgentEvalReport,
     M9StepRole,
     OpenAICompatibleM9Provider,

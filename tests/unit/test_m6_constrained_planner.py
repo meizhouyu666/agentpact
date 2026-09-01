@@ -18,7 +18,10 @@ from enterprise.domains.synthetic_payment.constants import (
     CAPABILITY_ID,
     PAYMENTS_DEPARTMENT_ID,
 )
-from enterprise.domains.synthetic_payment.m6_runtime import (
+from enterprise.domains.synthetic_payment.sdk_manifest import build_pack_sdk_manifest
+from enterprise.governance.capabilities import CapabilityDataScope
+from enterprise.governance.pack_conformance import evaluate_static_pack_conformance
+from tests.fixtures.synthetic_payment_runtime.m6_runtime import (
     M6TraceStage,
     SyntheticM6TrustedContext,
     append_execution_trace,
@@ -27,9 +30,6 @@ from enterprise.domains.synthetic_payment.m6_runtime import (
     build_synthetic_installation,
     compile_synthetic_request,
 )
-from enterprise.domains.synthetic_payment.sdk_manifest import build_pack_sdk_manifest
-from enterprise.governance.capabilities import CapabilityDataScope
-from enterprise.governance.pack_conformance import evaluate_static_pack_conformance
 
 NOW = datetime(2026, 7, 29, 11, 30, tzinfo=timezone.utc)
 TENANT = "synthetic-m6-tenant"

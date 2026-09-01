@@ -7,13 +7,13 @@ from pydantic import ValidationError
 
 from enterprise.domains.synthetic_payment.constants import CAPABILITY_ID, PACK_ID, POLICY_VERSION
 from enterprise.domains.synthetic_payment.definition import build_manifest
-from enterprise.domains.synthetic_payment.m6_runtime import SYNTHETIC_ADAPTER_REF, build_synthetic_installation
 from enterprise.domains.synthetic_payment.sdk_manifest import build_pack_sdk_manifest
 from enterprise.governance.domain_pack_installations import (
     DomainPackInstallationStatus,
     build_active_domain_pack_set,
 )
 from enterprise.governance.pack_conformance import ConformanceStatus, evaluate_static_pack_conformance
+from tests.fixtures.synthetic_payment_runtime.m6_runtime import SYNTHETIC_ADAPTER_REF, build_synthetic_installation
 
 NOW = datetime(2026, 7, 29, 11, 30, tzinfo=timezone.utc)
 TENANT = "synthetic-m6-tenant"

@@ -323,7 +323,6 @@ from playwright.async_api import Browser, BrowserContext, Page, Playwright, Rout
 from sqlalchemy import event, pool, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from enterprise.domains.synthetic_payment.m6_runtime import SyntheticM6ExecutionBinding
 from enterprise.governance.contracts import (
     DecisionOutcome,
     ExecutionAttemptStatus,
@@ -353,6 +352,7 @@ from skyvern.webeye.actions.handler import ActionHandler
 from skyvern.webeye.actions.responses import ActionSuccess
 from skyvern.webeye.scraper import scraper as skyvern_scraper
 from skyvern.webeye.scraper.scraped_page import ScrapedPage
+from tests.fixtures.synthetic_payment_runtime.m6_runtime import SyntheticM6ExecutionBinding
 
 RUN_ID = "finrpa-m4-20260728"
 ORGANIZATION_ID = "org-m4-synthetic"
