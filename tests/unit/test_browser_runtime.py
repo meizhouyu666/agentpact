@@ -7,8 +7,12 @@ import hashlib
 import pytest
 
 from enterprise.browser_loop.contracts import ActionKind, AuthorizedAction, BrowserAction
-from enterprise.browser_loop.ports import StaleObservationError
-from enterprise.browser_loop.runtime import PlaywrightPageRuntime, SkyvernScraperRuntimeAdapter
+from enterprise.browser_loop.ports import AgentPactBrowserRuntime, BrowserRuntimeError, StaleObservationError
+from enterprise.browser_loop.runtime import (
+    PlaywrightBrowserSessionFactory,
+    PlaywrightPageRuntime,
+    SkyvernScraperRuntimeAdapter,
+)
 from enterprise.governance.contracts import ExecutionAuthorization, ExecutionEffect
 from enterprise.governance.execution_profiles import ExecutionMechanism, ExecutionProfile
 
@@ -40,6 +44,9 @@ class FakePage:
     def __init__(self) -> None:
         self.html = "<html><button id='submit'>Submit</button></html>"
         self.locators: dict[str, FakeLocator] = {}
+        self.closed = False
+        self.main_frame = FakeFrame("https://enterprise.example.test/form", "")
+        self.frames = [self.main_frame]
 
     async def content(self) -> str:
         return self.html
@@ -72,6 +79,16 @@ class FakePage:
 
     async def wait_for_timeout(self, _milliseconds: float) -> None:
         return None
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class FakeFrame:
+    def __init__(self, url: str, name: str, parent_frame: "FakeFrame | None" = None) -> None:
+        self.url = url
+        self.name = name
+        self.parent_frame = parent_frame
 
 
 def _command(*, page: FakePage, element_id: str = "ap-0000") -> AuthorizedAction:
@@ -109,6 +126,64 @@ async def test_playwright_runtime_observes_and_executes_fresh_authorized_locator
     assert observation.screenshots == (b"png",)
     assert result.completed is True
     assert page.locators["#submit"].calls == [("click", None)]
+
+
+@pytest.mark.asyncio
+async def test_agentpact_runtime_exposes_page_evidence_and_child_iframes() -> None:
+    page = FakePage()
+    child = FakeFrame("https://enterprise.example.test/embedded", "payment", page.main_frame)
+    nested = FakeFrame("https://enterprise.example.test/nested", "nested", child)
+    page.frames = [page.main_frame, child, nested]
+    runtime = PlaywrightPageRuntime(page, capture_screenshot=False)
+
+    assert isinstance(runtime, AgentPactBrowserRuntime)
+    state = await runtime.page_state()
+    assert state.url == page.url
+    assert state.page_html == page.html
+    assert await runtime.normalized_interactable_tree() == '[{"element_id":"ap-0000","tag_name":"button","name":"Submit","text":"Submit","enabled":true}]'
+    assert await runtime.screenshot() == b"png"
+    assert await runtime.fresh_observation()
+    assert [frame.model_dump() for frame in await runtime.enumerate_iframes()] == [
+        {"frame_id": "frame-0001", "url": child.url, "name": child.name, "parent_frame_id": "main"},
+        {"frame_id": "frame-0002", "url": nested.url, "name": nested.name, "parent_frame_id": "frame-0001"},
+    ]
+    with pytest.raises(BrowserRuntimeError, match="does not own"):
+        await runtime.close()
+    assert page.closed is False
+
+
+@pytest.mark.asyncio
+async def test_playwright_session_factory_owns_and_closes_runtime() -> None:
+    page = FakePage()
+    requested_ids: list[str | None] = []
+
+    async def open_page(session_id: str | None):
+        requested_ids.append(session_id)
+        return page
+
+    factory = PlaywrightBrowserSessionFactory(open_page)
+    session = await factory.open(session_id="session-runtime-001")
+
+    assert session.session_id == "session-runtime-001"
+    assert isinstance(session.runtime, AgentPactBrowserRuntime)
+    assert requested_ids == ["session-runtime-001"]
+    await session.close()
+    await session.close()
+    assert page.closed is True
+    with pytest.raises(BrowserRuntimeError):
+        await session.runtime.page_state()
+
+
+@pytest.mark.asyncio
+async def test_session_factory_fails_closed_when_page_cannot_close() -> None:
+    class UnclosablePage(FakePage):
+        close = None
+
+    async def open_page(_session_id: str | None):
+        return UnclosablePage()
+
+    with pytest.raises(BrowserRuntimeError, match="cannot be closed"):
+        await PlaywrightBrowserSessionFactory(open_page).open()
 
 
 @pytest.mark.asyncio

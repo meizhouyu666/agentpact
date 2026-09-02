@@ -334,6 +334,7 @@ class AgentPactBrowserLoop:
             model_dom=raw.model_dom,
             screenshots=raw.screenshots,
             elements=raw.elements,
+            iframes=raw.iframes,
             captured_at=_as_utc(raw.captured_at),
         )
 

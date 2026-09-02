@@ -39,8 +39,11 @@ services, or account infrastructure.
 - `loop.py` owns the `observe -> decide -> enforce -> act -> reobserve ->
   verify` state machine, integrity bindings, retry budgets, approval pause, and
   terminal failure/unknown semantics.
-- `runtime.py` provides a direct injected-Playwright adapter and an optional
-  compatibility adapter around Skyvern's local scraper.
+- `runtime.py` provides a direct injected-Playwright adapter, an AgentPact-owned
+  session factory, and an optional compatibility adapter around Skyvern's local
+  scraper. The direct adapter exposes fresh observation, page state, screenshot,
+  child-frame metadata, and normalized interactable-tree capabilities without
+  exposing browser handles to callers.
 - `integrations.py` maps the existing Domain Pack `BusinessResultProbe`
   contract into authoritative loop verification.
 
@@ -103,13 +106,17 @@ currently owns the proven Permit consumption and crash-safe Attempt boundary.
 Removing Forge routes, workflows, Task/Step persistence, or `ActionHandler`
 would therefore still be premature.
 
-## Next Extraction Step
+## Remaining Extraction Step
 
-Move browser lifecycle/session ownership behind a new AgentPact runtime factory
-and port the remaining Skyvern scraper behavior needed in production (iframe
-enumeration, interactable-tree normalization, and split screenshots). Next,
-add an AgentPact-owned persisted execution runtime that validates freshness,
-consumes the Permit, commits the Attempt before the browser call, and exposes
+`PlaywrightBrowserSessionFactory` now provides the narrow AgentPact-owned
+session/lifecycle seam and the direct runtime provides the current observation
+evidence capabilities. Production callers still need to migrate their browser
+manager setup to that seam, and the Skyvern compatibility adapter remains for
+callers that still depend on its scraper output. The remaining extraction is to
+port any additional Skyvern scraper behavior needed in production (for example
+iframe-aware interactable actions and split screenshots) without widening the
+AgentPact loop. Next, add an AgentPact-owned persisted execution runtime that
+validates freshness, consumes the Permit, commits the Attempt before the browser call, and exposes
 the exact Attempt to result-probe recovery. Only then switch the synthetic
 `submit` step away from `ActionHandler`. Once all callers use that path, remove
 `SkyvernScraperRuntimeAdapter` and demonstrate that no AgentPact entrypoint

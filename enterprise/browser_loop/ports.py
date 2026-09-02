@@ -11,9 +11,11 @@ from .contracts import (
     AuthorizedAction,
     BrowserAction,
     BrowserActionResult,
+    BrowserFrame,
     BrowserLoopEvent,
     BrowserLoopRunContext,
     BrowserObservation,
+    BrowserPageState,
     ModelInput,
     PolicyAuthorization,
     RawBrowserObservation,
@@ -38,6 +40,46 @@ class BrowserRuntime(Protocol):
     async def observe(self) -> RawBrowserObservation: ...
 
     async def execute(self, command: AuthorizedAction) -> BrowserActionResult: ...
+
+
+@runtime_checkable
+class AgentPactBrowserRuntime(BrowserRuntime, Protocol):
+    """Full runtime capability owned by AgentPact.
+
+    ``BrowserRuntime`` remains intentionally small for existing injected fakes and
+    callers. New session owners can opt into this stronger contract without making
+    the operation loop or compatibility adapters implement lifecycle methods.
+    """
+
+    async def close(self) -> None: ...
+
+    async def fresh_observation(self) -> RawBrowserObservation: ...
+
+    async def page_state(self) -> BrowserPageState: ...
+
+    async def screenshot(self) -> bytes: ...
+
+    async def enumerate_iframes(self) -> tuple[BrowserFrame, ...]: ...
+
+    async def normalized_interactable_tree(self) -> str: ...
+
+
+@runtime_checkable
+class BrowserSession(Protocol):
+    """AgentPact-owned browser session lifecycle."""
+
+    @property
+    def session_id(self) -> str: ...
+
+    @property
+    def runtime(self) -> AgentPactBrowserRuntime: ...
+
+    async def close(self) -> None: ...
+
+
+@runtime_checkable
+class BrowserSessionFactory(Protocol):
+    async def open(self, *, session_id: str | None = None) -> BrowserSession: ...
 
 
 @runtime_checkable

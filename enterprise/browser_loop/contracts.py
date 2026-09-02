@@ -90,6 +90,27 @@ class BrowserElement(BaseModel):
     enabled: bool = True
 
 
+class BrowserFrame(BaseModel):
+    """Stable, non-executable metadata for a child browser frame."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    frame_id: str = Field(min_length=1)
+    url: str
+    name: str | None = None
+    parent_frame_id: str | None = None
+
+
+class BrowserPageState(BaseModel):
+    """Current page state captured by an AgentPact-owned runtime."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    url: str
+    title: str | None = None
+    page_html: str
+
+
 class RawBrowserObservation(BaseModel):
     """Ephemeral browser material returned by a runtime adapter."""
 
@@ -101,6 +122,7 @@ class RawBrowserObservation(BaseModel):
     model_dom: str
     screenshots: tuple[bytes, ...] = ()
     elements: tuple[BrowserElement, ...] = ()
+    iframes: tuple[BrowserFrame, ...] = ()
     captured_at: datetime
 
 
@@ -117,6 +139,7 @@ class BrowserObservation(BaseModel):
     model_dom: str
     screenshots: tuple[bytes, ...] = ()
     elements: tuple[BrowserElement, ...] = ()
+    iframes: tuple[BrowserFrame, ...] = ()
     captured_at: datetime
 
 
@@ -130,6 +153,7 @@ class ModelInput(BaseModel):
     url: str
     dom: str
     screenshots: tuple[bytes, ...] = ()
+    iframes: tuple[BrowserFrame, ...] = ()
     allowed_action_kinds: tuple[ActionKind, ...] = tuple(ActionKind)
 
 
