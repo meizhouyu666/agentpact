@@ -184,7 +184,7 @@ Checkout Session，浏览器访问 `checkout.stripe.com`，完成后独立 `GET 
 | `result_probe.py` `RecordedStripeProbe` | Offline / recorded | 无网络的确定性单测与 conformance |
 | `live_browser.py` | Active runtime / explicit smoke | 真实 Stripe test API + hosted Checkout + 独立 PaymentIntent GET；需要人工提供 `sk_test_*` |
 | `m10_runtime.py` recorded adapter | Active runtime / recorded | 默认无凭据、无网络的 M10 适配器 |
-| `m10_runtime.py` live adapter | Interface-only unless explicitly injected | 没有显式 `StripeHostedCheckoutFlow` 时 fail closed，不回退 recorded |
+| `m10_runtime.py` live adapter | Active runtime / explicit composition | 可执行，但必须显式注入 `StripeHostedCheckoutFlow` 与持久化 Attempt/Permit session；缺任一项即 fail closed，不回退 recorded |
 
 Live 路径只从 `STRIPE_SECRET_KEY` 环境变量读取 `sk_test_*`。缺少配置、live key、
 认证失败、未知 hosted 页面、网络/超时、`processing` 或 `requires_*` 都不能报告成功；
@@ -192,28 +192,32 @@ UNKNOWN 只允许重新 GET Probe，绝不自动重放 Checkout。证据只保�
 的标识。没有真实凭据时，不能把任何离线或 loopback E2E 称为 live Stripe E2E。
 ## Review boundary
 
-`live_browser.py` is an explicit test-mode hosted Checkout smoke adapter. It
-uses the real Stripe API, visits `https://checkout.stripe.com/c/...`, and uses
-an independent PaymentIntent GET probe. It is not the recorded `app.py`/
-`store.py` loopback console, and it is not a governed M10 runtime.
+`live_browser.py` is an explicit test-mode hosted Checkout adapter. It uses the
+real Stripe API, visits `https://checkout.stripe.com/c/...`, and uses an
+independent PaymentIntent GET probe. It is not the recorded `app.py`/`store.py`
+loopback console.
 
-`StripePaymentRuntimeAdapter` remains recorded-only for executable M10 work.
-Its live `advance_run` and `probe_run` fail closed until the hosted browser is
-wrapped by durable `ExecutionAttempt`/`ExecutionPermit` recovery. Do not treat
-an injected live adapter as approval or governance wiring.
+`StripePaymentRuntimeAdapter` can execute the live M10 path only when callers
+explicitly inject a `StripeHostedCheckoutFlow` and a durable Attempt/Permit
+session factory. The adapter then crosses the persisted browser boundary and
+leaves uncertain outcomes for the independent Stripe probe; missing wiring,
+credentials, approval/capability expiry, unsafe browser state, and inconclusive
+reads fail closed. The live path remains a test-mode candidate and is not
+production-eligible.
 
 ## Live boundary (authoritative)
 
-The hosted Stripe flow is an explicit test-mode smoke adapter, not a governed
-M10 execution path. M10 live `advance_run` and `probe_run` fail closed until a
-durable `ExecutionAttempt` and `ExecutionPermit` lifecycle wraps the browser
-side effect and its independent result probe.
+The hosted Stripe flow is an explicit test-mode candidate with a governed M10
+execution path. Live `advance_run` and `probe_run` are executable only with an
+injected hosted flow and durable `ExecutionAttempt`/`ExecutionPermit` lifecycle
+around the browser side effect and its independent result probe; otherwise they
+fail closed.
 
 ## Current review decision
 
-The hosted Checkout implementation is an explicit test-mode smoke adapter only.
-Any older matrix wording above that describes an injected live M10 adapter as
-executable is superseded: `StripePaymentRuntimeAdapter.advance_run` and
-`probe_run` fail closed for live mode. The recorded M10 adapter remains the
-only executable M10 path until durable Attempt/Permit recovery wraps the real
-browser side effect.
+The hosted Checkout implementation is an explicit test-mode candidate, and the
+injected live M10 composition is executable through the persisted governance
+boundary. Any invocation without the explicit hosted flow or durable
+Attempt/Permit persistence remains fail closed. Recorded/offline execution is
+still the default conformance path, and this pack remains production-ineligible
+until separately approved with production credentials and deployment controls.

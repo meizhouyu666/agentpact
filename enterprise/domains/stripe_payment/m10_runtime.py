@@ -16,10 +16,11 @@ Platform boundary (documented in PACK.md): ``AgentRunService`` state tracking
 is built around the synthetic M8 journal/checkpoint. This adapter is the
 pack-side of the M10 boundary and is registry-conformant; making the service
 itself multi-pack is a separate platform refactor. Live browser execution is
-not wired into this M10 adapter; ``advance_run`` and ``probe_run`` fail closed
-even when an explicit ``StripeHostedCheckoutFlow`` is injected. The standalone
-hosted flow is a manual test-mode smoke path until durable Attempt/Permit
-recovery is wired.
+available only when an explicit ``StripeHostedCheckoutFlow`` and durable
+Attempt/Permit session factory are injected; missing wiring, credentials,
+approval/capability expiry, unsafe browser state, or inconclusive probes fail
+closed. The hosted flow remains a test-mode candidate and never falls back to
+recorded execution.
 """
 
 from __future__ import annotations
@@ -42,10 +43,12 @@ from enterprise.agent.constrained_planner import (
 )
 from enterprise.agent.interactions import CapabilityRequest, CapabilityRequestKind, EntryMode
 from enterprise.auth.schemas import DepartmentRole, UserContext
+from enterprise.browser_loop.persisted_executor import recover_abandoned_persisted_executions
 from enterprise.governance.admission import AdmissionAuditRecord, GovernedTaskDraft, TaskAdmissionBundle
 from enterprise.governance.capabilities import CapabilityDataScope
+from enterprise.governance.contracts import ExecutionAttemptStatus
 from enterprise.governance.creation_snapshot import TaskCreationPath, TrustedTaskCreationSnapshot
-from enterprise.governance.models import GovernedTaskAdmissionModel
+from enterprise.governance.models import ExecutionAttemptModel, GovernedTaskAdmissionModel
 from enterprise.governance.pack_runtime import (
     ApprovalHandler,
     ApprovalRequestSpecification,
@@ -70,9 +73,10 @@ from .constants import (
     PACK_VERSION,
     PAYMENTS_DEPARTMENT_ID,
     POLICY_VERSION,
+    RESULT_PROBE_REF,
 )
 from .harness import ChallengeState, StripePaymentEnforceHarness, StripeSubmissionChallenge
-from .live_browser import StripeHostedCheckoutFlow
+from .live_browser import StripeHostedCheckoutError, StripeHostedCheckoutFlow, derive_live_idempotency_key
 from .m6_runtime import (
     STRIPE_RUNTIME_CONTRACT,
     StripeM6Compilation,
@@ -170,6 +174,7 @@ class StripePaymentRuntimeAdapter:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._harnesses: dict[str, StripePaymentEnforceHarness] = {}
         self._challenge_ids: dict[str, str] = {}
+        self._live_results: dict[str, object] = {}
 
     @property
     def provider_mode(self) -> Literal["recorded", "live"]:
@@ -388,6 +393,8 @@ class StripePaymentRuntimeAdapter:
         if not isinstance(prepared, PreparedRunReference):
             return await self._advance_run_legacy(prepared, **trusted_inputs)
         run = self._unwrap(prepared)
+        if self._provider_mode == "live":
+            return await self._advance_live_run(run, **trusted_inputs)
         result = await self._advance_run_legacy(run)
         if result["state"] == ChallengeState.CONFIRMED.value:
             return PackAdvanceResult(status=PackAdvanceStatus.COMPLETED, run_id=run.run_id)
@@ -400,10 +407,7 @@ class StripePaymentRuntimeAdapter:
     async def _advance_run_legacy(self, prepared: object, **trusted_inputs: Any) -> object:
         run = StripeM10PreparedRun.model_validate(prepared)
         if self._provider_mode == "live":
-            raise StripeM10NotWired(
-                "stripe.payment live browser execution is not wired through the governed Attempt/Permit lifecycle; "
-                "use the explicit test-mode hosted Checkout smoke command only"
-            )
+            return await self._advance_live_run(run, **trusted_inputs)
         harness = self._harness_for(run)
         challenge_id = self._challenge_ids[run.run_id]
         challenge = harness.get_challenge(challenge_id)
@@ -426,6 +430,159 @@ class StripePaymentRuntimeAdapter:
             "challenge_id": challenge_id,
         }
 
+    async def _advance_live_run(
+        self,
+        run: StripeM10PreparedRun,
+        **trusted_inputs: Any,
+    ) -> PackAdvanceResult | dict[str, Any]:
+        if self._live_browser is None or self._session_factory is None:
+            raise StripeM10NotWired(
+                "stripe.payment live execution requires an injected hosted Checkout flow and persisted Attempt/Permit session"
+            )
+        if self._clock() >= run.compilation.task_contract.expires_at:
+            raise StripeM10NotWired("stripe.payment live approval or capability grant has expired")
+        existing = await self._load_live_attempt(run)
+        if existing is not None:
+            if existing.status == ExecutionAttemptStatus.UNKNOWN.value:
+                checkpoint = self._checkpoint_from_live_attempt(existing)
+                return PackAdvanceResult(
+                    status=PackAdvanceStatus.PENDING_RESULT_PROBE,
+                    run_id=run.run_id,
+                    step_id=checkpoint.step_id,
+                    reason_code="RESULT_UNCERTAIN",
+                    execution_checkpoint=checkpoint,
+                )
+            if existing.status == ExecutionAttemptStatus.CONFIRMED.value:
+                return PackAdvanceResult(status=PackAdvanceStatus.COMPLETED, run_id=run.run_id)
+            raise StripeM10NotWired("stripe.payment live Attempt already crossed the browser boundary")
+
+        facts = StripePaymentFacts.model_validate(run.business_inputs)
+        step_id = run.compilation.business_plan.steps[0].step_id
+        result = await self._live_browser.execute_governed(
+            facts=facts,
+            idempotency_key=derive_live_idempotency_key(
+                request_id=run.admission_bundle.request.request_id,
+                payment_intent_id=facts.payment_intent_id,
+            ),
+            task_id=run.run_id,
+            step_id=step_id,
+            contract_id=run.compilation.task_contract.contract_id,
+            organization_id=run.user.org_id,
+            session_factory=self._session_factory,
+            integrity_secret=self._secret,
+            runtime_factory=trusted_inputs.get("runtime_factory"),
+            success_url=trusted_inputs.get(
+                "success_url",
+                "https://example.com/agentpact-stripe-success?session_id={CHECKOUT_SESSION_ID}",
+            ),
+            cancel_url=trusted_inputs.get("cancel_url", "https://example.com/agentpact-stripe-cancel"),
+            now=self._clock(),
+        )
+        checkpoint = result.execution_checkpoint
+        if checkpoint is None:
+            raise StripeHostedCheckoutError("Stripe hosted Checkout did not persist an execution checkpoint")
+        self._live_results[run.run_id] = result
+        return PackAdvanceResult(
+            status=PackAdvanceStatus.PENDING_RESULT_PROBE,
+            run_id=run.run_id,
+            step_id=checkpoint.step_id,
+            reason_code="RESULT_UNCERTAIN",
+            execution_checkpoint=checkpoint,
+        )
+
+    async def _probe_live_run(self, run: StripeM10PreparedRun, **trusted_inputs: Any) -> PackProbeResult:
+        if self._live_browser is None or self._session_factory is None:
+            raise StripeM10NotWired(
+                "stripe.payment live probing requires an injected hosted Checkout flow and durable Attempt session"
+            )
+        attempt = await self._load_live_attempt(run)
+        if attempt is None or attempt.status != ExecutionAttemptStatus.UNKNOWN.value:
+            raise ValueError("Stripe live probe requires the exact UNKNOWN Attempt")
+        checkpoint = self._checkpoint_from_live_attempt(attempt)
+        context = attempt.result_probe if isinstance(attempt.result_probe, dict) else {}
+        metadata = context.get("metadata") if isinstance(context.get("metadata"), dict) else {}
+        evidence = await self._live_browser.probe_governed(
+            facts=StripePaymentFacts.model_validate(run.business_inputs),
+            idempotency_key=attempt.idempotency_key,
+            checkpoint=checkpoint,
+            resource_id=context.get("resource_id") if context.get("resource_id") else None,
+            checkout_session_id=metadata.get("checkout_session_id"),
+            session_factory=self._session_factory,
+            probe_factory=trusted_inputs.get("probe_factory"),
+        )
+        status = {
+            "confirmed": PackProbeStatus.CONFIRMED,
+            "not_confirmed": PackProbeStatus.NOT_CONFIRMED,
+            "unknown": PackProbeStatus.INCONCLUSIVE,
+        }[evidence.status.value]
+        reason = {
+            PackProbeStatus.CONFIRMED: "BUSINESS_RESULT_CONFIRMED",
+            PackProbeStatus.NOT_CONFIRMED: "BUSINESS_RESULT_NOT_CONFIRMED",
+            PackProbeStatus.INCONCLUSIVE: "BUSINESS_RESULT_INCONCLUSIVE",
+        }[status]
+        return PackProbeResult(
+            status=status,
+            checkpoint=checkpoint,
+            reason_code=reason,
+            evidence_refs=(evidence.probe_ref,),
+        )
+
+    async def recover_abandoned_executions(
+        self,
+        *,
+        minimum_age: timedelta,
+        now: datetime | None = None,
+    ) -> object:
+        if self._session_factory is None:
+            raise StripeM10NotWired("stripe.payment recovery requires a persisted session")
+        return await recover_abandoned_persisted_executions(
+            self._session_factory,
+            minimum_age=minimum_age,
+            now=now,
+        )
+
+    async def _load_live_attempt(self, run: StripeM10PreparedRun) -> ExecutionAttemptModel | None:
+        if self._session_factory is None:
+            return None
+        async with self._session_factory() as session:
+            attempts = list(
+                (
+                    await session.scalars(
+                        select(ExecutionAttemptModel).where(ExecutionAttemptModel.task_id == run.run_id)
+                    )
+                ).all()
+            )
+            if len(attempts) > 1:
+                raise ValueError("Stripe live run has multiple persisted Attempts")
+            if attempts:
+                if hasattr(session, "expunge"):
+                    session.expunge(attempts[0])
+                return attempts[0]
+        return None
+
+    @staticmethod
+    def _checkpoint_from_live_attempt(attempt: ExecutionAttemptModel) -> ExecutionCheckpoint:
+        if (
+            not attempt.permit_id
+            or not attempt.idempotency_key_digest
+            or not attempt.execution_effect
+            or attempt.result_probe_ref != RESULT_PROBE_REF
+            or attempt.status != ExecutionAttemptStatus.UNKNOWN.value
+        ):
+            raise ValueError("Stripe live Attempt is not an exact UNKNOWN probe checkpoint")
+        return ExecutionCheckpoint(
+            permit_id=attempt.permit_id,
+            attempt_id=attempt.attempt_id,
+            task_id=attempt.task_id,
+            step_id=attempt.step_id,
+            action_fingerprint=attempt.action_fingerprint,
+            observation_hash=attempt.observation_hash,
+            idempotency_key_digest=attempt.idempotency_key_digest,
+            execution_effect=attempt.execution_effect,
+            result_probe_ref=attempt.result_probe_ref,
+            attempt_status=attempt.status,
+        )
+
     async def probe_run(
         self,
         prepared: PreparedRunReference | object,
@@ -435,12 +592,9 @@ class StripePaymentRuntimeAdapter:
     ) -> PackProbeResult | object:
         if not isinstance(prepared, PreparedRunReference):
             return await self._probe_run_legacy(prepared, **trusted_inputs)
-        if self._provider_mode == "live":
-            raise StripeM10NotWired(
-                "stripe.payment live result probing is not wired to durable Attempt recovery; "
-                "use the explicit smoke flow's independent Probe only"
-            )
         run = self._unwrap(prepared)
+        if self._provider_mode == "live":
+            return await self._probe_live_run(run, **trusted_inputs)
         before = self._current_challenge(run)
         checkpoint = self._execution_checkpoint(before)
         result = await self._probe_run_legacy(run)
@@ -464,10 +618,7 @@ class StripePaymentRuntimeAdapter:
     async def _probe_run_legacy(self, prepared: object, **trusted_inputs: Any) -> object:
         run = StripeM10PreparedRun.model_validate(prepared)
         if self._provider_mode == "live":
-            raise StripeM10NotWired(
-                "stripe.payment live result probing is not wired to durable Attempt recovery; "
-                "use the explicit smoke flow's independent Probe only"
-            )
+            return await self._probe_live_run(run, **trusted_inputs)
         harness = self._harness_for(run)
         challenge_id = self._challenge_ids[run.run_id]
         resolved = harness.resolve_unknown(challenge_id)

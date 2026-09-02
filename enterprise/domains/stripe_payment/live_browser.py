@@ -9,9 +9,11 @@ and the final business result is read by :class:`StripeApiResultProbe`.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import os
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -19,15 +21,44 @@ from urllib.parse import urlparse
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
 
+from enterprise.browser_loop.contracts import (
+    ActionDecision,
+    ActionKind,
+    BrowserAction,
+    BrowserActionResult,
+    BrowserLoopConfig,
+    BrowserLoopRunContext,
+    BrowserLoopStatus,
+    BrowserObservation,
+    DecisionKind,
+    ModelInput,
+    PolicyAuthorization,
+    PolicyDisposition,
+    VerificationDisposition,
+    VerificationRequest,
+    VerificationResult,
+)
+from enterprise.browser_loop.integrations import SqlAlchemyBrowserLoopEventSink
+from enterprise.browser_loop.loop import AgentPactBrowserLoop
+from enterprise.browser_loop.persisted_executor import PersistedBrowserExecutor
+from enterprise.browser_loop.ports import PreflightBrowserRuntime
+from enterprise.governance.contracts import DecisionOutcome, ExecutionAuthorization, ExecutionEffect, PolicyDecision
+from enterprise.governance.execution_attempt_service import resolve_unknown_execution_attempt
+from enterprise.governance.execution_profiles import ExecutionMechanism, ExecutionProfile
+from enterprise.governance.models import ExecutionAttemptModel
+from enterprise.governance.pack_runtime import ExecutionCheckpoint, PackRuntimeBinding
 from enterprise.governance.result_probes import ResultProbeEvidence, ResultProbeStatus
 
+from .constants import CAPABILITY_ID, PACK_ID, PACK_VERSION, RESULT_PROBE_REF
 from .models import StripePaymentFacts
 from .result_probe import (
     STRIPE_API_BASE,
     STRIPE_SECRET_KEY_ENV,
     StripeApiResultProbe,
     StripeProbeError,
+    build_probe_evidence,
     validate_payment_intent_id,
 )
 
@@ -124,6 +155,17 @@ class StripeHostedCheckoutResult(BaseModel):
     browser_state: str
     probe: ResultProbeEvidence
     evidence: StripeHostedCheckoutEvidence
+    execution_checkpoint: ExecutionCheckpoint | None = None
+    execution_status: ResultProbeStatus | None = None
+
+
+class GovernedCheckoutRuntimeFactory(Protocol):
+    """Create a preflight-capable runtime already attached to hosted Checkout."""
+
+    def __call__(
+        self,
+        checkout_url: str,
+    ) -> PreflightBrowserRuntime | Awaitable[PreflightBrowserRuntime]: ...
 
 
 class HostedCheckoutApi(Protocol):
@@ -276,6 +318,75 @@ async def run_stripe_test_checkout(checkout_url: str, *, success_url: str, headl
             await browser.close()
 
 
+class StripeHostedCheckoutBrowserRuntime:
+    """Small governed port around the hosted browser callback.
+
+    The callback is intentionally invoked only from ``execute_preflighted``.
+    Observation exposes a stable, redacted Checkout affordance so the generic
+    loop can bind a fresh ``BrowserAction`` before the callback is entered.
+    """
+
+    def __init__(self, checkout_url: str, browser_runner: BrowserRunner, *, success_url: str) -> None:
+        parse_stripe_checkout_url(checkout_url)
+        self._checkout_url = checkout_url
+        self._browser_runner = browser_runner
+        self._success_url = success_url
+        self._observed = False
+
+    async def observe(self):
+        from enterprise.browser_loop.contracts import BrowserElement, RawBrowserObservation
+
+        self._observed = True
+        return RawBrowserObservation(
+            url=self._checkout_url,
+            title="Stripe Checkout",
+            page_html="<button data-agentpact-submit='true'>Pay</button>",
+            model_dom='[{"element_id":"stripe-submit","role":"button","name":"Pay"}]',
+            elements=(
+                BrowserElement(
+                    element_id="stripe-submit",
+                    tag_name="button",
+                    role="button",
+                    name="Pay",
+                ),
+            ),
+            captured_at=datetime.now(timezone.utc),
+        )
+
+    async def preflight(self, command: Any) -> None:
+        from enterprise.browser_loop.ports import BrowserRuntimeError, StaleObservationError
+
+        if not self._observed:
+            raise StaleObservationError("Stripe Checkout requires a fresh observation before submit")
+        if command.action.operation != CAPABILITY_ID or command.action.element_id != "stripe-submit":
+            raise BrowserRuntimeError("Stripe Checkout action is outside the hosted submit contract", effect_may_have_started=False)
+
+    async def execute(self, command: Any) -> BrowserActionResult:
+        await self.preflight(command)
+        return await self.execute_preflighted(command)
+
+    async def execute_preflighted(self, command: Any) -> BrowserActionResult:
+        from enterprise.browser_loop.ports import BrowserRuntimeError
+
+        try:
+            state = await self._browser_runner(self._checkout_url, success_url=self._success_url)
+        except Exception as exc:
+            raise BrowserRuntimeError(
+                f"Stripe hosted browser outcome is uncertain: {type(exc).__name__}",
+                effect_may_have_started=True,
+            ) from exc
+        if state not in {"completed", "unknown"}:
+            raise BrowserRuntimeError(
+                "Stripe hosted browser returned an unsafe state",
+                effect_may_have_started=True,
+            )
+        return BrowserActionResult(
+            completed=state == "completed",
+            effect_may_have_started=True,
+            detail_code="STRIPE_CHECKOUT_SUBMIT_RETURNED",
+        )
+
+
 async def _fill_checkout_field(page: Any, selectors: list[str], value: str) -> None:
     for frame in [page, *page.frames]:
         for selector in selectors:
@@ -392,8 +503,245 @@ class StripeHostedCheckoutFlow:
         self._results[idempotency_key] = result
         return result
 
+    async def execute_governed(
+        self,
+        *,
+        facts: StripePaymentFacts,
+        idempotency_key: str,
+        task_id: str,
+        step_id: str,
+        contract_id: str,
+        organization_id: str,
+        session_factory: Callable[[], AbstractAsyncContextManager[Any]],
+        integrity_secret: str,
+        runtime_factory: GovernedCheckoutRuntimeFactory | None = None,
+        success_url: str = DEFAULT_SUCCESS_URL,
+        cancel_url: str = DEFAULT_CANCEL_URL,
+        now: datetime | None = None,
+    ) -> StripeHostedCheckoutResult:
+        """Execute one hosted Checkout submit through the AgentPact boundary.
+
+        Checkout Session creation is preparation. The hosted submit is the only
+        browser side effect and is consequently proposed from a fresh
+        observation, authorized by a fresh Permit, and invoked only by
+        ``PersistedBrowserExecutor``. The executor intentionally leaves the
+        Attempt UNKNOWN; the independent PaymentIntent probe below is the only
+        resolver.
+        """
+
+        if not integrity_secret:
+            raise StripeHostedCheckoutError("Governed Stripe Checkout requires an integrity secret")
+        if not idempotency_key:
+            raise StripeHostedCheckoutError("Governed Stripe Checkout requires a non-empty idempotency key")
+        runtime_factory = runtime_factory or self.governed_runtime_factory(success_url=success_url)
+        prior = self._results.get(idempotency_key)
+        if prior is not None:
+            return prior
+        if idempotency_key in self._started_keys:
+            raise StripeHostedCheckoutError(
+                "Governed Stripe Checkout already started for this idempotency key; no replay is allowed"
+            )
+        self._started_keys.add(idempotency_key)
+
+        key = stripe_test_key_from_environment()
+        api = self._api_client_factory(key)
+        session = api.create_checkout_session(
+            facts=facts,
+            idempotency_key=idempotency_key,
+            success_url=success_url,
+            cancel_url=cancel_url,
+        )
+        parse_stripe_checkout_url(session.checkout_url)
+        runtime = runtime_factory(session.checkout_url)
+        if hasattr(runtime, "__await__"):
+            runtime = await runtime  # type: ignore[union-attr]
+        persisted = PersistedBrowserExecutor(
+            session_factory,
+            runtime,  # type: ignore[arg-type]
+            result_probe_ref=RESULT_PROBE_REF,
+            clock=lambda: now or datetime.now(timezone.utc),
+        )
+        loop = AgentPactBrowserLoop(
+            runtime=persisted,
+            model=_UnavailableStripeModel(),
+            policy=_StripeSubmitPolicy(
+                facts=facts,
+                session_factory=session_factory,
+                task_id=task_id,
+                step_id=step_id,
+                contract_id=contract_id,
+                idempotency_key=idempotency_key,
+                integrity_secret=integrity_secret,
+                clock=lambda: now or datetime.now(timezone.utc),
+            ),
+            verifier=_StripeDeferredVerifier(),
+            event_sink=SqlAlchemyBrowserLoopEventSink(
+                session_factory,
+                organization_id=organization_id,
+                contract_id=contract_id,
+                policy_version="stripe-payment-policy-v0.1.0-draft.1",
+            ),
+            integrity_secret=integrity_secret,
+            domain_actions=_StripeSubmitActions(),
+            config=BrowserLoopConfig(max_iterations=1, max_retries=0),
+            clock=lambda: now or datetime.now(timezone.utc),
+        )
+        report = await loop.run(
+            BrowserLoopRunContext(
+                run_id=task_id,
+                task_id=task_id,
+                step_id=step_id,
+                goal="Submit the approved Stripe test-mode Checkout exactly once",
+                pack_id=PACK_ID,
+                pack_version=PACK_VERSION,
+                capability_id=CAPABILITY_ID,
+                contract_id=contract_id,
+            )
+        )
+        checkpoint = report.execution_checkpoint
+        if report.status is not BrowserLoopStatus.UNKNOWN or checkpoint is None:
+            raise StripeHostedCheckoutError(
+                f"Governed Stripe browser did not reach the UNKNOWN probe boundary: {report.reason_code}"
+            )
+
+        # A browser return never proves the business result. Read the Checkout
+        # Session only to bind its exact PaymentIntent, then keep the Attempt
+        # UNKNOWN until the independent PaymentIntent probe runs.
+        try:
+            completed_session = api.retrieve_checkout_session(session_id=session.session_id)
+            if not completed_session.payment_intent_id:
+                raise StripeHostedCheckoutError(
+                    "Stripe Checkout Session did not expose the exact PaymentIntent"
+                )
+            resource_id = completed_session.payment_intent_id
+            reason = "hosted Checkout submit requires an independent PaymentIntent probe"
+            await _persist_probe_context(
+                session_factory,
+                checkpoint=checkpoint,
+                evidence=None,
+                checkout_session_id=session.session_id,
+                reason=reason,
+            )
+        except (StripeHostedCheckoutError, httpx.TimeoutException, httpx.TransportError) as exc:
+            reason = f"hosted Checkout Session read unavailable: {type(exc).__name__}"
+            # The Attempt is already UNKNOWN. Preserve only the Checkout
+            # Session correlation; inventing the request's PaymentIntent here
+            # would allow a later probe to certify the wrong business object.
+            await _persist_probe_context(
+                session_factory,
+                checkpoint=checkpoint,
+                evidence=None,
+                checkout_session_id=session.session_id,
+                reason=reason,
+            )
+            raise StripeHostedCheckoutError(
+                f"{reason}; retry the exact Checkout Session before probing"
+            ) from exc
+        probe_evidence = build_probe_evidence(
+            resource_id=resource_id,
+            idempotency_key=idempotency_key,
+            status=ResultProbeStatus.UNKNOWN,
+            read=None,
+            reasons=[reason],
+        )
+        evidence = self._build_evidence(
+            session=completed_session,
+            browser_state="unknown",
+            probe=probe_evidence,
+            idempotency_key=idempotency_key,
+        )
+        await _persist_probe_context(
+            session_factory,
+            checkpoint=checkpoint,
+            evidence=probe_evidence,
+            checkout_session_id=session.session_id,
+        )
+        result = StripeHostedCheckoutResult(
+            session=completed_session,
+            browser_state="unknown",
+            probe=probe_evidence,
+            evidence=evidence,
+            execution_checkpoint=checkpoint,
+            execution_status=ResultProbeStatus.UNKNOWN,
+        )
+        return result
+
+    async def probe_governed(
+        self,
+        *,
+        facts: StripePaymentFacts,
+        idempotency_key: str,
+        checkpoint: ExecutionCheckpoint,
+        resource_id: str | None = None,
+        checkout_session_id: str | None = None,
+        session_factory: Callable[[], AbstractAsyncContextManager[Any]],
+        probe_factory: Callable[..., Any] | None = None,
+    ) -> ResultProbeEvidence:
+        """Resolve one persisted UNKNOWN Attempt without reopening Checkout."""
+
+        if checkpoint.result_probe_ref != RESULT_PROBE_REF or checkpoint.attempt_status != "unknown":
+            raise StripeHostedCheckoutError("Stripe probe requires the exact UNKNOWN execution checkpoint")
+        if not hmac.compare_digest(_digest(idempotency_key), checkpoint.idempotency_key_digest):
+            raise StripeHostedCheckoutError("Stripe probe idempotency key does not match the exact Attempt")
+        persisted_context = await _load_probe_context(session_factory, checkpoint)
+        persisted_metadata = persisted_context.get("metadata")
+        persisted_session_id = (
+            persisted_metadata.get("checkout_session_id")
+            if isinstance(persisted_metadata, dict)
+            else None
+        )
+        if checkout_session_id is not None and checkout_session_id != persisted_session_id:
+            raise StripeHostedCheckoutError(
+                "Stripe Checkout Session does not match the exact persisted Attempt"
+            )
+        persisted_resource_id = persisted_context.get("resource_id")
+        if persisted_resource_id is not None and resource_id is not None and resource_id != persisted_resource_id:
+            raise StripeHostedCheckoutError("Stripe probe resource does not match the exact persisted Attempt")
+        if persisted_resource_id is not None and resource_id is None:
+            resource_id = persisted_resource_id
+        if persisted_resource_id is None and resource_id is not None and checkout_session_id is None:
+            raise StripeHostedCheckoutError(
+                "Stripe PaymentIntent may be bound only from the exact persisted Checkout Session"
+            )
+        key = stripe_test_key_from_environment()
+        api = self._api_client_factory(key)
+        if checkout_session_id:
+            session = api.retrieve_checkout_session(session_id=checkout_session_id)
+            if resource_id is not None and resource_id != session.payment_intent_id:
+                raise StripeHostedCheckoutError(
+                    "Stripe Checkout Session returned a different PaymentIntent than the persisted context"
+                )
+            resource_id = session.payment_intent_id
+        if not resource_id:
+            raise StripeHostedCheckoutError("Stripe probe requires the exact PaymentIntent returned by Checkout")
+        validate_payment_intent_id(resource_id)
+        # The result probe is bound to the PaymentIntent returned by Stripe,
+        # never to a model-supplied or newly-created identifier.
+        probe = (probe_factory or StripeApiResultProbe)(secret_key=key, api_base=getattr(api, "api_base", STRIPE_API_BASE))
+        evidence = probe.probe(resource_id=resource_id, idempotency_key=idempotency_key)
+        if evidence.resource_id != resource_id or evidence.probe_ref != RESULT_PROBE_REF:
+            raise StripeHostedCheckoutError("Stripe result probe evidence is not bound to the exact PaymentIntent")
+        await _persist_probe_context(
+            session_factory,
+            checkpoint=checkpoint,
+            evidence=evidence,
+            checkout_session_id=checkout_session_id,
+        )
+        if evidence.status is not ResultProbeStatus.UNKNOWN:
+            await _resolve_attempt(session_factory, checkpoint, evidence)
+        return evidence
+
     def result_for(self, idempotency_key: str) -> StripeHostedCheckoutResult | None:
         return self._results.get(idempotency_key)
+
+    def governed_runtime_factory(self, *, success_url: str = DEFAULT_SUCCESS_URL) -> GovernedCheckoutRuntimeFactory:
+        """Return the hosted browser callback as a preflight-capable runtime."""
+
+        return lambda checkout_url: StripeHostedCheckoutBrowserRuntime(
+            checkout_url,
+            self._browser_runner,
+            success_url=success_url,
+        )
 
     def _build_evidence(
         self,
@@ -428,6 +776,258 @@ class StripeHostedCheckoutFlow:
             raise StripeProbeError("Cannot re-probe a hosted Checkout Session without a PaymentIntent")
         probe = StripeApiResultProbe(secret_key=key)
         return probe.probe(resource_id=result.session.payment_intent_id, idempotency_key=idempotency_key)
+
+
+class _UnavailableStripeModel:
+    async def decide(self, _model_input: ModelInput) -> ActionDecision:
+        raise StripeHostedCheckoutError("Stripe hosted Checkout requires its deterministic Pack action provider")
+
+
+class _StripeSubmitActions:
+    binding = PackRuntimeBinding(
+        pack_id=PACK_ID,
+        pack_version=PACK_VERSION,
+        capability_ids=(CAPABILITY_ID,),
+        adapter_id="stripe.payment.browser-submit.v1",
+    )
+
+    async def decide(self, *, run: BrowserLoopRunContext, observation: BrowserObservation) -> ActionDecision:
+        candidates = [
+            element
+            for element in observation.elements
+            if element.enabled
+            and any(
+                token in f"{element.name or ''} {element.text or ''}".lower()
+                for token in ("pay", "submit", "purchase", "complete")
+            )
+        ]
+        if len(candidates) != 1:
+            return ActionDecision(
+                kind=DecisionKind.FAILURE,
+                observation_id=observation.observation_id,
+                reason_code="STRIPE_CHECKOUT_SUBMIT_TARGET_UNSAFE",
+            )
+        return ActionDecision(
+            kind=DecisionKind.ACTION,
+            observation_id=observation.observation_id,
+            action=BrowserAction(
+                kind=ActionKind.CLICK,
+                operation=CAPABILITY_ID,
+                element_id=candidates[0].element_id,
+            ),
+            reason_code="STRIPE_CHECKOUT_SUBMIT_ACTION",
+        )
+
+
+class _StripeSubmitPolicy:
+    def __init__(
+        self,
+        *,
+        facts: StripePaymentFacts,
+        session_factory: Callable[[], AbstractAsyncContextManager[Any]],
+        task_id: str,
+        step_id: str,
+        contract_id: str,
+        idempotency_key: str,
+        integrity_secret: str,
+        clock: Callable[[], datetime],
+    ) -> None:
+        self._facts = facts
+        self._session_factory = session_factory
+        self._task_id = task_id
+        self._step_id = step_id
+        self._contract_id = contract_id
+        self._idempotency_key = idempotency_key
+        self._integrity_secret = integrity_secret
+        self._clock = clock
+
+    async def prepare_model_input(self, *, run: BrowserLoopRunContext, observation: BrowserObservation) -> ModelInput:
+        return ModelInput(
+            observation_id=observation.observation_id,
+            goal=run.goal,
+            url=observation.url,
+            dom=observation.model_dom,
+            screenshots=observation.screenshots,
+            allowed_action_kinds=(),
+        )
+
+    async def authorize_action(
+        self,
+        *,
+        run: BrowserLoopRunContext,
+        observation: BrowserObservation,
+        action: BrowserAction,
+        action_fingerprint: str,
+    ) -> PolicyAuthorization:
+        if run.task_id != self._task_id or run.step_id != self._step_id or run.contract_id != self._contract_id:
+            return PolicyAuthorization(disposition=PolicyDisposition.DENY, reason_code="STRIPE_AUTHORITY_ID_MISMATCH")
+        # Business facts are immutable for this one admitted run. They are
+        # still checked against the exact scoped PaymentIntent before issuing a
+        # Permit so a changed browser target cannot cross the write boundary.
+        decision = PolicyDecision(
+            decision_id=f"stripe-live-allow:{action_fingerprint}",
+            intent_id=f"stripe-live-intent:{action_fingerprint}",
+            outcome=DecisionOutcome.ALLOW,
+            risk_level="high",
+            reasons=["Fresh hosted Checkout observation passed Stripe submit policy"],
+            matched_rules=["stripe.payment.separation-of-duties", "stripe.payment.fresh-observation"],
+            policy_version="stripe-payment-policy-v0.1.0-draft.1",
+        )
+        profile = ExecutionProfile(
+            mechanism=ExecutionMechanism.LOCATOR,
+            fallback_rank=0,
+            evidence_refs=[f"agentpact://stripe.payment/observation/{observation.observation_id}"],
+        )
+        async with self._session_factory() as session:
+            async with session.begin():
+                from enterprise.governance.permit_service import issue_permit
+
+                permit = await issue_permit(
+                    db_session=session,
+                    task_id=self._task_id,
+                    step_id=self._step_id,
+                    contract_id=self._contract_id,
+                    action_fingerprint=action_fingerprint,
+                    observation_hash=observation.observation_id,
+                    decision=decision,
+                    effect=ExecutionEffect.EXTERNAL_WRITE,
+                    execution_profile=profile,
+                    ttl_seconds=60,
+                )
+        return PolicyAuthorization(
+            disposition=PolicyDisposition.ALLOW,
+            reason_code="STRIPE_CHECKOUT_PERMIT_ISSUED",
+            authorization=ExecutionAuthorization(
+                permit_id=permit.permit_id,
+                action_fingerprint=action_fingerprint,
+                observation_hash=observation.observation_id,
+                idempotency_key=self._idempotency_key,
+                effect=ExecutionEffect.EXTERNAL_WRITE,
+            ),
+            execution_profile=profile,
+        )
+
+
+class _StripeDeferredVerifier:
+    async def verify(self, request: VerificationRequest) -> VerificationResult:
+        return VerificationResult(
+            disposition=VerificationDisposition.UNKNOWN,
+            reason_code="STRIPE_RESULT_PROBE_REQUIRED",
+            evidence_refs=(RESULT_PROBE_REF,),
+        )
+
+
+async def _persist_probe_context(
+    session_factory: Callable[[], AbstractAsyncContextManager[Any]],
+    *,
+    checkpoint: ExecutionCheckpoint,
+    evidence: ResultProbeEvidence | None,
+    checkout_session_id: str | None = None,
+    reason: str | None = None,
+) -> None:
+    """Persist redacted probe correlation so a restarted worker can recover."""
+
+    async with session_factory() as session:
+        async with session.begin():
+            model = (
+                await session.scalars(
+                    select(ExecutionAttemptModel).where(ExecutionAttemptModel.attempt_id == checkpoint.attempt_id)
+                )
+            ).first()
+            if model is None:
+                raise StripeHostedCheckoutError("Stripe execution Attempt disappeared before probe persistence")
+            if model.status != "unknown":
+                raise StripeHostedCheckoutError("Stripe probe context is not attached to an UNKNOWN Attempt")
+            existing = model.result_probe if isinstance(model.result_probe, dict) else None
+            existing_resource = existing.get("resource_id") if existing is not None else None
+            new_resource = evidence.resource_id if evidence is not None else None
+            existing_metadata = existing.get("metadata") if existing is not None else None
+            existing_session_id = (
+                existing_metadata.get("checkout_session_id")
+                if isinstance(existing_metadata, dict)
+                else None
+            )
+            if (
+                existing_session_id is not None
+                and checkout_session_id is not None
+                and existing_session_id != checkout_session_id
+            ):
+                raise StripeHostedCheckoutError("Stripe Checkout Session changed for the persisted Attempt")
+            if existing_resource is not None and existing_resource != new_resource:
+                raise StripeHostedCheckoutError("Stripe probe resource changed for the persisted Attempt")
+            if existing_resource is None and new_resource is not None:
+                if not checkout_session_id or existing_session_id != checkout_session_id:
+                    raise StripeHostedCheckoutError(
+                        "Stripe PaymentIntent may be bound only from the exact persisted Checkout Session"
+                    )
+            if evidence is None:
+                payload: dict[str, Any] = {
+                    "probe_ref": RESULT_PROBE_REF,
+                    "status": ResultProbeStatus.UNKNOWN.value,
+                    "resource_id": None,
+                    "reasons": [reason] if reason else [],
+                    "metadata": {},
+                }
+            else:
+                payload = evidence.model_dump(mode="json")
+            if existing is not None and isinstance(existing.get("metadata"), dict):
+                payload.setdefault("metadata", {}).update(existing["metadata"])
+            if checkout_session_id:
+                payload.setdefault("metadata", {})["checkout_session_id"] = checkout_session_id
+            model.result_probe = payload
+
+
+async def _load_probe_context(
+    session_factory: Callable[[], AbstractAsyncContextManager[Any]],
+    checkpoint: ExecutionCheckpoint,
+) -> dict[str, Any]:
+    """Load and validate the exact UNKNOWN Attempt before any Stripe read."""
+
+    async with session_factory() as session:
+        model = (
+            await session.scalars(
+                select(ExecutionAttemptModel).where(ExecutionAttemptModel.attempt_id == checkpoint.attempt_id)
+            )
+        ).first()
+        if (
+            model is None
+            or model.status != "unknown"
+            or model.permit_id != checkpoint.permit_id
+            or model.task_id != checkpoint.task_id
+            or model.step_id != checkpoint.step_id
+            or model.result_probe_ref != RESULT_PROBE_REF
+            or model.idempotency_key_digest != checkpoint.idempotency_key_digest
+        ):
+            raise StripeHostedCheckoutError("Stripe probe does not match the exact persisted Attempt")
+        return model.result_probe if isinstance(model.result_probe, dict) else {}
+
+
+async def _resolve_attempt(
+    session_factory: Callable[[], AbstractAsyncContextManager[Any]],
+    checkpoint: ExecutionCheckpoint,
+    evidence: ResultProbeEvidence,
+) -> None:
+    async with session_factory() as session:
+        async with session.begin():
+            attempt = (
+                await session.scalars(
+                    select(ExecutionAttemptModel).where(ExecutionAttemptModel.attempt_id == checkpoint.attempt_id)
+                )
+            ).first()
+            if (
+                attempt is None
+                or attempt.status != "unknown"
+                or attempt.permit_id != checkpoint.permit_id
+                or attempt.result_probe_ref != RESULT_PROBE_REF
+                or attempt.idempotency_key_digest != checkpoint.idempotency_key_digest
+            ):
+                raise StripeHostedCheckoutError("Stripe probe does not match the exact persisted Attempt")
+            await resolve_unknown_execution_attempt(
+                db_session=session,
+                attempt_id=checkpoint.attempt_id,
+                confirmed=evidence.status is ResultProbeStatus.CONFIRMED,
+                result_probe=evidence.model_dump(mode="json"),
+            )
 
 
 def _digest(value: str) -> str:
