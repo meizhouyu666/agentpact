@@ -9,11 +9,20 @@ from enterprise.governance.capabilities import CapabilityDefinition
 from enterprise.governance.domain_packs import DomainPackKind, DomainPackManifest
 from enterprise.governance.pack_runtime import (
     ApprovalRequestSpecification,
+    ExecutionCheckpoint,
+    PackAdmissionResult,
     PackAdvanceResult,
     PackAdvanceStatus,
+    PackLifecycleError,
+    PackProbeResult,
+    PackProbeStatus,
     PackRuntimeAdapter,
     PackRuntimeBinding,
     PackRuntimeRegistry,
+    PreparedRunReference,
+    validate_pack_admission_result,
+    validate_pack_advance_result,
+    validate_pack_probe_result,
 )
 from tests.fixtures.fake_domain_pack import (
     FAKE_ADAPTER_ID,
@@ -65,6 +74,25 @@ def test_registry_validates_adapter_identity_and_exact_capabilities() -> None:
     assert adapter.binding.adapter_id == FAKE_ADAPTER_ID
 
 
+def test_registry_rejects_duplicate_pack_contracts() -> None:
+    with pytest.raises(ValueError, match="already registered"):
+        PackRuntimeRegistry([FAKE_RUNTIME_CONTRACT, FAKE_RUNTIME_CONTRACT])
+
+
+def test_lifecycle_status_enums_are_closed_generic_sets() -> None:
+    assert {item.value for item in PackAdvanceStatus} == {
+        "COMPLETED",
+        "AWAITING_APPROVAL",
+        "PENDING_RESULT_PROBE",
+        "FAILED",
+    }
+    assert {item.value for item in PackProbeStatus} == {
+        "CONFIRMED",
+        "NOT_CONFIRMED",
+        "INCONCLUSIVE",
+    }
+
+
 def test_advance_result_rejects_fields_illegal_for_status() -> None:
     with pytest.raises(ValueError, match="AWAITING_APPROVAL"):
         PackAdvanceResult(status=PackAdvanceStatus.AWAITING_APPROVAL, run_id="run-1")
@@ -85,6 +113,98 @@ def test_advance_result_rejects_fields_illegal_for_status() -> None:
                 "attempt_status": "unknown",
             },
         )
+
+
+def _checkpoint(*, attempt_status: str = "unknown") -> ExecutionCheckpoint:
+    return ExecutionCheckpoint(
+        permit_id="permit-1",
+        attempt_id="attempt-1",
+        task_id="task-1",
+        step_id="step-1",
+        action_fingerprint="a" * 64,
+        observation_hash="b" * 64,
+        idempotency_key_digest="c" * 64,
+        execution_effect="external_write",
+        result_probe_ref="probe://orders/1",
+        attempt_status=attempt_status,
+    )
+
+
+def test_closed_lifecycle_statuses_reject_unknown_values_and_non_unknown_probe_checkpoints() -> None:
+    with pytest.raises(ValueError):
+        PackAdvanceResult.model_validate({"status": "RUNNING", "run_id": "run-1"})
+    with pytest.raises(ValueError, match="UNKNOWN"):
+        PackAdvanceResult(
+            status=PackAdvanceStatus.PENDING_RESULT_PROBE,
+            run_id="run-1",
+            step_id="step-1",
+            reason_code="RESULT_UNCERTAIN",
+            execution_checkpoint=_checkpoint(attempt_status="confirmed"),
+        )
+    with pytest.raises(ValueError, match="UNKNOWN"):
+        PackProbeResult(
+            status=PackProbeStatus.CONFIRMED,
+            checkpoint=_checkpoint(attempt_status="confirmed"),
+            reason_code="RESULT_CONFIRMED",
+        )
+
+
+def test_platform_result_validation_maps_shape_and_identity_errors_to_generic_codes() -> None:
+    with pytest.raises(PackLifecycleError, match="PACK_ADVANCE_RESULT_INVALID"):
+        validate_pack_advance_result({"status": "RUNNING", "run_id": "run-1"}, run_id="run-1")
+    with pytest.raises(PackLifecycleError, match="PACK_PROBE_RESULT_CORRELATION_MISMATCH"):
+        validate_pack_probe_result(
+            PackProbeResult(
+                status=PackProbeStatus.CONFIRMED,
+                checkpoint=_checkpoint(),
+                reason_code="RESULT_CONFIRMED",
+            ),
+            run_id="run-1",
+            native_task_id="other-task",
+            native_step_id="step-1",
+            permit_id="permit-1",
+            attempt_id="attempt-1",
+        )
+    validated = validate_pack_probe_result(
+        PackProbeResult(
+            status=PackProbeStatus.CONFIRMED,
+            checkpoint=_checkpoint(),
+            reason_code="RESULT_CONFIRMED",
+        ),
+        run_id="run-1",
+        native_task_id="task-1",
+        native_step_id="step-1",
+        permit_id="permit-1",
+        attempt_id="attempt-1",
+    )
+    assert validated.checkpoint.task_id == "task-1"
+
+
+def test_admission_result_validation_maps_shape_and_identity_errors_to_generic_codes() -> None:
+    prepared = PreparedRunReference(
+        run_id="run-1",
+        tenant_id="tenant-1",
+        request_id="request-1",
+        pack_id="fixture.orders",
+        pack_version="1.0.0",
+        adapter_id="fixture.orders.runtime",
+        admission_id="admission-1",
+        contract_id="contract-1",
+        provider_mode="recorded",
+        opaque_payload={},
+    )
+    with pytest.raises(PackLifecycleError, match="PACK_ADMISSION_RESULT_INVALID"):
+        validate_pack_admission_result(
+            {"prepared": prepared.model_dump(), "admission_id": "admission-1"},
+            prepared=prepared,
+        )
+    mismatched = PackAdmissionResult(
+        prepared=prepared.model_copy(update={"run_id": "run-2"}),
+        admission_id="admission-1",
+        initial=PackAdvanceResult(status=PackAdvanceStatus.COMPLETED, run_id="run-2"),
+    )
+    with pytest.raises(PackLifecycleError, match="PACK_ADMISSION_RESULT_CORRELATION_MISMATCH"):
+        validate_pack_admission_result(mismatched, prepared=prepared)
 
 
 def test_approval_spec_contains_no_executable_action_shape() -> None:
@@ -241,6 +361,9 @@ def test_generic_contract_sources_contain_no_payment_schema_or_pack_ids() -> Non
         "run_m10_",
         "m10-intent",
         'literal["precheck", "submit", "confirm"]',
+        "agentpact-m8",
+        "m8.plan.",
+        "m10:",
     ):
         assert forbidden not in source
 

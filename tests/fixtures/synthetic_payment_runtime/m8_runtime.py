@@ -41,6 +41,7 @@ from enterprise.agent_runs.journal import (
 from enterprise.agent_runs.journal import (
     replay_plan_journal as _replay,
 )
+from enterprise.agent_runs.journal import _stable_id as _generic_stable_id
 from enterprise.domains.synthetic_payment.constants import RESULT_PROBE_REF
 from enterprise.governance.admission import TaskAdmissionBundle
 from enterprise.governance.contracts import ExecutionAttemptStatus
@@ -1660,4 +1661,4 @@ def _digest(value: Any) -> str:
 
 
 def _stable_id(seed: str, kind: str) -> str:
-    return "m8_" + hashlib.sha256(f"agentpact-m8|{seed}|{kind}".encode("utf-8")).hexdigest()
+    return _generic_stable_id(seed, kind)

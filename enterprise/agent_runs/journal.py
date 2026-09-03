@@ -16,9 +16,10 @@ from enterprise.governance.models import GovernanceAuditEventModel
 
 from .persistence import AgentRunNativeStore
 
-PLAN_APPLICATION_MARKER = "agentpact:m8:plan:v1"
+PLAN_APPLICATION_MARKER = "agentpact:agent-run:plan:v1"
 PLAN_JOURNAL_SCHEMA = "agentpact.plan-journal/v1"
 PLAN_CHECKPOINT_SCHEMA = "agentpact.plan-checkpoint/v1"
+PLAN_EVENT_TYPE_PREFIX = "agent-run.plan."
 
 
 class GovernedPlanError(RuntimeError):
@@ -291,12 +292,17 @@ async def _load_events(session: Any, root_task_id: str) -> list[PlanJournalEvent
             await session.scalars(
                 select(GovernanceAuditEventModel).where(
                     GovernanceAuditEventModel.task_id == root_task_id,
-                    GovernanceAuditEventModel.event_type.like("m8.plan.%"),
                 )
             )
         ).all()
     )
-    return sorted((PlanJournalEvent.model_validate(item.payload) for item in models), key=lambda item: item.sequence)
+    events: list[PlanJournalEvent] = []
+    for item in models:
+        payload = item.payload
+        if not isinstance(payload, dict) or payload.get("schema_version") != PLAN_JOURNAL_SCHEMA:
+            continue
+        events.append(PlanJournalEvent.model_validate(payload))
+    return sorted(events, key=lambda item: item.sequence)
 
 
 def _validate_transition_checkpoint(
@@ -332,7 +338,7 @@ def _validate_transition_checkpoint(
 
 
 class AgentRunJournal:
-    """M8 journal façade bound to an AgentPact native persistence store."""
+    """Generic journal façade bound to an AgentPact native persistence store."""
 
     def __init__(self, native_store: AgentRunNativeStore) -> None:
         self.native_store = native_store
@@ -373,7 +379,7 @@ def _event_model(event: PlanJournalEvent, organization_id: str) -> GovernanceAud
         step_id=None,
         contract_id=event.checkpoint.authority_contract_id,
         organization_id=organization_id,
-        event_type=f"m8.plan.{event.transition.value}",
+        event_type=f"{PLAN_EVENT_TYPE_PREFIX}{event.transition.value}",
         mode="audit",
         action_fingerprint=None,
         observation_hash=None,
@@ -391,9 +397,4 @@ def _digest(value: Any) -> str:
 
 
 def _stable_id(seed: str, kind: str) -> str:
-    return "m8_" + hashlib.sha256(f"agentpact-m8|{seed}|{kind}".encode("utf-8")).hexdigest()
-
-
-# Compatibility names used by the existing M8 implementation while ownership moves here.
-_replay = replay_plan_journal
-append_m10_transition = append_agent_run_transition
+    return "agent_run_" + hashlib.sha256(f"agentpact-agent-run|{seed}|{kind}".encode("utf-8")).hexdigest()

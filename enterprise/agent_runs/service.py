@@ -43,12 +43,16 @@ from enterprise.governance.models import (
 from enterprise.governance.pack_runtime import (
     ApprovalRequestSpecification,
     PackLifecycleError,
+    PackAdvanceStatus,
     PackRunRequest,
     PackRunRestoreRequest,
     PackRuntimeAdapter,
     PackRuntimeBinding,
     PackRuntimeRegistry,
     PreparedRunReference,
+    validate_pack_admission_result,
+    validate_pack_advance_result,
+    validate_pack_probe_result,
     derive_pack_run_id,
 )
 
@@ -263,7 +267,10 @@ class AgentRunService:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def _adapter(self, binding: PackRuntimeBinding) -> PackRuntimeAdapter:
-        adapter = self._registry.require(pack_id=binding.pack_id, pack_version=binding.pack_version)
+        try:
+            adapter = self._registry.require(pack_id=binding.pack_id, pack_version=binding.pack_version)
+        except LookupError as exc:
+            raise AgentRunError("PACK_RUNTIME_UNAVAILABLE", status_code=503) from exc
         if adapter.binding != binding:
             raise AgentRunError("ADAPTER_CONFORMANCE_FAILED", status_code=503)
         return adapter
@@ -337,6 +344,19 @@ class AgentRunService:
                 raise AgentRunError(exc.code, status_code=503) from exc
             except (ValueError, GovernedPlanError) as exc:
                 raise AgentRunError("PLANNER_REJECTED", status_code=422) from exc
+            try:
+                prepared = PreparedRunReference.model_validate(prepared)
+            except (TypeError, ValueError) as exc:
+                raise AgentRunError("PACK_PREPARE_RESULT_INVALID", status_code=503) from exc
+            if (
+                prepared.run_id != existing_run_id
+                or prepared.tenant_id != user.org_id
+                or prepared.request_id != request.request_id
+                or prepared.pack_id != selected.pack_id
+                or prepared.pack_version != selected.pack_version
+                or prepared.adapter_id != selected.adapter_id
+            ):
+                raise AgentRunError("PACK_PREPARE_RESULT_INVALID", status_code=503)
             operation_key = _operation_key(
                 tenant_id=user.org_id,
                 run_id=prepared.run_id,
@@ -345,15 +365,18 @@ class AgentRunService:
                 predecessor="reservation",
             )
             try:
-                await adapter.admit_run(
+                admitted = await adapter.admit_run(
                     prepared,
                     approval_handler=self._pause_for_approval,
                     operation_key=operation_key,
                 )
+                validate_pack_admission_result(admitted, prepared=prepared)
             except AgentRunError:
                 raise
+            except PackLifecycleError as exc:
+                raise AgentRunError(exc.code, status_code=503) from exc
             except (ValueError, GovernedPlanError) as exc:
-                raise AgentRunError("STATE_CONFLICT") from exc
+                raise AgentRunError("PACK_ADMISSION_FAILED", status_code=503) from exc
             async with session.begin():
                 return await self._project_locked(
                     session,
@@ -496,13 +519,18 @@ class AgentRunService:
                 adapter, prepared = self._restore_prepared(locked.bundle)
         if should_advance and prepared is not None and adapter is not None:
             try:
-                await adapter.advance_run(
+                advanced = await adapter.advance_run(
                     prepared,
                     approval_handler=self._pause_for_approval,
                     operation_key=command.operation_key,
                 )
+                result = validate_pack_advance_result(advanced, run_id=prepared.run_id)
+                if result.status is PackAdvanceStatus.FAILED:
+                    raise AgentRunError(result.reason_code or "PACK_ADVANCE_FAILED")
+            except PackLifecycleError as exc:
+                raise AgentRunError(exc.code, status_code=503) from exc
             except (ValueError, GovernedPlanError) as exc:
-                raise AgentRunError("STATE_CONFLICT") from exc
+                raise AgentRunError("PACK_ADVANCE_FAILED", status_code=503) from exc
         return await self.get(run_id, user=user)
 
     async def reject(
@@ -617,12 +645,25 @@ class AgentRunService:
                     raise AgentRunError("STATE_CONFLICT")
                 adapter, prepared = self._restore_prepared(locked.bundle)
         try:
-            await adapter.probe_run(
+            probed = await adapter.probe_run(
                 prepared,
                 operation_key=command.operation_key,
             )
+            active = locked.checkpoint.active_step
+            if active is None or active.permit_id is None or active.attempt_id is None:
+                raise AgentRunError("STATE_CONFLICT")
+            validate_pack_probe_result(
+                probed,
+                run_id=prepared.run_id,
+                native_task_id=active.native_task_id,
+                native_step_id=active.native_step_id,
+                permit_id=active.permit_id,
+                attempt_id=active.attempt_id,
+            )
+        except PackLifecycleError as exc:
+            raise AgentRunError(exc.code, status_code=503) from exc
         except (ValueError, GovernedPlanError) as exc:
-            raise AgentRunError("STATE_CONFLICT") from exc
+            raise AgentRunError("PACK_PROBE_FAILED", status_code=503) from exc
         return await self.get(run_id, user=user)
 
     async def _pause_for_approval(
@@ -662,6 +703,7 @@ class AgentRunService:
                 events = tuple(await self._journal.load_events(session, prepared.run_id))
                 current = self._journal.replay(list(events))
                 active = current.active_step
+                binding = self._binding_for_bundle(bundle)
                 if (
                     active is None
                     or active.native_task_id != specification.task_id
@@ -669,13 +711,12 @@ class AgentRunService:
                     or active.native_contract_id != specification.contract_id
                     or prepared.admission_id != bundle.admission_id
                     or prepared.contract_id != bundle.contract.contract_id
-                    or self._binding_for_bundle(bundle)
-                    != PackRuntimeBinding(
-                        pack_id=prepared.pack_id,
-                        pack_version=prepared.pack_version,
-                        capability_ids=self._binding_for_bundle(bundle).capability_ids,
-                        adapter_id=prepared.adapter_id,
-                    )
+                    or prepared.tenant_id != bundle.request.tenant_id
+                    or prepared.request_id != bundle.request.request_id
+                    or prepared.provider_mode != bundle.provider_mode
+                    or prepared.pack_id != binding.pack_id
+                    or prepared.pack_version != binding.pack_version
+                    or prepared.adapter_id != binding.adapter_id
                 ):
                     raise AgentRunError("STATE_CONFLICT")
                 decision = PolicyDecision.model_validate(specification.policy_decision)
@@ -1031,9 +1072,10 @@ class AgentRunService:
         )
 
     def _binding_for_bundle(self, bundle: TaskAdmissionBundle) -> PackRuntimeBinding:
-        # Legacy admissions predate pinned bindings and are admitted only through
-        # the explicitly configured compatibility default at composition.
-        return bundle.runtime_binding or self._default_pack_binding
+        binding = bundle.runtime_binding
+        if binding is None:
+            raise AgentRunError("RUNTIME_BINDING_MISSING", status_code=409)
+        return binding
 
     def _restore_prepared(self, bundle: TaskAdmissionBundle) -> tuple[PackRuntimeAdapter, PreparedRunReference]:
         binding = self._binding_for_bundle(bundle)
@@ -1050,8 +1092,14 @@ class AgentRunService:
                     admission_payload=bundle.model_dump(mode="json"),
                 )
             )
+        except PackLifecycleError as exc:
+            raise AgentRunError(exc.code, status_code=503) from exc
         except (ValueError, GovernedPlanError) as exc:
             raise AgentRunError("STATE_CONFLICT") from exc
+        try:
+            prepared = PreparedRunReference.model_validate(prepared)
+        except (TypeError, ValueError) as exc:
+            raise AgentRunError("PACK_RESTORE_RESULT_INVALID", status_code=503) from exc
         if (
             prepared.run_id != bundle.task.task_id
             or prepared.admission_id != bundle.admission_id
@@ -1059,6 +1107,9 @@ class AgentRunService:
             or prepared.pack_id != binding.pack_id
             or prepared.pack_version != binding.pack_version
             or prepared.adapter_id != binding.adapter_id
+            or prepared.tenant_id != bundle.request.tenant_id
+            or prepared.request_id != bundle.request.request_id
+            or prepared.provider_mode != bundle.provider_mode
         ):
             raise AgentRunError("STATE_CONFLICT")
         return adapter, prepared
@@ -1192,7 +1243,6 @@ def _public_plan(checkpoint: GovernedPlanCheckpoint) -> tuple[AgentRunPlanStep, 
     )
     result: list[AgentRunPlanStep] = []
     for index, item in enumerate(refs, start=1):
-        role = next((role for role in ("precheck", "submit", "confirm") if role in item.work_order_id), "submit")
         state = {
             PlanStepState.PENDING: "pending",
             PlanStepState.ACTIVE: "active",
@@ -1201,7 +1251,7 @@ def _public_plan(checkpoint: GovernedPlanCheckpoint) -> tuple[AgentRunPlanStep, 
             PlanStepState.FAILED: "terminal",
             PlanStepState.SUPERSEDED: "terminal",
         }[item.state]
-        result.append(AgentRunPlanStep(sequence=index, role=role, state=state))
+        result.append(AgentRunPlanStep(sequence=index, role="step", state=state))
     return tuple(result)
 
 
@@ -1403,7 +1453,7 @@ def _safe_reason(reason: str | None) -> str:
 
 
 def _operation_key(*, tenant_id: str, run_id: str, command: str, caller_key: str, predecessor: str) -> str:
-    return f"m10:{command}:{_digest([tenant_id, run_id, command, caller_key, predecessor])}"
+    return f"agent-run:{command}:{_digest([tenant_id, run_id, command, caller_key, predecessor])}"
 
 
 def _digest(value: object) -> str:

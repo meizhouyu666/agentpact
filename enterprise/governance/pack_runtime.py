@@ -168,12 +168,26 @@ class PackAdvanceResult(BaseModel):
     def model_post_init(self, __context: Any) -> None:
         has_approval = self.approval is not None
         has_checkpoint = self.execution_checkpoint is not None
-        if has_approval != (self.status is PackAdvanceStatus.AWAITING_APPROVAL):
+        expects_approval = self.status is PackAdvanceStatus.AWAITING_APPROVAL
+        expects_checkpoint = self.status is PackAdvanceStatus.PENDING_RESULT_PROBE
+        if has_approval != expects_approval:
             raise ValueError("Only AWAITING_APPROVAL may carry an approval specification")
-        if has_checkpoint != (self.status is PackAdvanceStatus.PENDING_RESULT_PROBE):
+        if has_checkpoint != expects_checkpoint:
             raise ValueError("Only PENDING_RESULT_PROBE may carry an execution checkpoint")
         if self.status is PackAdvanceStatus.FAILED and self.reason_code is None:
             raise ValueError("FAILED requires a stable reason code")
+        if self.status in {
+            PackAdvanceStatus.AWAITING_APPROVAL,
+            PackAdvanceStatus.PENDING_RESULT_PROBE,
+        } and self.reason_code is None:
+            raise ValueError(f"{self.status.value} requires a stable reason code")
+        if expects_approval and self.step_id != self.approval.step_id:
+            raise ValueError("Approval result step correlation does not match its specification")
+        if expects_checkpoint:
+            if self.step_id != self.execution_checkpoint.step_id:
+                raise ValueError("Probe result step correlation does not match its checkpoint")
+            if self.execution_checkpoint.attempt_status.casefold() != "unknown":
+                raise ValueError("PENDING_RESULT_PROBE requires an UNKNOWN execution checkpoint")
 
 
 class PackAdmissionResult(BaseModel):
@@ -182,6 +196,12 @@ class PackAdmissionResult(BaseModel):
     prepared: PreparedRunReference
     admission_id: str = Field(min_length=1)
     initial: PackAdvanceResult
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.initial.run_id != self.prepared.run_id:
+            raise ValueError("Admission result run correlation does not match the prepared run")
+        if self.prepared.admission_id is not None and self.admission_id != self.prepared.admission_id:
+            raise ValueError("Admission result identity does not match the prepared run")
 
 
 class PackProbeResult(BaseModel):
@@ -192,6 +212,10 @@ class PackProbeResult(BaseModel):
     reason_code: str = Field(min_length=1, pattern=r"^[A-Z][A-Z0-9_]*$")
     evidence_refs: tuple[str, ...] = ()
 
+    def model_post_init(self, __context: Any) -> None:
+        if self.checkpoint.attempt_status.casefold() != "unknown":
+            raise ValueError("Probe results require an UNKNOWN execution checkpoint")
+
 
 class PackLifecycleError(RuntimeError):
     """Code-bearing boundary for validation/planning failures, not lifecycle flow."""
@@ -199,6 +223,71 @@ class PackLifecycleError(RuntimeError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
+def validate_pack_admission_result(
+    value: object,
+    *,
+    prepared: PreparedRunReference,
+) -> PackAdmissionResult:
+    """Validate the closed admission envelope at the platform boundary."""
+
+    try:
+        result = PackAdmissionResult.model_validate(value)
+    except (TypeError, ValueError) as exc:
+        raise PackLifecycleError("PACK_ADMISSION_RESULT_INVALID") from exc
+    if result.prepared != prepared:
+        raise PackLifecycleError("PACK_ADMISSION_RESULT_CORRELATION_MISMATCH")
+    return result
+
+
+def validate_pack_advance_result(
+    value: object,
+    *,
+    run_id: str,
+) -> PackAdvanceResult:
+    """Validate and correlate one closed Pack advance result."""
+
+    try:
+        result = PackAdvanceResult.model_validate(value)
+    except (TypeError, ValueError) as exc:
+        raise PackLifecycleError("PACK_ADVANCE_RESULT_INVALID") from exc
+    if result.run_id != run_id:
+        raise PackLifecycleError("PACK_ADVANCE_RESULT_CORRELATION_MISMATCH")
+    return result
+
+
+def validate_pack_probe_result(
+    value: object,
+    *,
+    run_id: str,
+    native_task_id: str,
+    native_step_id: str,
+    permit_id: str,
+    attempt_id: str,
+) -> PackProbeResult:
+    """Validate a probe result against the exact durable execution identity.
+
+    The checkpoint task ID belongs to the Pack's native child execution. It is
+    intentionally correlated with ``native_task_id`` rather than the Agent Run
+    root ID supplied by ``run_id``.
+    """
+
+    try:
+        result = PackProbeResult.model_validate(value)
+    except (TypeError, ValueError) as exc:
+        raise PackLifecycleError("PACK_PROBE_RESULT_INVALID") from exc
+    checkpoint = result.checkpoint
+    if (
+        checkpoint.task_id != native_task_id
+        or checkpoint.step_id != native_step_id
+        or checkpoint.permit_id != permit_id
+        or checkpoint.attempt_id != attempt_id
+    ):
+        raise PackLifecycleError("PACK_PROBE_RESULT_CORRELATION_MISMATCH")
+    if not run_id:
+        raise PackLifecycleError("PACK_PROBE_RESULT_CORRELATION_MISMATCH")
+    return result
 
 
 ApprovalHandler = Callable[[PreparedRunReference, ApprovalRequestSpecification, str], Awaitable[object]]
@@ -245,7 +334,12 @@ class PackRuntimeRegistry:
     """Boot-time exact adapter/runtime-contract registry."""
 
     def __init__(self, contracts: Iterable[PackRuntimeContract]) -> None:
-        self._contracts = {(item.pack_id, item.pack_version): item for item in contracts}
+        self._contracts: dict[tuple[str, str], PackRuntimeContract] = {}
+        for item in contracts:
+            key = (item.pack_id, item.pack_version)
+            if key in self._contracts:
+                raise ValueError("A runtime contract is already registered for this Pack version")
+            self._contracts[key] = item
         self._adapters: dict[tuple[str, str], PackRuntimeAdapter] = {}
 
     def register(self, adapter: PackRuntimeAdapter) -> None:
