@@ -414,8 +414,3 @@ def _stable_id(seed: str, kind: str) -> str:
 def _legacy_stable_id(seed: str, kind: str) -> str:
     legacy_namespace = "agentpact-" + "m8"
     return "m8_" + hashlib.sha256(f"{legacy_namespace}|{seed}|{kind}".encode("utf-8")).hexdigest()
-
-
-# Compatibility names used by the existing M8 implementation while ownership moves here.
-_replay = replay_plan_journal
-append_m10_transition = append_agent_run_transition

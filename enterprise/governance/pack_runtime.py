@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from datetime import datetime, timezone
-from enum import StrEnum
+from enum import Enum, StrEnum
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 if TYPE_CHECKING:
     from .domain_pack_installations import ActiveDomainPackSet
@@ -30,6 +30,49 @@ class PackRuntimeBinding(BaseModel):
     @property
     def identity(self) -> tuple[str, str, tuple[str, ...], str]:
         return (self.pack_id, self.pack_version, tuple(sorted(self.capability_ids)), self.adapter_id)
+
+
+# JSON is the only shape that may cross the platform/Pack boundary as an
+# opaque payload. Pack adapters can retain richer state internally, but the
+# formal lifecycle contract persists and correlates only serializable values.
+
+RuntimeValue = BaseModel | JsonValue
+
+
+@runtime_checkable
+class RuntimeInstallation(Protocol):
+    """Minimal accepted-installation shape required by the runtime registry.
+
+    The registry deliberately does not import a concrete installation model;
+    composition code supplies an implementation of this structural contract.
+    """
+
+    @property
+    def tenant_id(self) -> str: ...
+
+    @property
+    def pack_id(self) -> str: ...
+
+    @property
+    def pack_version(self) -> str: ...
+
+    @property
+    def status(self) -> str | Enum: ...
+
+    @property
+    def accepted_at(self) -> datetime: ...
+
+    @property
+    def expires_at(self) -> datetime: ...
+
+    @property
+    def contract_digest(self) -> str: ...
+
+    @property
+    def adapter_ref(self) -> str: ...
+
+    @property
+    def enabled_capability_ids(self) -> tuple[str, ...]: ...
 
 
 class PackRuntimeContract(BaseModel):
@@ -95,9 +138,11 @@ class PackRunRequest(BaseModel):
     tenant_id: str = Field(min_length=1)
     request_id: str = Field(min_length=1)
     intent_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    business_inputs: dict[str, Any]
+    business_inputs: dict[str, JsonValue]
     target_url: str = Field(min_length=1)
-    principal: object
+    # A composed application may pass its typed principal model; a mapping is
+    # retained solely for lightweight adapters and test composition edges.
+    principal: BaseModel | dict[str, JsonValue]
     now: datetime
 
 
@@ -112,7 +157,7 @@ class PackRunRestoreRequest(BaseModel):
     binding: PackRuntimeBinding
     provider_mode: Literal["recorded", "live"]
     target_url: str = Field(min_length=1)
-    admission_payload: dict[str, Any]
+    admission_payload: dict[str, JsonValue]
 
 
 class PreparedRunReference(BaseModel):
@@ -129,7 +174,7 @@ class PreparedRunReference(BaseModel):
     admission_id: str | None = Field(default=None, min_length=1)
     contract_id: str | None = Field(default=None, min_length=1)
     provider_mode: Literal["recorded", "live"]
-    opaque_payload: dict[str, Any]
+    opaque_payload: dict[str, JsonValue]
 
 
 class ApprovalRequestSpecification(BaseModel):
@@ -152,7 +197,7 @@ class ApprovalRequestSpecification(BaseModel):
     expires_at: datetime
     reason_code: str = Field(min_length=1, pattern=r"^[A-Z][A-Z0-9_]*$")
     redacted_description: str = Field(min_length=1, max_length=240)
-    policy_decision: dict[str, Any]
+    policy_decision: dict[str, JsonValue]
 
 
 class ExecutionCheckpoint(BaseModel):
@@ -200,12 +245,17 @@ class PackAdvanceResult(BaseModel):
             PackAdvanceStatus.PENDING_RESULT_PROBE,
         } and self.reason_code is None:
             raise ValueError(f"{self.status.value} requires a stable reason code")
-        if expects_approval and self.step_id != self.approval.step_id:
-            raise ValueError("Approval result step correlation does not match its specification")
+        if expects_approval:
+            approval = self.approval
+            assert approval is not None
+            if self.step_id != approval.step_id:
+                raise ValueError("Approval result step correlation does not match its specification")
         if expects_checkpoint:
-            if self.step_id != self.execution_checkpoint.step_id:
+            checkpoint = self.execution_checkpoint
+            assert checkpoint is not None
+            if self.step_id != checkpoint.step_id:
                 raise ValueError("Probe result step correlation does not match its checkpoint")
-            if self.execution_checkpoint.attempt_status.casefold() != "unknown":
+            if checkpoint.attempt_status.casefold() != "unknown":
                 raise ValueError("PENDING_RESULT_PROBE requires an UNKNOWN execution checkpoint")
 
 
@@ -245,7 +295,7 @@ class PackLifecycleError(RuntimeError):
 
 
 def validate_pack_admission_result(
-    value: object,
+    value: RuntimeValue,
     *,
     prepared: PreparedRunReference,
 ) -> PackAdmissionResult:
@@ -261,7 +311,7 @@ def validate_pack_admission_result(
 
 
 def validate_pack_advance_result(
-    value: object,
+    value: RuntimeValue,
     *,
     run_id: str,
 ) -> PackAdvanceResult:
@@ -277,7 +327,7 @@ def validate_pack_advance_result(
 
 
 def validate_pack_probe_result(
-    value: object,
+    value: RuntimeValue,
     *,
     run_id: str,
     native_task_id: str,
@@ -309,7 +359,10 @@ def validate_pack_probe_result(
     return result
 
 
-ApprovalHandler = Callable[[PreparedRunReference, ApprovalRequestSpecification, str], Awaitable[object]]
+ApprovalHandler = Callable[
+    [PreparedRunReference, ApprovalRequestSpecification, str],
+    Awaitable[BaseModel | None],
+]
 
 
 @runtime_checkable
@@ -324,7 +377,7 @@ class PackRuntimeAdapter(Protocol):
     @property
     def binding(self) -> PackRuntimeBinding: ...
 
-    def model_safe_projection(self, authority: object) -> ModelSafeRuntimeProjection: ...
+    def model_safe_projection(self, authority: BaseModel) -> ModelSafeRuntimeProjection: ...
 
     def prepare_run(self, request: PackRunRequest) -> PreparedRunReference: ...
 
@@ -356,8 +409,8 @@ class PackRuntimeRegistry:
         self,
         contracts: Iterable[PackRuntimeContract],
         *,
-        installations: Iterable[object] = (),
-        trusted_adapter_refs: dict[object, str] | None = None,
+        installations: Iterable[RuntimeInstallation] = (),
+        trusted_adapter_refs: Mapping[tuple[str, str] | str, str] | None = None,
         now: datetime | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -371,7 +424,7 @@ class PackRuntimeRegistry:
                 raise ValueError(f"A runtime contract is already registered for {contract.pack_id}@{contract.pack_version}")
             self._contracts[key] = contract
         self._adapters: dict[tuple[str, str], PackRuntimeAdapter] = {}
-        self._installations: dict[tuple[str, str, str], object] = {}
+        self._installations: dict[tuple[str, str, str], RuntimeInstallation] = {}
         self._trusted_adapter_refs = dict(trusted_adapter_refs or {})
         self._now = now
         self._clock = clock or (lambda: datetime.now(timezone.utc)) if now is None else clock
@@ -426,38 +479,36 @@ class PackRuntimeRegistry:
         if binding.adapter_id != contract.adapter_id:
             raise LookupError("Runtime binding adapter identity does not match the Pack runtime contract")
 
-    def bind_installation(self, installation: object, *, now: datetime | None = None) -> None:
+    def bind_installation(self, installation: RuntimeInstallation, *, now: datetime | None = None) -> None:
         """Pin a runtime contract to one accepted tenant installation."""
 
-        from .domain_pack_installations import DomainPackInstallation
-
-        if not isinstance(installation, DomainPackInstallation):
+        if not isinstance(installation, RuntimeInstallation):
             raise TypeError("Runtime registry accepts Domain Pack installations only")
         status = getattr(getattr(installation, "status", None), "value", getattr(installation, "status", None))
         if status != "accepted":
             raise ValueError("Only accepted Domain Pack installations may bind a runtime")
-        tenant_id = getattr(installation, "tenant_id", None)
-        pack_id = getattr(installation, "pack_id", None)
-        pack_version = getattr(installation, "pack_version", None)
+        tenant_id = installation.tenant_id
+        pack_id = installation.pack_id
+        pack_version = installation.pack_version
         if not all(isinstance(value, str) and value for value in (tenant_id, pack_id, pack_version)):
             raise ValueError("Domain Pack installation must carry tenant, Pack, and version identity")
         effective_now = self._effective_now(now)
-        accepted_at = getattr(installation, "accepted_at", None)
-        expires_at = getattr(installation, "expires_at", None)
+        accepted_at = installation.accepted_at
+        expires_at = installation.expires_at
         if effective_now is not None and (not accepted_at <= effective_now < expires_at):
             raise ValueError("Accepted Domain Pack installation is stale")
         key = (pack_id, pack_version)
         contract = self._contracts.get(key)
         if contract is None:
             raise ValueError("Domain Pack installation has no matching runtime contract")
-        if getattr(installation, "contract_digest", None) != contract.manifest_digest:
+        if installation.contract_digest != contract.manifest_digest:
             raise ValueError("Domain Pack installation digest does not match its runtime contract")
         expected_adapter_ref = self._trusted_adapter_refs.get((pack_id, pack_version))
         if expected_adapter_ref is None:
             expected_adapter_ref = self._trusted_adapter_refs.get(pack_id)
-        if expected_adapter_ref is None or getattr(installation, "adapter_ref", None) != expected_adapter_ref:
+        if expected_adapter_ref is None or installation.adapter_ref != expected_adapter_ref:
             raise ValueError("Domain Pack installation adapter reference is not trusted")
-        enabled = tuple(getattr(installation, "enabled_capability_ids", ()))
+        enabled = tuple(installation.enabled_capability_ids)
         if not enabled or len(enabled) != len(set(enabled)) or not set(enabled) <= set(contract.capability_ids):
             raise ValueError("Domain Pack installation capabilities do not resolve to its runtime contract")
         installation_key = (tenant_id, pack_id, pack_version)
@@ -468,7 +519,7 @@ class PackRuntimeRegistry:
     def register_for_installation(
         self,
         adapter: PackRuntimeAdapter,
-        installation: object,
+        installation: RuntimeInstallation,
         *,
         now: datetime | None = None,
     ) -> None:
@@ -496,7 +547,7 @@ class PackRuntimeRegistry:
             installation.accepted_at <= effective_now < installation.expires_at
         ):
             raise LookupError("Domain Pack installation is stale")
-        expected_capabilities = tuple(sorted(getattr(installation, "enabled_capability_ids")))
+        expected_capabilities = tuple(sorted(installation.enabled_capability_ids))
         if capability_ids is not None and not set(capability_ids) <= set(expected_capabilities):
             raise LookupError("Requested capabilities are not enabled by the active Domain Pack installation")
         adapter = self._require_registered(pack_id=pack_id, pack_version=pack_version)
@@ -545,7 +596,7 @@ class PackRuntimeRegistry:
         self,
         adapter: PackRuntimeAdapter,
         *,
-        installation: object | None = None,
+        installation: RuntimeInstallation | None = None,
         now: datetime | None = None,
     ) -> None:
         binding = adapter.binding
@@ -565,8 +616,8 @@ class PackRuntimeRegistry:
             raise ValueError("Tenant-scoped runtime registration requires an explicit installation")
         if installation is not None:
             if (
-                getattr(installation, "pack_id", None) != binding.pack_id
-                or getattr(installation, "pack_version", None) != binding.pack_version
+                installation.pack_id != binding.pack_id
+                or installation.pack_version != binding.pack_version
             ):
                 raise ValueError("Runtime adapter identity does not match the Domain Pack installation")
             self.bind_installation(installation, now=now)
