@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Iterable
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
+
+if TYPE_CHECKING:
+    from .domain_pack_installations import ActiveDomainPackSet
 
 
 class PackRuntimeBinding(BaseModel):
@@ -19,6 +22,14 @@ class PackRuntimeBinding(BaseModel):
     pack_version: str = Field(min_length=1)
     capability_ids: tuple[str, ...] = Field(min_length=1)
     adapter_id: str = Field(min_length=1)
+
+    def model_post_init(self, __context: Any) -> None:
+        if len(self.capability_ids) != len(set(self.capability_ids)):
+            raise ValueError("Pack runtime binding capability ids must be unique")
+
+    @property
+    def identity(self) -> tuple[str, str, tuple[str, ...], str]:
+        return (self.pack_id, self.pack_version, tuple(sorted(self.capability_ids)), self.adapter_id)
 
 
 class PackRuntimeContract(BaseModel):
@@ -32,6 +43,14 @@ class PackRuntimeContract(BaseModel):
     capability_ids: tuple[str, ...] = Field(min_length=1)
     adapter_id: str = Field(min_length=1)
     manifest_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    def model_post_init(self, __context: Any) -> None:
+        if len(self.capability_ids) != len(set(self.capability_ids)):
+            raise ValueError("Pack runtime contract capability ids must be unique")
+
+    @property
+    def identity(self) -> tuple[str, str, tuple[str, ...], str]:
+        return (self.pack_id, self.pack_version, tuple(sorted(self.capability_ids)), self.adapter_id)
 
 
 class ModelSafeRuntimeProjection(BaseModel):
@@ -333,16 +352,202 @@ class PackRuntimeAdapter(Protocol):
 class PackRuntimeRegistry:
     """Boot-time exact adapter/runtime-contract registry."""
 
-    def __init__(self, contracts: Iterable[PackRuntimeContract]) -> None:
+    def __init__(
+        self,
+        contracts: Iterable[PackRuntimeContract],
+        *,
+        installations: Iterable[object] = (),
+        trusted_adapter_refs: dict[object, str] | None = None,
+        now: datetime | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        installation_items = tuple(installations)
         self._contracts: dict[tuple[str, str], PackRuntimeContract] = {}
-        for item in contracts:
-            key = (item.pack_id, item.pack_version)
+        for contract in contracts:
+            if not isinstance(contract, PackRuntimeContract):
+                raise TypeError("Pack runtime registry accepts runtime contracts only")
+            key = (contract.pack_id, contract.pack_version)
             if key in self._contracts:
-                raise ValueError("A runtime contract is already registered for this Pack version")
-            self._contracts[key] = item
+                raise ValueError(f"Duplicate Pack runtime contract: {contract.pack_id}@{contract.pack_version}")
+            self._contracts[key] = contract
         self._adapters: dict[tuple[str, str], PackRuntimeAdapter] = {}
+        self._installations: dict[tuple[str, str, str], object] = {}
+        self._trusted_adapter_refs = dict(trusted_adapter_refs or {})
+        self._now = now
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        if installation_items and trusted_adapter_refs is None:
+            raise ValueError("Tenant-scoped runtime registry requires trusted adapter references")
+        for installation in installation_items:
+            self.bind_installation(installation)
 
-    def register(self, adapter: PackRuntimeAdapter) -> None:
+    @classmethod
+    def from_active_domain_pack_set(
+        cls,
+        active: "ActiveDomainPackSet",
+        contracts: Iterable[PackRuntimeContract],
+        *,
+        now: datetime | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> "PackRuntimeRegistry":
+        """Create a tenant-scoped runtime registry from an active installation set."""
+
+        if not active.installations:
+            raise LookupError("Cannot create a runtime registry without an accepted Domain Pack installation")
+        return cls(
+            contracts,
+            installations=active.installations,
+            trusted_adapter_refs={
+                (pack_id, pack_version): adapter_ref
+                for pack_id, pack_version, adapter_ref in active.trusted_adapter_refs
+            },
+            now=now,
+            clock=clock,
+        )
+
+    @property
+    def tenant_scoped(self) -> bool:
+        return bool(self._installations)
+
+    def _effective_now(self, now: datetime | None) -> datetime | None:
+        if now is not None:
+            return now
+        if self._now is not None:
+            return self._now
+        return self._clock()
+
+    def validate_binding(self, binding: PackRuntimeBinding) -> None:
+        """Validate immutable binding identity without resolving a tenant adapter."""
+
+        contract = self._contracts.get((binding.pack_id, binding.pack_version))
+        if contract is None:
+            raise LookupError("No runtime contract matches the Pack binding")
+        if tuple(sorted(binding.capability_ids)) != tuple(sorted(contract.capability_ids)):
+            raise LookupError("Runtime binding capabilities do not match the Pack runtime contract")
+        if binding.adapter_id != contract.adapter_id:
+            raise LookupError("Runtime binding adapter identity does not match the Pack runtime contract")
+
+    def bind_installation(self, installation: object, *, now: datetime | None = None) -> None:
+        """Pin a runtime contract to one accepted tenant installation."""
+
+        from .domain_pack_installations import DomainPackInstallation
+
+        if not isinstance(installation, DomainPackInstallation):
+            raise TypeError("Runtime registry accepts Domain Pack installations only")
+        status = getattr(getattr(installation, "status", None), "value", getattr(installation, "status", None))
+        if status != "accepted":
+            raise ValueError("Only accepted Domain Pack installations may bind a runtime")
+        tenant_id = getattr(installation, "tenant_id", None)
+        pack_id = getattr(installation, "pack_id", None)
+        pack_version = getattr(installation, "pack_version", None)
+        if not all(isinstance(value, str) and value for value in (tenant_id, pack_id, pack_version)):
+            raise ValueError("Domain Pack installation must carry tenant, Pack, and version identity")
+        effective_now = self._effective_now(now)
+        accepted_at = getattr(installation, "accepted_at", None)
+        expires_at = getattr(installation, "expires_at", None)
+        if effective_now is not None and (not accepted_at <= effective_now < expires_at):
+            raise ValueError("Accepted Domain Pack installation is stale")
+        key = (pack_id, pack_version)
+        contract = self._contracts.get(key)
+        if contract is None:
+            raise ValueError("Domain Pack installation has no matching runtime contract")
+        if getattr(installation, "contract_digest", None) != contract.manifest_digest:
+            raise ValueError("Domain Pack installation digest does not match its runtime contract")
+        expected_adapter_ref = self._trusted_adapter_refs.get((pack_id, pack_version))
+        if expected_adapter_ref is None:
+            expected_adapter_ref = self._trusted_adapter_refs.get(pack_id)
+        if expected_adapter_ref is None or getattr(installation, "adapter_ref", None) != expected_adapter_ref:
+            raise ValueError("Domain Pack installation adapter reference is not trusted")
+        enabled = tuple(getattr(installation, "enabled_capability_ids", ()))
+        if not enabled or len(enabled) != len(set(enabled)) or not set(enabled) <= set(contract.capability_ids):
+            raise ValueError("Domain Pack installation capabilities do not resolve to its runtime contract")
+        installation_key = (tenant_id, pack_id, pack_version)
+        if installation_key in self._installations and self._installations[installation_key] != installation:
+            raise ValueError("A tenant already has a different installation for this Pack version")
+        self._installations[installation_key] = installation
+
+    def register_for_installation(
+        self,
+        adapter: PackRuntimeAdapter,
+        installation: object,
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        """Bind and register an adapter as one explicit tenant installation."""
+
+        self.register(adapter, installation=installation, now=now)
+
+    def require_for_tenant(
+        self,
+        *,
+        tenant_id: str,
+        pack_id: str,
+        pack_version: str,
+        capability_ids: Iterable[str] | None = None,
+        adapter_id: str | None = None,
+        now: datetime | None = None,
+    ) -> PackRuntimeAdapter:
+        """Resolve an adapter only when the exact tenant installation is active."""
+
+        installation = self._installations.get((tenant_id, pack_id, pack_version))
+        if installation is None:
+            raise LookupError(f"No active Domain Pack installation matches {tenant_id}:{pack_id}@{pack_version}")
+        effective_now = self._effective_now(now)
+        if effective_now is not None and not (
+            installation.accepted_at <= effective_now < installation.expires_at
+        ):
+            raise LookupError("Domain Pack installation is stale")
+        expected_capabilities = tuple(sorted(getattr(installation, "enabled_capability_ids")))
+        if capability_ids is not None and not set(capability_ids) <= set(expected_capabilities):
+            raise LookupError("Requested capabilities are not enabled by the active Domain Pack installation")
+        adapter = self._require_registered(pack_id=pack_id, pack_version=pack_version)
+        if adapter_id is not None and adapter.binding.adapter_id != adapter_id:
+            raise LookupError("Requested adapter identity does not match the active Domain Pack installation")
+        return adapter
+
+    def require_binding(self, binding: PackRuntimeBinding) -> PackRuntimeAdapter:
+        """Resolve an adapter only when every immutable binding field matches."""
+
+        if self.tenant_scoped:
+            raise LookupError("Tenant-scoped runtime lookup requires an explicit tenant installation")
+        adapter = self._require_registered(pack_id=binding.pack_id, pack_version=binding.pack_version)
+        if adapter.binding != binding:
+            raise LookupError("No conformant runtime adapter matches the exact Pack binding")
+        return adapter
+
+    def resolve_for_execution(
+        self,
+        *,
+        tenant_id: str,
+        binding: PackRuntimeBinding,
+        now: datetime | None = None,
+        capability_ids: Iterable[str] | None = None,
+    ) -> PackRuntimeAdapter:
+        """Resolve an adapter for execution through an exact tenant binding only."""
+
+        if not self._installations:
+            raise LookupError("No active Domain Pack installation is available for execution")
+        installation = self._installations.get((tenant_id, binding.pack_id, binding.pack_version))
+        if installation is None:
+            raise LookupError("No active Domain Pack installation matches the exact runtime binding")
+        effective_now = self._effective_now(now)
+        if effective_now is not None and not installation.accepted_at <= effective_now < installation.expires_at:
+            raise LookupError("Domain Pack installation is stale")
+        requested = tuple(sorted(capability_ids if capability_ids is not None else binding.capability_ids))
+        enabled = tuple(sorted(installation.enabled_capability_ids))
+        if not set(requested) <= set(enabled) or not set(requested) <= set(binding.capability_ids):
+            raise LookupError("Requested capabilities are not enabled by the exact tenant runtime binding")
+        adapter = self._require_registered(pack_id=binding.pack_id, pack_version=binding.pack_version)
+        if adapter.binding != binding:
+            raise LookupError("No conformant runtime adapter matches the exact Pack binding")
+        return adapter
+
+    def register(
+        self,
+        adapter: PackRuntimeAdapter,
+        *,
+        installation: object | None = None,
+        now: datetime | None = None,
+    ) -> None:
         binding = adapter.binding
         key = (binding.pack_id, binding.pack_version)
         contract = self._contracts.get(key)
@@ -356,16 +561,45 @@ class PackRuntimeRegistry:
             raise ValueError("Runtime adapter identity does not match the Pack runtime contract")
         if key in self._adapters:
             raise ValueError("A runtime adapter is already registered for this Pack version")
+        if self._installations and installation is None:
+            raise ValueError("Tenant-scoped runtime registration requires an explicit installation")
+        if installation is not None:
+            if (
+                getattr(installation, "pack_id", None) != binding.pack_id
+                or getattr(installation, "pack_version", None) != binding.pack_version
+            ):
+                raise ValueError("Runtime adapter identity does not match the Domain Pack installation")
+            self.bind_installation(installation, now=now)
         self._adapters[key] = adapter
 
     def require(self, *, pack_id: str, pack_version: str) -> PackRuntimeAdapter:
+        if self.tenant_scoped:
+            raise LookupError("Tenant-scoped runtime lookup is required for an installed Pack")
+        return self._require_registered(pack_id=pack_id, pack_version=pack_version)
+
+    def _require_registered(self, *, pack_id: str, pack_version: str) -> PackRuntimeAdapter:
         try:
             return self._adapters[(pack_id, pack_version)]
         except KeyError as exc:
             raise LookupError("No conformant runtime adapter is registered for this Pack version") from exc
 
+    def public_metadata_for_tenant(
+        self,
+        *,
+        tenant_id: str,
+        pack_id: str,
+        pack_version: str,
+    ) -> PublicPackRuntimeMetadata:
+        self.require_for_tenant(tenant_id=tenant_id, pack_id=pack_id, pack_version=pack_version)
+        return self._public_metadata(pack_id=pack_id, pack_version=pack_version)
+
     def public_metadata(self, *, pack_id: str, pack_version: str) -> PublicPackRuntimeMetadata:
-        self.require(pack_id=pack_id, pack_version=pack_version)
+        self._require_registered(pack_id=pack_id, pack_version=pack_version)
+        if self._installations:
+            raise LookupError("Tenant-scoped runtime metadata lookup is required for an installed Pack")
+        return self._public_metadata(pack_id=pack_id, pack_version=pack_version)
+
+    def _public_metadata(self, *, pack_id: str, pack_version: str) -> PublicPackRuntimeMetadata:
         try:
             contract = self._contracts[(pack_id, pack_version)]
         except KeyError as exc:

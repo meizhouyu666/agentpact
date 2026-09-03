@@ -17,6 +17,7 @@ from enterprise.governance.models import GovernanceAuditEventModel
 from .persistence import AgentRunNativeStore
 
 PLAN_APPLICATION_MARKER = "agentpact:agent-run:plan:v1"
+LEGACY_PLAN_APPLICATION_MARKERS = frozenset({"agentpact:m8:plan:v1"})
 PLAN_JOURNAL_SCHEMA = "agentpact.plan-journal/v1"
 PLAN_CHECKPOINT_SCHEMA = "agentpact.plan-checkpoint/v1"
 PLAN_EVENT_TYPE_PREFIX = "agent-run.plan."
@@ -24,6 +25,12 @@ PLAN_EVENT_TYPE_PREFIX = "agent-run.plan."
 
 class GovernedPlanError(RuntimeError):
     """Fail-closed Agent Run coordination or journal error."""
+
+
+def is_plan_application_marker(value: str | None) -> bool:
+    """Accept current and previously persisted Agent Run root markers."""
+
+    return value == PLAN_APPLICATION_MARKER or value in LEGACY_PLAN_APPLICATION_MARKERS
 
 
 class PlanRunState(StrEnum):
@@ -142,7 +149,11 @@ def replay_plan_journal(events: list[PlanJournalEvent]) -> GovernedPlanCheckpoin
             event.plan_run_id,
             f"event-v{event.plan_version}-{event.sequence}-{event.transition.value}",
         )
-        if event.event_id != expected_event_id:
+        legacy_event_id = _legacy_stable_id(
+            event.plan_run_id,
+            f"event-v{event.plan_version}-{event.sequence}-{event.transition.value}",
+        )
+        if event.event_id not in {expected_event_id, legacy_event_id}:
             raise GovernedPlanError("Agent Run journal event identity is not deterministic")
         checkpoint = event.checkpoint
         identity = (event.plan_run_id, checkpoint.admission_id, event.root_task_id)
@@ -210,7 +221,7 @@ async def append_agent_run_transition(
         organization_id=organization_id,
         lock=True,
     )
-    if root is None or root.application != PLAN_APPLICATION_MARKER:
+    if root is None or not is_plan_application_marker(root.application):
         raise GovernedPlanError("Agent Run transition root Task is missing or untrusted")
     events = await _load_events(session, checkpoint.root_task_id)
     restored = replay_plan_journal(events)
@@ -398,3 +409,12 @@ def _digest(value: Any) -> str:
 
 def _stable_id(seed: str, kind: str) -> str:
     return "agent_run_" + hashlib.sha256(f"agentpact-agent-run|{seed}|{kind}".encode("utf-8")).hexdigest()
+
+
+def _legacy_stable_id(seed: str, kind: str) -> str:
+    return "m8_" + hashlib.sha256(f"agentpact-m8|{seed}|{kind}".encode("utf-8")).hexdigest()
+
+
+# Compatibility names used by the existing M8 implementation while ownership moves here.
+_replay = replay_plan_journal
+append_m10_transition = append_agent_run_transition

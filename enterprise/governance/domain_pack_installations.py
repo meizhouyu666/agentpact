@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from collections.abc import Callable
 from typing import Iterable
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -45,12 +46,46 @@ class DomainPackInstallation(BaseModel):
             raise ValueError("Domain Pack installation expiry must follow acceptance")
         return self
 
+    @property
+    def identity(self) -> tuple[str, str]:
+        """Return the immutable Pack identity pinned by this installation."""
+
+        return self.pack_id, self.pack_version
+
 
 @dataclass(frozen=True)
 class ActiveDomainPackSet:
     tenant_id: str
     installations: tuple[DomainPackInstallation, ...]
     registry: DomainPackRegistry
+    trusted_adapter_refs: tuple[tuple[str, str, str], ...] = ()
+    validated_at: datetime | None = None
+
+    def require_installation(self, *, pack_id: str, pack_version: str) -> DomainPackInstallation:
+        """Resolve only the accepted tenant installation for an exact identity."""
+
+        for installation in self.installations:
+            if installation.identity == (pack_id, pack_version):
+                return installation
+        raise LookupError(f"No active Domain Pack installation matches {pack_id}@{pack_version}")
+
+    def runtime_registry(
+        self,
+        contracts: Iterable[object],
+        *,
+        now: datetime | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ):
+        """Build the strict runtime-adapter registry for this tenant set."""
+
+        from .pack_runtime import PackRuntimeRegistry
+
+        return PackRuntimeRegistry.from_active_domain_pack_set(
+            self,
+            contracts,
+            now=self.validated_at if now is None else now,
+            clock=clock,
+        )
 
 
 def build_active_domain_pack_set(
@@ -65,7 +100,7 @@ def build_active_domain_pack_set(
 ) -> ActiveDomainPackSet:
     """Build one tenant registry exclusively from accepted, current installations."""
 
-    runtime_by_id = _unique_by_pack_id(runtime_manifests, "runtime manifest")
+    runtime_by_identity = _unique_by_identity(runtime_manifests, "runtime manifest")
     reports_by_id = _unique_reports(conformance_reports)
     accepted: list[DomainPackInstallation] = []
     active_manifests: list[DomainPackManifest] = []
@@ -81,12 +116,12 @@ def build_active_domain_pack_set(
         if not installation.accepted_at <= now < installation.expires_at:
             raise ValueError("Accepted Domain Pack installation is stale")
 
-        runtime_manifest = _require_pack(runtime_by_id, installation.pack_id, "runtime manifest")
-        report = _require_pack(reports_by_id, installation.pack_id, "static conformance report")
+        runtime_manifest = _require_pack(runtime_by_identity, installation.identity, "runtime manifest")
+        report = _require_pack(reports_by_id, installation.identity, "static conformance report")
         if report.status is not ConformanceStatus.PASS:
             raise ValueError("Accepted Domain Pack contract failed static conformance")
-        if runtime_manifest.version != installation.pack_version or report.candidate_pack_version != installation.pack_version:
-            raise ValueError("Domain Pack installation version does not match its contracts")
+        if report.candidate_pack_id != installation.pack_id or report.candidate_pack_version != installation.pack_version:
+            raise ValueError("Domain Pack installation identity does not match its conformance report")
         if report.manifest_digest != installation.contract_digest:
             raise ValueError("Domain Pack installation digest does not match its accepted contract")
         if expected_policy_versions.get(installation.pack_id) != installation.policy_version:
@@ -124,34 +159,54 @@ def build_active_domain_pack_set(
 
     return ActiveDomainPackSet(
         tenant_id=tenant_id,
-        installations=tuple(sorted(accepted, key=lambda item: item.pack_id)),
+        installations=tuple(sorted(accepted, key=lambda item: item.identity)),
         registry=DomainPackRegistry(active_manifests),
+        trusted_adapter_refs=tuple(
+            sorted(
+                (installation.identity[0], installation.identity[1], installation.adapter_ref)
+                for installation in accepted
+            )
+        ),
+        validated_at=now,
     )
 
 
-def _unique_by_pack_id(items: Iterable[object], label: str) -> dict[str, object]:
-    indexed: dict[str, object] = {}
+def _unique_by_identity(items: Iterable[DomainPackManifest], label: str) -> dict[tuple[str, str], DomainPackManifest]:
+    indexed: dict[tuple[str, str], DomainPackManifest] = {}
     for item in items:
+        if not isinstance(item, DomainPackManifest):
+            raise TypeError("Active Domain Pack registry accepts runtime manifests only")
         pack_id = getattr(item, "pack_id")
-        if pack_id in indexed:
-            raise ValueError(f"Duplicate {label}: {pack_id}")
-        indexed[pack_id] = item
+        pack_version = getattr(item, "version", None)
+        if pack_version is None:
+            pack_version = getattr(item, "pack_version")
+        identity = (pack_id, pack_version)
+        if identity in indexed:
+            raise ValueError(f"Duplicate {label}: {pack_id}@{pack_version}")
+        indexed[identity] = item
     return indexed
 
 
-def _unique_reports(items: Iterable[StaticConformanceReport]) -> dict[str, StaticConformanceReport]:
-    indexed: dict[str, StaticConformanceReport] = {}
+def _unique_reports(items: Iterable[StaticConformanceReport]) -> dict[tuple[str, str], StaticConformanceReport]:
+    indexed: dict[tuple[str, str], StaticConformanceReport] = {}
     for report in items:
         if not report.candidate_pack_id:
             raise ValueError("Static conformance report has no Pack id")
-        if report.candidate_pack_id in indexed:
-            raise ValueError(f"Duplicate static conformance report: {report.candidate_pack_id}")
-        indexed[report.candidate_pack_id] = report
+        if not report.candidate_pack_version:
+            raise ValueError("Static conformance report has no Pack version")
+        identity = (report.candidate_pack_id, report.candidate_pack_version)
+        if identity in indexed:
+            raise ValueError(f"Duplicate static conformance report: {report.candidate_pack_id}@{report.candidate_pack_version}")
+        indexed[identity] = report
     return indexed
 
 
-def _require_pack(items: dict[str, object], pack_id: str, label: str):
+def _require_pack(items: dict[tuple[str, str], object], identity: tuple[str, str], label: str):
     try:
-        return items[pack_id]
+        return items[identity]
     except KeyError as exc:
-        raise ValueError(f"Accepted installation has no matching {label}: {pack_id}") from exc
+        if any(candidate_id == identity[0] for candidate_id, _ in items):
+            raise ValueError(
+                f"Domain Pack installation version does not match its {label}: {identity[0]}@{identity[1]}"
+            ) from exc
+        raise ValueError(f"Accepted installation has no matching {label}: {identity[0]}@{identity[1]}") from exc

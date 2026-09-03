@@ -18,13 +18,13 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from enterprise.agent_runs.journal import (
-    PLAN_APPLICATION_MARKER,
     GovernedPlanCheckpoint,
     GovernedPlanError,
     PlanJournalEvent,
     PlanJournalTransition,
     PlanRunState,
     PlanStepState,
+    is_plan_application_marker,
 )
 from enterprise.approval.models import ApprovalRequestModel, ApprovalStatus
 from enterprise.approval.persistence import decide_approval_request
@@ -233,7 +233,7 @@ class AgentRunService:
         session_factory: Callable[[], AbstractAsyncContextManager[Any]],
         *,
         runtime_registry: PackRuntimeRegistry,
-        default_pack_binding: PackRuntimeBinding,
+        default_pack_binding: PackRuntimeBinding | None = None,
         target_url: str,
         provider_timeout_seconds: float = 30.0,
         create_gate_factory: CreateGateFactory | None = None,
@@ -249,12 +249,15 @@ class AgentRunService:
         self._journal = AgentRunJournal(native_store)
         self._registry = runtime_registry
         self._target_url = target_url
-        adapter = runtime_registry.require(
-            pack_id=default_pack_binding.pack_id,
-            pack_version=default_pack_binding.pack_version,
-        )
-        if adapter.binding != default_pack_binding:
-            raise ValueError("Default Pack binding does not match the registered adapter")
+        if default_pack_binding is not None:
+            try:
+                runtime_registry.validate_binding(default_pack_binding)
+                if not runtime_registry.tenant_scoped:
+                    adapter = runtime_registry.require_binding(default_pack_binding)
+                    if adapter.binding != default_pack_binding:
+                        raise ValueError("Default Pack binding does not match the registered adapter")
+            except LookupError as exc:
+                raise ValueError("Default Pack binding does not match the runtime registry") from exc
         self._default_pack_binding = default_pack_binding
         self._provider_timeout_seconds = provider_timeout_seconds
         self._create_gate_factory = create_gate_factory or (
@@ -266,9 +269,34 @@ class AgentRunService:
         )
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
-    def _adapter(self, binding: PackRuntimeBinding) -> PackRuntimeAdapter:
+    def _adapter(
+        self,
+        binding: PackRuntimeBinding,
+        *,
+        tenant_id: str | None = None,
+        capability_ids: tuple[str, ...] | None = None,
+    ) -> PackRuntimeAdapter:
         try:
-            adapter = self._registry.require(pack_id=binding.pack_id, pack_version=binding.pack_version)
+            if self._registry.tenant_scoped:
+                if tenant_id is None:
+                    raise AgentRunError("TENANT_REQUIRED", status_code=503)
+                if capability_ids is None:
+                    adapter = self._registry.require_for_tenant(
+                        tenant_id=tenant_id,
+                        pack_id=binding.pack_id,
+                        pack_version=binding.pack_version,
+                        adapter_id=binding.adapter_id,
+                        now=self._clock(),
+                    )
+                else:
+                    adapter = self._registry.resolve_for_execution(
+                        tenant_id=tenant_id,
+                        binding=binding,
+                        capability_ids=capability_ids,
+                        now=self._clock(),
+                    )
+            else:
+                adapter = self._registry.require_binding(binding)
         except LookupError as exc:
             raise AgentRunError("PACK_RUNTIME_UNAVAILABLE", status_code=503) from exc
         if adapter.binding != binding:
@@ -279,14 +307,26 @@ class AgentRunService:
         _require_operator(user)
         intent_digest = _digest(["agent-run-intent", request.intent])
         try:
-            selected = (
-                self._registry.require(pack_id=request.pack_id, pack_version=request.pack_version).binding
-                if request.pack_id is not None and request.pack_version is not None
-                else self._default_pack_binding
-            )
+            if request.pack_id is not None and request.pack_version is not None:
+                if self._registry.tenant_scoped:
+                    selected = self._registry.require_for_tenant(
+                        tenant_id=user.org_id,
+                        pack_id=request.pack_id,
+                        pack_version=request.pack_version,
+                        now=self._clock(),
+                    ).binding
+                else:
+                    selected = self._registry.require(
+                        pack_id=request.pack_id,
+                        pack_version=request.pack_version,
+                    ).binding
+            elif self._default_pack_binding is not None:
+                selected = self._default_pack_binding
+            else:
+                raise LookupError("No Pack was selected for this Agent Run")
         except LookupError as exc:
             raise AgentRunError("PACK_RUNTIME_UNAVAILABLE", status_code=422) from exc
-        adapter = self._adapter(selected)
+        adapter = self._adapter(selected, tenant_id=user.org_id)
         existing_run_id = derive_pack_run_id(tenant_id=user.org_id, request_id=request.request_id)
         async with self._create_gate_factory(user.org_id, request.request_id) as session:
             async with session.begin():
@@ -689,7 +729,7 @@ class AgentRunService:
                     organization_id=prepared.tenant_id,
                     lock=True,
                 )
-                if root is None or root.application != PLAN_APPLICATION_MARKER:
+                if root is None or not is_plan_application_marker(root.application):
                     raise AgentRunError("STATE_CONFLICT")
                 admission = (
                     await session.scalars(
@@ -802,7 +842,7 @@ class AgentRunService:
         )
         if root is None:
             raise AgentRunError("RUN_NOT_FOUND", status_code=404)
-        if root.application != PLAN_APPLICATION_MARKER:
+        if not is_plan_application_marker(root.application):
             raise AgentRunError("STATE_CONFLICT")
         admission = (
             await session.scalars(
@@ -1043,7 +1083,14 @@ class AgentRunService:
 
     def _projection(self, *, bundle: TaskAdmissionBundle, **values: Any) -> AgentRunProjection:
         binding = self._binding_for_bundle(bundle)
-        metadata = self._registry.public_metadata(pack_id=binding.pack_id, pack_version=binding.pack_version)
+        if self._registry.tenant_scoped:
+            metadata = self._registry.public_metadata_for_tenant(
+                tenant_id=bundle.request.tenant_id,
+                pack_id=binding.pack_id,
+                pack_version=binding.pack_version,
+            )
+        else:
+            metadata = self._registry.public_metadata(pack_id=binding.pack_id, pack_version=binding.pack_version)
         return AgentRunProjection(
             pack_id=metadata.pack_id,
             pack_version=metadata.pack_version,
@@ -1079,7 +1126,11 @@ class AgentRunService:
 
     def _restore_prepared(self, bundle: TaskAdmissionBundle) -> tuple[PackRuntimeAdapter, PreparedRunReference]:
         binding = self._binding_for_bundle(bundle)
-        adapter = self._adapter(binding)
+        adapter = self._adapter(
+            binding,
+            tenant_id=bundle.request.tenant_id,
+            capability_ids=(bundle.request.capability_ref,),
+        )
         try:
             prepared = adapter.restore_run(
                 PackRunRestoreRequest(
