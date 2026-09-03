@@ -1574,7 +1574,7 @@ class SyntheticPaymentRuntimeAdapter:
             status=PackAdvanceStatus.FAILED,
             run_id=checkpoint.root_task_id,
             step_id=checkpoint.active_step.native_step_id if checkpoint.active_step else None,
-            reason_code="PACK_ADVANCE_FAILED",
+            reason_code=f"PACK_ADVANCE_FAILED_{checkpoint.state.value.upper()}",
         )
 
     async def _execution_checkpoint(self, active_step: GovernedPlanStepRef) -> ExecutionCheckpoint:

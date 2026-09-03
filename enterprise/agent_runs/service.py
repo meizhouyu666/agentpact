@@ -7,6 +7,7 @@ import base64
 import binascii
 import hashlib
 import json
+import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import datetime, timezone
@@ -64,6 +65,8 @@ from .persistence import (
     AgentRunTaskSnapshot,
     AgentRunTaskStatus,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class AgentRunError(RuntimeError):
@@ -567,6 +570,16 @@ class AgentRunService:
             except PackLifecycleError as exc:
                 raise AgentRunError(exc.code, status_code=503) from exc
             except (ValueError, GovernedPlanError) as exc:
+                logger.exception(
+                    "Agent Run Pack advance failed",
+                    extra={
+                        "run_id": prepared.run_id,
+                        "pack_id": prepared.pack_id,
+                        "pack_version": prepared.pack_version,
+                        "adapter_id": prepared.adapter_id,
+                        "operation_key": command.operation_key,
+                    },
+                )
                 raise AgentRunError("PACK_ADVANCE_FAILED", status_code=503) from exc
         return await self.get(run_id, user=user)
 
