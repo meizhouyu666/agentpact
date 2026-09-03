@@ -141,6 +141,14 @@ class _Runtime:
         return BrowserActionResult(completed=True, effect_may_have_started=True, detail_code="ACTION_COMPLETED")
 
 
+class _FreshRuntime:
+    async def observe(self):
+        raise AssertionError("the explicit fresh-observation path should be used")
+
+    async def fresh_observation(self):
+        return "fresh-snapshot"
+
+
 def _decision() -> PolicyDecision:
     return PolicyDecision(
         decision_id="decision_1",
@@ -194,6 +202,19 @@ async def test_preflight_failure_consumes_no_permit_and_creates_no_attempt() -> 
     assert store.permits[0].status == "issued"
     assert store.attempts == []
     assert runtime.browser_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_executor_forwards_explicit_fresh_observation() -> None:
+    runtime = _FreshRuntime()
+    executor = PersistedBrowserExecutor(
+        _SessionFactory(),
+        runtime,  # type: ignore[arg-type]
+        result_probe_ref="probe://orders/v1",
+        clock=lambda: NOW,
+    )
+
+    assert await executor.fresh_observation() == "fresh-snapshot"
 
 
 @pytest.mark.asyncio

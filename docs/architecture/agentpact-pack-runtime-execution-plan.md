@@ -43,7 +43,9 @@ slice is still a `synthetic.payment` application:
   types.
 - Synthetic M10 test fixtures combine business facts, planning, approval,
   browser mechanics, Permit issuance, Attempt persistence, and result probing.
-- The state-changing submit action still depends on Skyvern `ActionHandler`.
+- The M10 state-changing submit action now uses the AgentPact browser loop;
+  legacy `ActionHandler` remains only in separately inventoried M4/M7/M8 and
+  Stripe product-boundary E2E evidence.
 
 The Stripe adapter is a separate explicit composition: it owns the hosted
 browser callback through AgentPact's persisted executor and uses an independent
@@ -343,10 +345,12 @@ Acceptance:
 - recovery can find the exact ambiguous Attempt without relying on task-only
   lookup.
 
-The executor is used by explicit Stripe test-mode hosted Checkout composition;
-the Synthetic submit fixture has not yet migrated from legacy `ActionHandler`.
+The executor is used by explicit Stripe test-mode hosted Checkout composition
+and by the Synthetic submit fixture. The retained legacy ActionHandler callers
+are listed in `tests/fixtures/browser_loop_caller_inventory.json` and are not
+M10 runtime entrypoints.
 
-### Stage 3: Migrate Synthetic Submit
+### Stage 3: Migrate Synthetic Submit (Implemented)
 
 - Generate an AgentPact `BrowserAction` from a fresh AgentPact observation.
 - Reevaluate after approval and issue fresh authority.
@@ -358,6 +362,14 @@ the Synthetic submit fixture has not yet migrated from legacy `ActionHandler`.
 Skyvern's browser manager may temporarily remain only to supply the Playwright
 page. `PlaywrightBrowserSessionFactory` now provides the AgentPact-owned
 session/lifecycle seam, but production callers still need to migrate to it.
+
+Acceptance is complete for the test/reference composition: the submit action is
+derived from a fresh post-approval observation, a new one-time Permit is issued
+and consumed, the Attempt is committed before the browser call, uncertain
+transport enters `UNKNOWN`, and the exact Attempt is resolved only by the
+independent synthetic result probe. Static inventory evidence confirms that no
+`enterprise/` or `tests/fixtures/` caller imports or invokes Skyvern
+`ActionHandler`.
 
 ### Stage 4: Prove Non-Synthetic Reuse (Stripe test-mode composition implemented)
 
