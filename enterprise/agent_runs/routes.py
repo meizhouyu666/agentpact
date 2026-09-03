@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, FastAPI, HTTPException, Query, Response, status
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, Response, status
 
 from enterprise.auth.dependencies import CurrentUser
 
@@ -19,14 +19,7 @@ from .service import (
 )
 
 router = APIRouter(prefix="/enterprise/agent-runs", tags=["enterprise-agent-runs"])
-_service: AgentRunService | None = None
-
-
-def configure_agent_run_service(service: AgentRunService) -> None:
-    """Application-composition hook; configured services never hold run state."""
-
-    global _service
-    _service = service
+_SERVICE_STATE_KEY = "agentpact_agent_run_service"
 
 
 def mount_agent_run_api(
@@ -37,25 +30,21 @@ def mount_agent_run_api(
 ) -> AgentRunService:
     """Mount an already composed generic Agent Run service."""
 
-    configure_agent_run_service(service)
+    if getattr(application.state, _SERVICE_STATE_KEY, None) is not None:
+        raise ValueError("Agent Run API is already mounted on this application")
+    setattr(application.state, _SERVICE_STATE_KEY, service)
     application.include_router(router, prefix=prefix)
     return service
 
 
-def reset_agent_run_service() -> None:
-    """Test-only composition reset."""
-
-    global _service
-    _service = None
-
-
-def _configured_service() -> AgentRunService:
-    if _service is None:
+def _configured_service(request: Request) -> AgentRunService:
+    service = getattr(request.app.state, _SERVICE_STATE_KEY, None)
+    if service is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"code": "AGENT_RUN_SERVICE_UNAVAILABLE"},
         )
-    return _service
+    return service
 
 
 def _raise_http(exc: AgentRunError) -> None:
@@ -63,101 +52,111 @@ def _raise_http(exc: AgentRunError) -> None:
 
 
 @router.post("/", response_model=AgentRunProjection)
-async def create_agent_run(body: AgentRunCreateRequest, user: CurrentUser) -> AgentRunProjection:
+async def create_agent_run(request: Request, body: AgentRunCreateRequest, user: CurrentUser) -> AgentRunProjection:
     try:
-        return await _configured_service().create(body, user=user)
+        return await _configured_service(request).create(body, user=user)
     except AgentRunError as exc:
         _raise_http(exc)
 
 
 @router.get("/", response_model=AgentRunPage)
 async def list_agent_runs(
+    request: Request,
     user: CurrentUser,
     cursor: str | None = None,
     limit: int = Query(default=20, ge=1, le=50),
 ) -> AgentRunPage:
     try:
-        return await _configured_service().list_runs(user=user, cursor=cursor, limit=limit)
+        return await _configured_service(request).list_runs(user=user, cursor=cursor, limit=limit)
     except AgentRunError as exc:
         _raise_http(exc)
 
 
 @router.get("/{run_id}", response_model=AgentRunProjection)
-async def get_agent_run(run_id: str, user: CurrentUser) -> AgentRunProjection:
+async def get_agent_run(request: Request, run_id: str, user: CurrentUser) -> AgentRunProjection:
     try:
-        return await _configured_service().get(run_id, user=user)
+        return await _configured_service(request).get(run_id, user=user)
     except AgentRunError as exc:
         _raise_http(exc)
 
 
 @router.get("/{run_id}/events", response_model=tuple[AgentRunTimelineEvent, ...])
-async def get_agent_run_events(run_id: str, user: CurrentUser) -> tuple[AgentRunTimelineEvent, ...]:
+async def get_agent_run_events(request: Request, run_id: str, user: CurrentUser) -> tuple[AgentRunTimelineEvent, ...]:
     try:
-        return await _configured_service().events(run_id, user=user)
+        return await _configured_service(request).events(run_id, user=user)
     except AgentRunError as exc:
         _raise_http(exc)
 
 
 @router.get("/{run_id}/decision-trace", response_model=AgentRunDecisionTrace)
-async def get_agent_run_decision_trace(run_id: str, user: CurrentUser) -> AgentRunDecisionTrace:
+async def get_agent_run_decision_trace(request: Request, run_id: str, user: CurrentUser) -> AgentRunDecisionTrace:
     try:
-        return await _configured_service().decision_trace(run_id, user=user)
+        return await _configured_service(request).decision_trace(run_id, user=user)
     except AgentRunError as exc:
         _raise_http(exc)
 
 
 @router.post("/{run_id}/approve", response_model=AgentRunProjection)
 async def approve_agent_run(
+    request: Request,
     run_id: str,
     body: AgentRunCommandRequest,
     user: CurrentUser,
 ) -> AgentRunProjection:
     try:
-        return await _configured_service().approve(run_id, body, user=user)
+        return await _configured_service(request).approve(run_id, body, user=user)
     except AgentRunError as exc:
         _raise_http(exc)
 
 
 @router.post("/{run_id}/reject", response_model=AgentRunProjection)
 async def reject_agent_run(
+    request: Request,
     run_id: str,
     body: AgentRunCommandRequest,
     user: CurrentUser,
 ) -> AgentRunProjection:
     try:
-        return await _configured_service().reject(run_id, body, user=user)
+        return await _configured_service(request).reject(run_id, body, user=user)
     except AgentRunError as exc:
         _raise_http(exc)
 
 
 @router.post("/{run_id}/probe", response_model=AgentRunProjection)
 async def probe_agent_run(
+    request: Request,
     run_id: str,
     body: AgentRunCommandRequest,
     user: CurrentUser,
 ) -> AgentRunProjection:
     try:
-        return await _configured_service().probe(run_id, body, user=user)
+        return await _configured_service(request).probe(run_id, body, user=user)
     except AgentRunError as exc:
         _raise_http(exc)
 
 
 @router.post("/{run_id}/cancel", response_model=AgentRunProjection)
 async def cancel_agent_run(
+    request: Request,
     run_id: str,
     body: AgentRunCommandRequest,
     user: CurrentUser,
 ) -> AgentRunProjection:
     try:
-        return await _configured_service().cancel(run_id, body, user=user)
+        return await _configured_service(request).cancel(run_id, body, user=user)
     except AgentRunError as exc:
         _raise_http(exc)
 
 
 @router.get("/{run_id}/report", response_model=AgentRunReport)
-async def download_agent_run_report(run_id: str, user: CurrentUser, response: Response) -> AgentRunReport:
+async def download_agent_run_report(
+    request: Request,
+    run_id: str,
+    user: CurrentUser,
+    response: Response,
+) -> AgentRunReport:
     try:
-        report = await _configured_service().report(run_id, user=user)
+        report = await _configured_service(request).report(run_id, user=user)
     except AgentRunError as exc:
         _raise_http(exc)
     response.headers["Content-Disposition"] = f'attachment; filename="agent-run-{run_id}.json"'

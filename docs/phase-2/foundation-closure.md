@@ -6,7 +6,8 @@ This closure document describes the legacy Skyvern/ForgeAgent audit and offline
 foundation boundary. It does not retract the AgentPact-owned browser loop,
 `PlaywrightBrowserSessionFactory`, or `PersistedBrowserExecutor` used by
 explicitly composed callers such as the Stripe test-mode adapter. The formal
-application still does not mount a fully composed `AgentRunService`, and the
+application now mounts an app-scoped generic `AgentRunService` with an empty
+Pack registry by default; concrete Pack execution remains explicit and the
 Synthetic Agent Run composition remains test-fixture-only.
 
 ## Current Runtime Boundary

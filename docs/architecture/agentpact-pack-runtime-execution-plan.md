@@ -19,38 +19,37 @@ Concrete Domain Packs    -> implementations of those contracts and ports
 Boot composition may import concrete Packs to register them. Core Agent Run,
 browser-loop, and governance modules must not import concrete Pack modules.
 
-## Current Status (`d835bb5`)
+## Current Status (`2026-09-03`)
 
 The generic Pack runtime contracts and AgentPact-owned browser operation loop
 are implemented, including the persisted browser executor and session boundary.
-The formal application still does not mount a fully composed `AgentRunService`,
-and Synthetic Agent Run composition remains test-fixture-only. The explicit
-Stripe test-mode hosted Checkout composition now exercises the persisted
+The formal application now mounts an app-scoped, fully composed generic
+`AgentRunService` through `enterprise/applications/agent_runs.py`. Its default
+registry is empty, so startup exposes the API but no Pack is executable. A
+concrete Pack, target URL, and adapter remain explicit composition inputs.
+Synthetic Agent Run composition remains test-fixture-only. The explicit Stripe
+test-mode hosted Checkout composition exercises the persisted
 Permit/Attempt/UNKNOWN/probe boundary, but remains a test-mode candidate rather
 than a production Pack.
 
-## Current Problem
+## Remaining Integration Problem
 
-The AgentPact browser loop is generic, but the test/reference Agent Run vertical
-slice is still a `synthetic.payment` application:
+The formal Agent Run and browser-loop boundaries are now Pack-neutral and use
+typed lifecycle contracts. What remains is real integration evidence:
 
-- Agent Run imports synthetic constants, M8 journal types, M10 exceptions, and
-  the concrete prepared-run model.
-- Agent Run selects `synthetic.payment@1.0.0` directly rather than dispatching
-  from a trusted installed-Pack binding.
-- `PackRuntimeAdapter` represents lifecycle inputs and outputs as `object` and
-  `**trusted_inputs`, forcing the platform to inspect concrete implementation
-  types.
-- Synthetic M10 test fixtures combine business facts, planning, approval,
-  browser mechanics, Permit issuance, Attempt persistence, and result probing.
-- The M10 state-changing submit action now uses the AgentPact browser loop;
-  legacy `ActionHandler` remains only in separately inventoried M4/M7/M8 and
+- the default formal composition has no installed Pack or adapter and therefore
+  fails closed;
+- the complete recorded Agent Run vertical slice remains a Synthetic test
+  fixture rather than product wiring;
+- Stripe has an explicit governed test-mode adapter, but it is not yet installed
+  into the formal runtime registry;
+- legacy `ActionHandler` remains only in separately inventoried M4/M7/M8 and
   Stripe product-boundary E2E evidence.
 
 The Stripe adapter is a separate explicit composition: it owns the hosted
 browser callback through AgentPact's persisted executor and uses an independent
-PaymentIntent Probe. It does not turn the formal app into a composed platform
-service or make the Pack production-eligible.
+PaymentIntent Probe. It does not install Stripe into the formal app or make the
+Pack production-eligible.
 
 Passing a synthetic E2E test does not prove that these boundaries are generic.
 

@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from enterprise.agent_runs.routes import configure_agent_run_service, reset_agent_run_service, router
+from enterprise.agent_runs.routes import mount_agent_run_api
 from enterprise.agent_runs.service import (
     AgentRunAction,
     AgentRunCreateRequest,
@@ -166,11 +166,10 @@ class _RouteService:
 
 def test_http_create_returns_only_redacted_projection_and_rejects_extra_authority() -> None:
     app = FastAPI()
-    app.include_router(router, prefix="/api/v1")
+    mount_agent_run_api(app, service=_RouteService(), prefix="/api/v1")  # type: ignore[arg-type]
     app.dependency_overrides[get_current_user] = _user
-    configure_agent_run_service(_RouteService())  # type: ignore[arg-type]
+    client = TestClient(app)
     try:
-        client = TestClient(app)
         response = client.post(
             "/api/v1/enterprise/agent-runs/",
             json={
@@ -221,4 +220,4 @@ def test_http_create_returns_only_redacted_projection_and_rejects_extra_authorit
             "recovery",
         ]
     finally:
-        reset_agent_run_service()
+        client.close()

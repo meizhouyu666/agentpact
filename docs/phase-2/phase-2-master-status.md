@@ -1,7 +1,7 @@
 # AgentPact Phase 2 Master Status
 
 > Status: authoritative working status
-> Updated: 2026-09-03 (`d835bb5`)
+> Updated: 2026-09-03 (`P0 composition root`)
 > Scope: Phase 2 governance foundation, audit hardening, and the controlled path to future enforce
 
 This document is the single operational entry point for Phase 2 work. Read it
@@ -28,10 +28,13 @@ The current code has two deliberately separate execution surfaces:
   candidate, not a production Pack.
 
 Generic `AgentRunService`, routes, and Pack runtime contracts are available as
-composable interfaces. Formal `skyvern/forge/api_app.py` startup does not mount
-a fully composed Agent Run service; the Synthetic Agent Run composition exists
-only in test fixtures. `GOVERNANCE_MODE=enforce` remains configuration-rejected,
-and no generic ForgeAgent-to-AgentPact production path is enabled.
+composable interfaces. Formal `skyvern/forge/api_app.py` startup now mounts an
+app-scoped generic Agent Run service through the formal composition root. The
+default registry is empty, so no Pack is executable until a caller explicitly
+injects a validated registry, target URL, and adapter. The Synthetic Agent Run
+composition exists only in test fixtures. `GOVERNANCE_MODE=enforce` remains
+configuration-rejected, and no generic ForgeAgent-to-AgentPact production path
+is enabled.
 
 ### Legacy Phase 2 audit boundary
 
@@ -87,7 +90,7 @@ call a browser/business transition.
 | Pack SDK and static Conformance Kit | Offline complete | M2 provides immutable SDK authoring shapes, deterministic versioned reports, invalid-Pack fixtures, complete fact/evidence binding checks, and static runtime-import exclusion. It has no runtime caller. |
 | Synthetic browser audit collector | Active, audit-only | Reads the isolated synthetic page's semantic DOM and screenshot, then emits a redacted test manifest; it never executes an Action. |
 | PendingAction / approval state | Persistence foundation | Models, state services, and round-history tests exist; no browser execution path invokes them. |
-| Permit / Attempt / UNKNOWN | Active in explicit Stripe composition; dormant for generic legacy paths | `PersistedBrowserExecutor` persists Permit/Attempt ordering, leaves external writes `UNKNOWN`, and exposes the exact checkpoint for an independent probe. Generic ForgeAgent and formal app startup do not call this path. |
+| Permit / Attempt / UNKNOWN | Active in explicit Stripe composition; dormant for generic legacy paths | `PersistedBrowserExecutor` persists Permit/Attempt ordering, leaves external writes `UNKNOWN`, and exposes the exact checkpoint for an independent probe. Generic ForgeAgent and the formal app's empty default registry do not call this path. |
 | M4 governed browser proof | Accepted test evidence | One process-isolated synthetic ActionHandler path proves durable `EXECUTING -> UNKNOWN -> CONFIRMED`, independent probe confirmation, one commit, no replay, and complete cleanup. It is not runtime wiring. |
 | M5 developer/release experience | Implemented for review; now DONE/PASS locally | One cross-platform Python CLI, canonical release-report schema, Ubuntu CI, manual/release Windows smoke, public guide, and attribution are independently accepted at HEAD `d1c2587b2b03ae107429e1cd131dd5bc5082c390`; final review SHA-256 `d73196352e8f06512d69fc92a86127f19e370c11ffaf31f67183a39c55153707`. Publication has not occurred. |
 | AgentPact browser operation loop | Active runtime (explicit composition) | AgentPact-owned loop, direct Playwright runtime, session factory, and persisted executor; `SkyvernScraperRuntimeAdapter` remains a temporary scraper compatibility layer. |
@@ -109,7 +112,7 @@ The following labels describe implementation state, not product readiness:
 | M7 Native Agent loop | Interface-only | Native execution contracts remain isolated |
 | M8 Sequential Agent loop | Interface-only | Journal/recovery contracts; no automatic UNKNOWN replay |
 | M9 Model-safe Planner | Offline | Deterministic proposal validation and fixtures |
-| M10 Agent Run | Interface-only at formal app boundary | Generic Agent Run contracts/routes remain available; Synthetic composition is test-only and not mounted by formal application startup. Stripe's governed adapter is an explicit Pack composition, not a fully composed platform service. |
+| M10 Agent Run | Mounted, fail-closed at formal app boundary | The app-scoped generic service is mounted with an empty default registry. Synthetic composition remains test-only; Stripe remains an explicit Pack composition and is not installed by formal startup. |
 | M11 Operations workbench | Interface-only | Safe projections and provider composition contracts |
 | M12 Evaluation and traces | Offline | Recorded evaluation and redacted, non-authoritative traces |
 
@@ -319,7 +322,7 @@ event IDs and aggregate counts.
 | Capability and authorization | Interface foundation complete | Keep offline contracts stable; runtime wiring requires separate approval. |
 | Capability request, planning, and admission | Synthetic persistence foundation | Keep request/Grant/Plan/WorkOrder bindings stable; no production caller, outbox publisher, or Skyvern Task publication. |
 | L0--L4 recovery | Offline policy foundation | Expand synthetic fault corpus only. |
-| Semantic observation and evidence | Audit hardening complete; AgentPact runtime observation also implemented | Extend offline evidence fixtures and data-quality checks; explicit runtime callers require their own composition and remain outside formal app startup. |
+| Semantic observation and evidence | Audit hardening complete; AgentPact runtime observation also implemented | Extend offline evidence fixtures and data-quality checks; concrete runtime callers still require explicit Pack composition and are absent from the formal default registry. |
 | Fallback policy | Six known families sealed | Keep all closure regressions stable and extend the inventory when a new side-effect caller is discovered. |
 | Evaluation, audit, replay | Synthetic reference harness complete | Extend replay and benchmark coverage; synthetic results are not compliance evidence. |
 | Domain Pack SDK / Contract Catalog | M3 reference conformance complete; M4 accepted as test evidence | Keep `synthetic.payment` outside the active registry/runtime and preserve the accepted no-replay proof. |

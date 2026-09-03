@@ -13,6 +13,7 @@ from enterprise.agent.constrained_planner import OpenAICompatiblePlanner, Planne
 from enterprise.agent_runs.routes import mount_agent_run_api
 from enterprise.agent_runs.service import AgentRunService
 from enterprise.governance.pack_runtime import PackRuntimeRegistry
+from enterprise.integrations.skyvern_agent_run_store import SkyvernAgentRunStore
 from tests.fixtures.synthetic_payment_runtime.m6_runtime import SYNTHETIC_RUNTIME_CONTRACT
 from tests.fixtures.synthetic_payment_runtime.m9_runtime import OpenAICompatibleM9Provider
 from tests.fixtures.synthetic_payment_runtime.m10_runtime import (
@@ -79,6 +80,7 @@ def compose_synthetic_agent_run_service(
     return AgentRunService(
         session_factory,
         runtime_registry=registry,
+        native_store=SkyvernAgentRunStore(),
         default_pack_binding=adapter.binding,
         target_url=target_url,
         provider_timeout_seconds=provider_timeout_seconds,

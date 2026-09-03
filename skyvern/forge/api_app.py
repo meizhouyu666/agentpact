@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, AsyncGenerator, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Awaitable, Callable
 
 import structlog
 from fastapi import FastAPI, Response, status
@@ -28,6 +30,9 @@ from skyvern.forge.sdk.db.exceptions import NotFoundError
 from skyvern.forge.sdk.routes import internal_auth
 from skyvern.forge.sdk.routes.routers import base_router, legacy_base_router, legacy_v2_router
 from skyvern.services.cleanup_service import start_cleanup_scheduler, stop_cleanup_scheduler
+
+if TYPE_CHECKING:
+    from enterprise.applications.agent_runs import AgentRunComposition
 
 try:
     from cloud.observability.otel_setup import OTELSetup
@@ -154,7 +159,7 @@ async def lifespan(fastapi_app: FastAPI) -> AsyncGenerator[None, Any]:
     LOG.info("Server shutting down")
 
 
-def create_api_app() -> FastAPI:
+def create_api_app(*, agent_run_composition: AgentRunComposition | None = None) -> FastAPI:
     """
     Start the agent server.
 
@@ -212,6 +217,23 @@ def create_api_app() -> FastAPI:
     fastapi_app.include_router(enterprise_auth_router, prefix="/api/v1")
     fastapi_app.include_router(enterprise_tenant_router, prefix="/api/v1")
     fastapi_app.include_router(enterprise_approval_router, prefix="/api/v1")
+
+    # The formal Agent Run surface is always present, but its default runtime
+    # registry is empty. Concrete Packs become executable only through an
+    # explicit application composition.
+    from enterprise.applications.agent_runs import mount_agent_run_application
+
+    mount_agent_run_application(
+        fastapi_app,
+        session_factory=forge_app_instance.DATABASE.Session,
+        runtime_registry=(agent_run_composition.runtime_registry if agent_run_composition is not None else None),
+        target_url=(agent_run_composition.target_url if agent_run_composition is not None else None),
+        default_pack_binding=(
+            agent_run_composition.default_pack_binding if agent_run_composition is not None else None
+        ),
+        native_store=(agent_run_composition.native_store if agent_run_composition is not None else None),
+        provider_timeout_seconds=settings.AGENT_RUN_PROVIDER_TIMEOUT_SECONDS,
+    )
 
     # Bridge enterprise JWT auth into Skyvern's native org auth so that
     # endpoints like /workflows/create-from-prompt accept enterprise tokens.

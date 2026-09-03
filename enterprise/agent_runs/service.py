@@ -234,18 +234,14 @@ class AgentRunService:
         session_factory: Callable[[], AbstractAsyncContextManager[Any]],
         *,
         runtime_registry: PackRuntimeRegistry,
+        native_store: AgentRunNativeStore,
         default_pack_binding: PackRuntimeBinding | None = None,
         target_url: str,
         provider_timeout_seconds: float = 30.0,
         create_gate_factory: CreateGateFactory | None = None,
         clock: Callable[[], datetime] | None = None,
-        native_store: AgentRunNativeStore | None = None,
     ) -> None:
         self._session_factory = session_factory
-        if native_store is None:
-            from enterprise.integrations.skyvern_agent_run_store import SkyvernAgentRunStore
-
-            native_store = SkyvernAgentRunStore()
         self._native_store = native_store
         self._journal = AgentRunJournal(native_store)
         self._registry = runtime_registry

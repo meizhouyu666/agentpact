@@ -16,7 +16,6 @@ import pytest
 from fastapi import FastAPI, Header
 from sqlalchemy import select
 
-from enterprise.agent_runs.routes import reset_agent_run_service
 from tests.fixtures.synthetic_payment_agent_runs import mount_synthetic_agent_run_api
 from enterprise.approval.models import ApprovalRequestModel
 from enterprise.auth.dependencies import get_current_user
@@ -271,7 +270,6 @@ def test_m10_recorded_api_uses_boot_driver_reobserves_permits_and_probes_once() 
                         "pending_statuses": [item.status for item in pending],
                     }
             finally:
-                reset_agent_run_service()
                 await database.engine.dispose()
 
         with patch.object(SyntheticPaymentRuntimeAdapter, "prepare_run", counted_prepare):
