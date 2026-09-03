@@ -38,10 +38,10 @@ from enterprise.agent_runs.journal import (
     PlanRunState,
     PlanStepState,
 )
+from enterprise.agent_runs.journal import _stable_id as _generic_stable_id
 from enterprise.agent_runs.journal import (
     replay_plan_journal as _replay,
 )
-from enterprise.agent_runs.journal import _stable_id as _generic_stable_id
 from enterprise.domains.synthetic_payment.constants import RESULT_PROBE_REF
 from enterprise.governance.admission import TaskAdmissionBundle
 from enterprise.governance.contracts import ExecutionAttemptStatus
@@ -997,14 +997,7 @@ def _event(
 
 async def _load_events(session: Any, root_task_id: str) -> list[PlanJournalEvent]:
     models = list(
-        (
-            await session.scalars(
-                select(GovernanceAuditEventModel).where(
-                    GovernanceAuditEventModel.task_id == root_task_id,
-                    GovernanceAuditEventModel.event_type.like("m8.plan.%"),
-                )
-            )
-        ).all()
+        (await session.scalars(select(GovernanceAuditEventModel).where(GovernanceAuditEventModel.task_id == root_task_id))).all()
     )
     events = [PlanJournalEvent.model_validate(item.payload) for item in models]
     return sorted(events, key=lambda item: item.sequence)

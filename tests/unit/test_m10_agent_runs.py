@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from enterprise.agent_runs.journal import GovernedPlanCheckpoint, GovernedPlanStepRef, PlanRunState, PlanStepState
 from enterprise.auth.schemas import DepartmentRole, UserContext
 from enterprise.domains.synthetic_payment.constants import (
     BUSINESS_LINE_ID,
@@ -58,6 +59,35 @@ def _adapter() -> SyntheticPaymentRuntimeAdapter:
             raise AssertionError(trusted_inputs)
 
     return SyntheticPaymentRuntimeAdapter(no_session, driver=NoopDriver())
+
+
+@pytest.mark.asyncio
+async def test_failed_advance_reason_preserves_checkpoint_state_for_diagnostics() -> None:
+    checkpoint = GovernedPlanCheckpoint(
+        plan_run_id="run-m10-diagnostic",
+        admission_id="admission-m10-diagnostic",
+        root_task_id="run-m10-diagnostic",
+        plan_id="plan-m10-diagnostic",
+        plan_version=1,
+        authority_contract_id="contract-m10-diagnostic",
+        active_step=GovernedPlanStepRef(
+            business_plan_step_id="step-m10-diagnostic",
+            step_digest="a" * 64,
+            work_order_id="work-order-m10-diagnostic",
+            work_order_digest="b" * 64,
+            native_task_id="native-task-m10-diagnostic",
+            native_step_id="native-step-m10-diagnostic",
+            native_contract_id="native-contract-m10-diagnostic",
+            authority_contract_id="contract-m10-diagnostic",
+            state=PlanStepState.ACTIVE,
+        ),
+        state=PlanRunState.APPROVAL_REQUIRED,
+    )
+
+    result = await _adapter()._advance_result(checkpoint)
+
+    assert result.status.value == "FAILED"
+    assert result.reason_code == "PACK_ADVANCE_FAILED_APPROVAL_REQUIRED"
 
 
 def test_preparation_is_deterministic_and_model_boundary_uses_only_intent_token() -> None:
