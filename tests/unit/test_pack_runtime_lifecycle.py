@@ -278,6 +278,33 @@ def test_platform_runtime_packages_do_not_import_concrete_packs() -> None:
     assert not violations
 
 
+def test_formal_runtime_boundary_excludes_pack_and_compatibility_shims() -> None:
+    root = Path(__file__).resolve().parents[2]
+    paths = [
+        *sorted((root / "enterprise" / "agent_runs").rglob("*.py")),
+        *sorted((root / "enterprise" / "browser_loop").rglob("*.py")),
+        root / "enterprise" / "governance" / "pack_runtime.py",
+    ]
+    source = "\n".join(path.read_text(encoding="utf-8").lower() for path in paths)
+    for forbidden in (
+        "enterprise.domains.",
+        "synthetic_payment",
+        "stripe_payment",
+        "trusted_inputs",
+        "agentpact-m8",
+        "append_m10_transition",
+    ):
+        assert forbidden not in source
+
+    pack_runtime_tree = ast.parse(
+        (root / "enterprise" / "governance" / "pack_runtime.py").read_text(encoding="utf-8")
+    )
+    adapter = next(node for node in pack_runtime_tree.body if isinstance(node, ast.ClassDef) and node.name == "PackRuntimeAdapter")
+    adapter_source = ast.unparse(adapter)
+    assert "object" not in adapter_source
+    assert "trusted_inputs" not in adapter_source
+
+
 @pytest.mark.parametrize(
     ("module_name", "source"),
     [

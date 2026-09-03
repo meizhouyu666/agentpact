@@ -42,6 +42,7 @@ from enterprise.governance.models import (
 )
 from enterprise.governance.pack_runtime import (
     ApprovalRequestSpecification,
+    JsonValue,
     PackAdvanceStatus,
     PackLifecycleError,
     PackRunRequest,
@@ -95,7 +96,7 @@ class AgentRunCreateRequest(BaseModel):
 
     request_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
     intent: str = Field(min_length=1, max_length=2000)
-    business_inputs: dict[str, Any]
+    business_inputs: dict[str, JsonValue]
     pack_id: str | None = Field(default=None, min_length=1)
     pack_version: str | None = Field(default=None, min_length=1)
 
@@ -1507,6 +1508,6 @@ def _operation_key(*, tenant_id: str, run_id: str, command: str, caller_key: str
     return f"agent-run:{command}:{_digest([tenant_id, run_id, command, caller_key, predecessor])}"
 
 
-def _digest(value: object) -> str:
+def _digest(value: Any) -> str:
     raw = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()

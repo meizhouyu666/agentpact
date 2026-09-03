@@ -10,9 +10,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
+
+if TYPE_CHECKING:
+    from .journal import GovernedPlanCheckpoint, PlanJournalTransition
 
 
 class AgentRunTaskStatus(StrEnum):
@@ -32,21 +35,6 @@ class AgentRunTaskStatus(StrEnum):
     COMPLETED = "completed"
     CANCELED = "canceled"
 
-    # Lower-case aliases mirror the legacy enum spelling without importing it.
-    unknown = UNKNOWN
-    created = CREATED
-    queued = QUEUED
-    running = RUNNING
-    pending_approval = PENDING_APPROVAL
-    resuming = RESUMING
-    needs_human = NEEDS_HUMAN
-    pending_result_probe = PENDING_RESULT_PROBE
-    timed_out = TIMED_OUT
-    failed = FAILED
-    terminated = TERMINATED
-    completed = COMPLETED
-    canceled = CANCELED
-
 class AgentRunStepStatus(StrEnum):
     """Step statuses understood by the Agent Run projection boundary."""
 
@@ -60,18 +48,6 @@ class AgentRunStepStatus(StrEnum):
     FAILED = "failed"
     COMPLETED = "completed"
     CANCELED = "canceled"
-
-    # Lower-case aliases mirror the legacy enum spelling without importing it.
-    unknown = UNKNOWN
-    created = CREATED
-    running = RUNNING
-    pending_approval = PENDING_APPROVAL
-    resuming = RESUMING
-    needs_human = NEEDS_HUMAN
-    pending_result_probe = PENDING_RESULT_PROBE
-    failed = FAILED
-    completed = COMPLETED
-    canceled = CANCELED
 
 class AgentRunTaskSnapshot(BaseModel):
     """Stable, redacted view of a native task row used by Agent Run."""
@@ -105,7 +81,7 @@ class AgentRunNativeStore(Protocol):
 
     ``session`` is intentionally opaque here.  The application owns the
     transaction and passes the active session to the adapter, which keeps
-    locking and flush semantics identical to the legacy implementation.
+    locking and flush semantics identical to the deployed implementation.
     """
 
     async def get_root(
@@ -147,9 +123,9 @@ class AgentRunNativeStore(Protocol):
     async def verify_checkpoint_native_state(
         self,
         session: Any,
-        checkpoint: Any,
+        checkpoint: "GovernedPlanCheckpoint",
         *,
-        transition: Any,
+        transition: "PlanJournalTransition",
         organization_id: str,
     ) -> None: ...
 

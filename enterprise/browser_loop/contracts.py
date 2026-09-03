@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from enterprise.governance.contracts import ExecutionAuthorization, ExecutionEffect
 from enterprise.governance.execution_profiles import ExecutionProfile
-from enterprise.governance.pack_runtime import ExecutionCheckpoint
+from enterprise.governance.pack_runtime import ExecutionCheckpoint, JsonValue
 
 
 class ActionKind(StrEnum):
@@ -69,7 +69,7 @@ class BrowserLoopRunContext(BaseModel):
     pack_version: str | None = None
     capability_id: str | None = None
     contract_id: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, JsonValue] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_pack_binding(self) -> "BrowserLoopRunContext":
@@ -292,7 +292,7 @@ class BrowserLoopEvent(BaseModel):
     occurred_at: datetime
     observation_id: str | None = None
     action_fingerprint: str | None = None
-    details: dict[str, Any] = Field(default_factory=dict)
+    details: dict[str, JsonValue] = Field(default_factory=dict)
 
 
 class BrowserLoopReport(BaseModel):

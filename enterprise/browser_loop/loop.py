@@ -4,18 +4,20 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Any
+from typing import Literal
 
 from enterprise.governance.audit import observation_hash
 from enterprise.governance.classification import action_fingerprint
 from enterprise.governance.contracts import ExecutionEffect
 from enterprise.governance.execution_profiles import ExecutionProfileRejected, require_allowed_profile
-from enterprise.governance.pack_runtime import ExecutionCheckpoint
+from enterprise.governance.pack_runtime import ExecutionCheckpoint, JsonValue
 
 from .contracts import (
     ActionDecision,
     AuthorizedAction,
+    BrowserActionResult,
     BrowserLoopConfig,
     BrowserLoopEvent,
     BrowserLoopReport,
@@ -57,7 +59,7 @@ class AgentPactBrowserLoop:
         integrity_secret: str,
         domain_actions: DomainPackActionProvider | None = None,
         config: BrowserLoopConfig | None = None,
-        clock: Any | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         if not integrity_secret:
             raise ValueError("Browser loop requires a non-empty integrity secret")
@@ -375,7 +377,7 @@ class AgentPactBrowserLoop:
         after: BrowserObservation,
         decision: ActionDecision,
         source: DecisionSource,
-        action_result: Any | None = None,
+        action_result: BrowserActionResult | None = None,
         authorized_effect: ExecutionEffect | None = None,
         action_fingerprint: str | None = None,
     ) -> VerificationResult:
@@ -441,11 +443,11 @@ class AgentPactBrowserLoop:
         self,
         state: "_RunState",
         *,
-        stage: Any,
+        stage: Literal["observation", "decision", "policy", "action", "verification", "terminal"],
         code: str,
         observation_id: str | None = None,
         action_fingerprint: str | None = None,
-        details: dict[str, Any] | None = None,
+        details: dict[str, JsonValue] | None = None,
     ) -> None:
         event = BrowserLoopEvent(
             sequence=len(state.events) + 1,
