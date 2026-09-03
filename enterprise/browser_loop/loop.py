@@ -312,7 +312,10 @@ class AgentPactBrowserLoop:
         )
 
     async def _observe(self, state: "_RunState") -> BrowserObservation:
-        raw = await self._runtime.observe()
+        # Session-owning runtimes can make freshness explicit. Keep the
+        # smaller BrowserRuntime port compatible with existing injected fakes.
+        fresh = getattr(self._runtime, "fresh_observation", None)
+        raw = await fresh() if callable(fresh) else await self._runtime.observe()
         state.observations += 1
         observation = self._bind_observation(raw, state.observations)
         state.last_observation_id = observation.observation_id

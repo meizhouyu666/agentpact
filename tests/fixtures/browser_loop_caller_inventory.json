@@ -1,0 +1,56 @@
+[
+  {
+    "id": "synthetic_m10_submit",
+    "scope": "agentpact_test_composition",
+    "current_status": "migrated",
+    "required_disposition": "route_through_agentpact_browser_loop",
+    "source": "tests/fixtures/synthetic_payment_runtime/m10_runtime.py",
+    "markers": [
+      "async def _fresh_submit_context(",
+      "AgentPactBrowserLoop(",
+      "PersistedBrowserExecutor(",
+      "suspend_unknown_execution_for_probe(",
+      "async def probe("
+    ],
+    "forbidden_markers": [
+      "ActionHandler",
+      "ClickAction",
+      "NativeActionHandlerOutcome",
+      "PostActionControl"
+    ],
+    "closure_test": "test_synthetic_submit_uses_agentpact_persisted_executor_only"
+  },
+  {
+    "id": "legacy_synthetic_e2e_support",
+    "scope": "legacy_product_test_evidence",
+    "current_status": "retained",
+    "required_disposition": "retain_until_explicit_migration",
+    "sources": [
+      {
+        "path": "tests/e2e/m4_synthetic_support.py",
+        "marker": "from skyvern.webeye.actions.handler import ActionHandler"
+      },
+      {
+        "path": "tests/e2e/test_synthetic_payment_governed_browser.py",
+        "marker": "ActionHandler.handle_action("
+      },
+      {
+        "path": "tests/e2e/test_synthetic_payment_native_agent.py",
+        "marker": "ActionHandler.handle_action("
+      },
+      {
+        "path": "tests/e2e/test_synthetic_payment_m8_agent.py",
+        "marker": "support.run_handler_action("
+      },
+      {
+        "path": "tests/e2e/test_stripe_payment_governed_browser.py",
+        "marker": "ActionHandler.handle_action("
+      },
+      {
+        "path": "tests/unit/test_m7_native_agent_governance.py",
+        "marker": "from skyvern.webeye.actions.handler import ActionHandler"
+      }
+    ],
+    "reason": "These fixtures prove the legacy Skyvern product boundary and duplicate-rejection behavior; they are not AgentPact M10 callers."
+  }
+]

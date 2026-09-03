@@ -67,6 +67,14 @@ class PersistedBrowserExecutor:
     async def observe(self):
         return await self._runtime.observe()
 
+    async def fresh_observation(self):
+        """Forward the stronger fresh-observation contract when available."""
+
+        fresh = getattr(self._runtime, "fresh_observation", None)
+        if callable(fresh):
+            return await fresh()
+        return await self._runtime.observe()
+
     async def execute(self, command: AuthorizedAction) -> BrowserActionResult:
         if command.authorization.effect is not ExecutionEffect.EXTERNAL_WRITE:
             return await self._runtime.execute(command)

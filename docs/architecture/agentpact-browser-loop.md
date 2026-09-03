@@ -97,29 +97,37 @@ Action execution is AgentPact-owned Playwright code even when this adapter is
 used. The direct `PlaywrightPageRuntime` has no Skyvern dependency, so callers
 can migrate immediately when they already own browser lifecycle/session setup.
 
-The synthetic Agent Run test fixture routes its `precheck` and `confirm` Domain
-Pack steps through this loop with direct Playwright observation, deterministic
-Pack decisions, independent verification, and durable redacted events. Its
-state-changing `submit` step remains on the legacy `ActionHandler` boundary;
-this is test/reference composition and is not mounted by formal application
-startup. The explicit Stripe test-mode composition uses AgentPact's
-`PersistedBrowserExecutor` for the hosted submit and independent result probe.
-Removing Forge routes, workflows, Task/Step persistence, or `ActionHandler`
-from the legacy product shell would therefore still be premature.
+The synthetic Agent Run test fixture routes its `precheck`, `submit`, and
+`confirm` Domain Pack steps through this loop with direct Playwright
+observation, deterministic Pack decisions, independent verification, and
+durable redacted events. The state-changing `submit` step takes a fresh
+post-approval observation, issues a one-time Permit, and uses
+`PersistedBrowserExecutor` to commit the Attempt before the browser call and
+enter `UNKNOWN` for independent result probing. This fixture is not mounted by
+formal application startup. The explicit Stripe test-mode composition uses the
+same persisted executor for its hosted submit and independent result probe.
+
+The legacy Skyvern product shell remains intentionally intact. The machine
+checked inventory in `tests/fixtures/browser_loop_caller_inventory.json`
+records `synthetic_m10_submit` as migrated and the retained
+M4/M7/M8 and Stripe E2E ActionHandler evidence as
+`legacy_synthetic_e2e_support` / **Skyvern product/test evidence**. Those tests
+exercise the product boundary and are not AgentPact M10 callers. The inventory
+also proves that `enterprise/` and `tests/fixtures/` contain no legacy
+ActionHandler caller.
 
 ## Remaining Extraction Step
 
 `PlaywrightBrowserSessionFactory` provides the narrow AgentPact-owned
-session/lifecycle seam, and `PersistedBrowserExecutor` now validates freshness,
+session/lifecycle seam, and `PersistedBrowserExecutor` validates freshness,
 consumes the Permit, commits the Attempt before the browser call, and exposes
 the exact Attempt to result-probe recovery for explicit composed callers such
-as Stripe. Production callers still need to migrate browser-manager setup to
-that seam, and the Skyvern compatibility adapter remains for callers that still
-depend on its scraper output. The remaining extraction is to port any
-additional Skyvern scraper behavior needed in production (for example
-iframe-aware interactable actions and split screenshots) without widening the
-AgentPact loop, then migrate the synthetic test fixture's `submit` step away
-from `ActionHandler`. Once all callers use the owned path, remove
-`SkyvernScraperRuntimeAdapter` and demonstrate that no AgentPact entrypoint
-imports `skyvern.forge.agent` or `skyvern.webeye.actions.handler` before
-deleting any legacy product shell.
+as the synthetic fixture and Stripe. Production callers still need to migrate
+browser-manager setup to that seam, and the Skyvern compatibility adapter
+remains for callers that still depend on its scraper output. The remaining
+extraction is to port any additional Skyvern scraper behavior needed in
+production (for example iframe-aware interactable actions and split
+screenshots) without widening the AgentPact loop. Once all legacy product/test
+callers use the owned path, remove `SkyvernScraperRuntimeAdapter` and
+demonstrate that no AgentPact entrypoint imports `skyvern.forge.agent` or
+`skyvern.webeye.actions.handler` before deleting any legacy product shell.

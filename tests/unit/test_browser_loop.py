@@ -83,6 +83,16 @@ class FakeRuntime:
         )
 
 
+class FreshRuntime(FakeRuntime):
+    def __init__(self, observations: Iterable[RawBrowserObservation]) -> None:
+        super().__init__(observations)
+        self.fresh_calls = 0
+
+    async def fresh_observation(self) -> RawBrowserObservation:
+        self.fresh_calls += 1
+        return await self.observe()
+
+
 class RecordingSink:
     def __init__(self) -> None:
         self.events = []
@@ -232,6 +242,20 @@ async def test_observe_decide_enforce_act_reobserve_verify_success() -> None:
         "verification",
         "terminal",
     ]
+
+
+@pytest.mark.asyncio
+async def test_loop_prefers_explicit_fresh_observation_when_runtime_supports_it() -> None:
+    runtime = FreshRuntime([_raw(1)])
+
+    report = await _loop(
+        runtime=runtime,
+        model=TerminalModel(DecisionKind.SUCCESS),
+        verifier=SequenceVerifier([VerificationDisposition.SUCCEEDED]),
+    ).run(_run())
+
+    assert report.status is BrowserLoopStatus.SUCCEEDED
+    assert runtime.fresh_calls == 1
 
 
 @pytest.mark.asyncio
