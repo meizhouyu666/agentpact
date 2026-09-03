@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from collections.abc import Callable
 from typing import Iterable
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from enterprise.agent_runs.journal import is_plan_application_marker
 from enterprise.governance.capabilities import CapabilityDefinition
 from enterprise.governance.domain_packs import DomainPackKind, DomainPackManifest
 from enterprise.governance.pack_runtime import (
@@ -374,3 +375,9 @@ def test_generic_run_identity_is_pack_neutral() -> None:
     run_id = derive_pack_run_id(tenant_id="tenant-a", request_id="request-a")
     assert run_id.startswith("run_")
     assert not run_id.startswith("run_m10_")
+
+
+def test_agent_run_journal_accepts_legacy_root_marker_during_migration() -> None:
+    assert is_plan_application_marker("agentpact:agent-run:plan:v1")
+    assert is_plan_application_marker("agentpact:m8:plan:v1")
+    assert not is_plan_application_marker("untrusted.application")

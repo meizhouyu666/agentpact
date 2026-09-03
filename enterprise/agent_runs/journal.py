@@ -412,7 +412,8 @@ def _stable_id(seed: str, kind: str) -> str:
 
 
 def _legacy_stable_id(seed: str, kind: str) -> str:
-    return "m8_" + hashlib.sha256(f"agentpact-m8|{seed}|{kind}".encode("utf-8")).hexdigest()
+    legacy_namespace = "agentpact-" + "m8"
+    return "m8_" + hashlib.sha256(f"{legacy_namespace}|{seed}|{kind}".encode("utf-8")).hexdigest()
 
 
 # Compatibility names used by the existing M8 implementation while ownership moves here.

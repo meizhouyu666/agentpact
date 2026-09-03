@@ -251,7 +251,7 @@ def test_active_set_can_only_create_a_tenant_scoped_runtime_registry() -> None:
         now=NOW,
     )
 
-    runtime_registry = active.runtime_registry([_contract()])
+    runtime_registry = active.runtime_registry([_contract()], clock=lambda: NOW)
     runtime_registry.register_for_installation(_adapter(), active.require_installation(pack_id=PACK_ID, pack_version=PACK_VERSION))
     assert runtime_registry.public_metadata_for_tenant(
         tenant_id="tenant-a", pack_id=PACK_ID, pack_version=PACK_VERSION

@@ -368,17 +368,17 @@ class PackRuntimeRegistry:
                 raise TypeError("Pack runtime registry accepts runtime contracts only")
             key = (contract.pack_id, contract.pack_version)
             if key in self._contracts:
-                raise ValueError(f"Duplicate Pack runtime contract: {contract.pack_id}@{contract.pack_version}")
+                raise ValueError(f"A runtime contract is already registered for {contract.pack_id}@{contract.pack_version}")
             self._contracts[key] = contract
         self._adapters: dict[tuple[str, str], PackRuntimeAdapter] = {}
         self._installations: dict[tuple[str, str, str], object] = {}
         self._trusted_adapter_refs = dict(trusted_adapter_refs or {})
         self._now = now
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(timezone.utc)) if now is None else clock
         if installation_items and trusted_adapter_refs is None:
             raise ValueError("Tenant-scoped runtime registry requires trusted adapter references")
         for installation in installation_items:
-            self.bind_installation(installation)
+            self.bind_installation(installation, now=now)
 
     @classmethod
     def from_active_domain_pack_set(
@@ -400,8 +400,8 @@ class PackRuntimeRegistry:
                 (pack_id, pack_version): adapter_ref
                 for pack_id, pack_version, adapter_ref in active.trusted_adapter_refs
             },
-            now=now,
-            clock=clock,
+            now=active.validated_at if now is None else now,
+            clock=clock or (lambda: datetime.now(timezone.utc)),
         )
 
     @property
@@ -411,9 +411,9 @@ class PackRuntimeRegistry:
     def _effective_now(self, now: datetime | None) -> datetime | None:
         if now is not None:
             return now
-        if self._now is not None:
-            return self._now
-        return self._clock()
+        if self._clock is not None:
+            return self._clock()
+        return self._now
 
     def validate_binding(self, binding: PackRuntimeBinding) -> None:
         """Validate immutable binding identity without resolving a tenant adapter."""
