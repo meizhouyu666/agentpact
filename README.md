@@ -5,7 +5,16 @@
 
 AgentPact 是一个面向高风险浏览器任务的 Agentic RPA 执行与恢复框架。它关注的不只是 Agent 能否完成任务，还包括：Agent 是否有权执行、外部副作用是否经过确定性授权、结果不确定时能否安全停止，以及如何通过独立证据确认真实业务状态。
 
-项目基于 [Skyvern](https://github.com/Skyvern-AI/skyvern) 的浏览器 Agent Loop 构建，在模型决策与 Playwright 副作用之间加入类型化领域契约、确定性授权、一次性执行许可、持久化尝试状态和分级恢复机制。当前包含 `synthetic.payment` 离线参考路径，以及显式手工触发的 `stripe.payment` Stripe test-mode hosted Checkout 路径；两者都不是生产系统，不包含部署。
+项目借鉴 [Skyvern](https://github.com/Skyvern-AI/skyvern) 的浏览器 Agent Loop，并由 `enterprise/browser_loop` 提供 AgentPact-owned operation loop、Playwright 页面运行时和浏览器会话工厂；在模型决策与浏览器副作用之间加入类型化领域契约、确定性授权、一次性执行许可、持久化尝试状态和分级恢复机制。当前还包含显式手工触发的 `stripe.payment` Stripe test-mode hosted Checkout 路径；Synthetic 仍是测试/参考夹具，两者都不是生产系统，不包含部署。
+
+## 当前实现状态
+
+截至 `d835bb5`，代码与接口的边界如下：
+
+- `enterprise/browser_loop` 的 AgentPact-owned loop、直接 Playwright runtime 和 `PlaywrightBrowserSessionFactory` 已实现。`SkyvernScraperRuntimeAdapter` 只是临时兼容适配器，读取注入的 Skyvern scraper 输出；它不是新的产品执行器。
+- `stripe.payment` 有显式 governed test-mode adapter：hosted Checkout 的浏览器副作用经过一次性 `ExecutionPermit`、持久化 `ExecutionAttempt`，不确定结果进入 `UNKNOWN`，再由独立 PaymentIntent Probe 解决。该路径由显式组合和 `sk_test_*` 凭据启用，带有 Permit/Attempt/UNKNOWN/probe 回归测试，但仍不是 production Pack。
+- Generic `AgentRunService`、routes 和 Pack runtime contracts 已实现为可组合接口；正式 `skyvern/forge/api_app.py` 启动不会挂载一个 fully composed Agent Run service。Synthetic Agent Run 的组合只存在于测试夹具。
+- `synthetic.payment` 只用于测试和离线参考，`production_eligible=false`，不代表生产安装、生产连接器或生产授权。
 
 ## 为什么需要 AgentPact
 
@@ -29,9 +38,9 @@ flowchart LR
     I --> C[Capability / Domain Pack]
     C --> P[受约束 Planner / BusinessPlan]
     P --> W[ExecutionWorkOrder]
-    W --> S[Skyvern Agent Loop]
+    W --> S[AgentPact Browser Loop]
     S --> G[Governance Kernel]
-    G -->|ExecutionPermit| A[ActionHandler / Playwright]
+    G -->|ExecutionPermit + Attempt| A[AgentPact Playwright / explicit adapter]
     A --> R[Independent Result Probe]
     R --> D[确认、恢复或人工介入]
 ```
@@ -44,7 +53,7 @@ flowchart LR
 - **Planner** 只能在可信代码投影出的 Capability 和结构化约束内提出计划，不能创建身份、租户、Grant、策略、Permit、浏览器动作或业务值。
 - **BusinessPlan** 表达受授权的业务步骤；可信编译器将其转换为顺序执行的 `ExecutionWorkOrder`。
 - **ExecutionWorkOrder** 固定允许/禁止操作、成功标准、证据要求、恢复上限和原生 Task/Step 身份。
-- **Skyvern Agent Loop** 负责 DOM、截图、页面内动作选择和浏览器级恢复；`ActionHandler` 是浏览器副作用的唯一执行入口。
+- **AgentPact Browser Loop** 负责 DOM、截图、页面内动作选择、治理闸门和浏览器级恢复；直接页面运行时执行 Playwright 副作用。临时 `SkyvernScraperRuntimeAdapter` 只兼容 Skyvern 的 scraper 观察输出；Synthetic 的状态变更测试仍保留 legacy `ActionHandler` 边界。
 - **Governance Kernel** 在副作用发生前完成策略、审批、最新观察、`ExecutionPermit` 和 `ExecutionAttempt` 裁决。
 - **Result Probe** 独立确认最终业务结果。`UNKNOWN` 状态禁止动作重放和 Replan，直到精确关联的 Probe 给出权威结果。
 
@@ -54,13 +63,13 @@ flowchart LR
 
 Domain Pack SDK 使用版本化、类型化契约描述 Agent 可调用能力、业务事实、效果分类、状态机、证据要求和 Result Probe。离线 Contract Catalog 与活动运行时注册（Active Registry）严格隔离；运行时代码不能把离线 SDK 清单当作动态执行入口。
 
-Conformance Kit 使用确定性检查验证 Pack 来源、所有者、版本、Capability、证据和安全语义。`synthetic.payment` 是离线参考 Pack；`stripe.payment` 另有真实 test-mode API Probe 和 hosted Checkout adapter，但仍不是生产安装。`DomainPackInstallation` 与 Active Registry 仍是后续接入边界。
+Conformance Kit 使用确定性检查验证 Pack 来源、所有者、版本、Capability、证据和安全语义。`synthetic.payment` 是离线参考 Pack；`stripe.payment` 另有真实 test-mode API Probe 和显式 governed hosted Checkout adapter，但仍不是 production Pack 或生产安装。`DomainPackInstallation` 与 Active Registry 仍是后续接入边界。
 
 ### Stripe test-mode hosted Checkout
 `app.py`/`store.py` 是仅供 recorded 的自建 loopback checkout；`live_browser.py` 才会调用 Stripe API、访问真实
 `https://checkout.stripe.com/c/...`、使用 4242 测试卡，并由独立 `StripeApiResultProbe` GET PaymentIntent。
 缺少 `STRIPE_SECRET_KEY=sk_test_*`、认证失败、未知页面或 Probe 不确定时均 fail closed；`UNKNOWN` 不会重放。
-该 hosted flow 只可由显式 smoke 命令触发，尚未接入 M10 的持久 Attempt/Permit runtime：
+该 hosted flow 只能通过显式 smoke 或显式注入的 governed adapter 组合触发。live M10 组合要求 `StripeHostedCheckoutFlow` 和持久 Attempt/Permit session；缺少任一项即 fail closed，不会回退到 recorded：
 
 ```powershell
 $env:STRIPE_SECRET_KEY = "sk_test_..."
@@ -97,7 +106,7 @@ M9 将模型限制为 proposal-only 边界：
 
 ### Governed Agent Run API 与操作入口
 
-M10 提供受治理的 Agent Run API 和操作员入口。创建请求经过同一套 Planner、可信编译、Admission、审批、最新观察、Permit、Attempt、原生 Agent 执行与 Probe 路径。公开投影只返回安全的 Pack 元数据、计划摘要、状态、原因码和服务器声明的 `legal_actions`。
+M10 提供可组合的受治理 Agent Run API、routes 和操作员投影契约。创建请求可以经过同一套 Planner、可信编译、Admission、审批、最新观察、Permit、Attempt、原生 Agent 执行与 Probe 路径；但正式应用启动尚未挂载 fully composed `AgentRunService`，Synthetic 组合只用于测试。公开投影只返回安全的 Pack 元数据、计划摘要、状态、原因码和服务器声明的 `legal_actions`。
 
 操作员只能执行权威详情投影当前允许的 `approve`、`reject`、`cancel` 或 `probe`。列表或前端状态不能自行推断命令权限。
 
@@ -134,12 +143,13 @@ M12 在既有 M9-M11 治理链上增加只读证据面，不引入新的执行�
 | M2 Pack SDK | Offline | 类型化契约、效果、证据、版本规则与确定性 Conformance Kit |
 | M3 参考 Pack | Offline | `synthetic.payment` 参考实现和有效/无效 Conformance 夹具 |
 | M4 治理 E2E | Offline | loopback Chromium、持久化 Attempt、`UNKNOWN`、禁止重放与独立 recorded Probe |
+| AgentPact 浏览器运行时 | Active runtime (explicit composition) | AgentPact-owned loop、Playwright 页面 runtime 和 session factory；临时 Skyvern scraper adapter；不由正式应用启动自动装配 |
 | M5 开发者体验 | Historical | 合成 CLI、版本锁定和发布证据保留为历史里程碑记录，不再作为当前入口 |
 | M6 受约束 Runtime | Interface-only | 安装、身份、租户/RBAC、CapabilityGrant 投影和可信编译接口 |
 | M7 原生 Agent 闭环 | Interface-only | ForgeAgent/Chromium、原生 Task/Step、Permit/Attempt 和 Probe 关联接口 |
 | M8 顺序 Agent Loop | Interface-only | 多步骤计划、不可变完成前缀、有界后缀 Replan 和持久 Journal 接口 |
 | M9 模型安全 Planner | Offline | 值隔离、终止优先拒绝、单次结构修复和确定性评估边界 |
-| M10 Agent Run API | Interface-only | Generic Agent Run contracts remain available; Synthetic composition is test-only and is not mounted by formal application startup |
+| M10 Agent Run API | Interface-only at formal app boundary | Generic Agent Run contracts/routes remain available; Synthetic composition is test-only and is not mounted by formal application startup |
 | M11 操作工作台 | Interface-only | recorded/live 服务器组合和安全投影接口；不打开生产 enforce |
 | M12 评估与决策轨迹 | Offline tests | 安全 Planner 观察、非权威 Decision trace 和确定性评估夹具 |
 
@@ -198,7 +208,8 @@ $env:OPENAI_COMPATIBLE_API_KEY = "<environment-secret>"
 
 ## 边界与限制
 
-- 当前只有 `synthetic.payment` 合成 Domain Pack，没有生产 Pack、真实支付连接器或生产业务数据。
+- `synthetic.payment` 是唯一的测试/参考 Pack；`stripe.payment` 是 test-mode candidate adapter，不是 production Pack，没有生产安装或生产业务数据。
+- Stripe hosted Checkout 只在显式 test-mode 组合中使用真实 Stripe API、持久 Permit/Attempt 和独立 Probe；默认测试和正式应用启动不执行该路径。
 - `live` Provider 是可选服务器配置；测试夹具与默认本地验证保持确定性的 `recorded` 模式，不依赖外部网络。
 - 不包含生产凭据管理、租户安装、迁移、生产 rollout、全局 enforce 或可运营金融系统能力。
 - 浏览器传输成功不会被直接视为业务结果确认；`UNKNOWN` 必须通过独立 Probe 解决。

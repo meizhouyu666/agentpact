@@ -19,9 +19,19 @@ Concrete Domain Packs    -> implementations of those contracts and ports
 Boot composition may import concrete Packs to register them. Core Agent Run,
 browser-loop, and governance modules must not import concrete Pack modules.
 
+## Current Status (`d835bb5`)
+
+The generic Pack runtime contracts and AgentPact-owned browser operation loop
+are implemented, including the persisted browser executor and session boundary.
+The formal application still does not mount a fully composed `AgentRunService`,
+and Synthetic Agent Run composition remains test-fixture-only. The explicit
+Stripe test-mode hosted Checkout composition now exercises the persisted
+Permit/Attempt/UNKNOWN/probe boundary, but remains a test-mode candidate rather
+than a production Pack.
+
 ## Current Problem
 
-The AgentPact browser loop is mostly generic, but the active Agent Run vertical
+The AgentPact browser loop is generic, but the test/reference Agent Run vertical
 slice is still a `synthetic.payment` application:
 
 - Agent Run imports synthetic constants, M8 journal types, M10 exceptions, and
@@ -31,9 +41,14 @@ slice is still a `synthetic.payment` application:
 - `PackRuntimeAdapter` represents lifecycle inputs and outputs as `object` and
   `**trusted_inputs`, forcing the platform to inspect concrete implementation
   types.
-- Synthetic M10 combines business facts, planning, approval, browser
-  mechanics, Permit issuance, Attempt persistence, and result probing.
+- Synthetic M10 test fixtures combine business facts, planning, approval,
+  browser mechanics, Permit issuance, Attempt persistence, and result probing.
 - The state-changing submit action still depends on Skyvern `ActionHandler`.
+
+The Stripe adapter is a separate explicit composition: it owns the hosted
+browser callback through AgentPact's persisted executor and uses an independent
+PaymentIntent Probe. It does not turn the formal app into a composed platform
+service or make the Pack production-eligible.
 
 Passing a synthetic E2E test does not prove that these boundaries are generic.
 
@@ -312,13 +327,13 @@ Acceptance:
   fields, synthetic step-role literals, or hard-coded Pack IDs;
 - existing recorded behavior remains compatible at the API edge.
 
-### Stage 2: AgentPact Persisted Browser Executor
+### Stage 2: AgentPact Persisted Browser Executor (Implemented)
 
-- Add a generic coordinator behind a browser-loop port.
-- Reuse authorization guard, Permit, Attempt, and execution-profile services.
-- Preserve an exact execution checkpoint through result and error contracts.
-- Add abandoned-EXECUTING recovery.
-- Ensure external-write retries stop at the durable boundary.
+The generic persisted executor is implemented behind the browser-loop port. It
+reuses authorization guard, Permit, Attempt, and execution-profile services,
+preserves an exact execution checkpoint for result probes, recovers abandoned
+`EXECUTING` attempts, and prevents external-write replay at the durable
+boundary.
 
 Acceptance:
 
@@ -327,6 +342,9 @@ Acceptance:
 - a browser success, failure, or timeout cannot cause automatic write replay;
 - recovery can find the exact ambiguous Attempt without relying on task-only
   lookup.
+
+The executor is used by explicit Stripe test-mode hosted Checkout composition;
+the Synthetic submit fixture has not yet migrated from legacy `ActionHandler`.
 
 ### Stage 3: Migrate Synthetic Submit
 
@@ -338,14 +356,17 @@ Acceptance:
   `NativeActionHandlerOutcome`, and `PostActionControl`.
 
 Skyvern's browser manager may temporarily remain only to supply the Playwright
-page. Browser lifecycle extraction is a later stage.
+page. `PlaywrightBrowserSessionFactory` now provides the AgentPact-owned
+session/lifecycle seam, but production callers still need to migrate to it.
 
-### Stage 4: Prove Non-Synthetic Reuse
+### Stage 4: Prove Non-Synthetic Reuse (Stripe test-mode composition implemented)
 
-- Run a second, non-synthetic implementation or isolated conformance fixture
-  through the same generic Pack and persisted-executor contracts.
-- Prefer adapting existing Stripe contracts where this does not enable unsafe
-  live execution or require network credentials.
+- The explicit `stripe.payment` test-mode hosted Checkout composition now runs
+  through the same generic Pack and persisted-executor contracts, with durable
+  Permit/Attempt/UNKNOWN state and an independent PaymentIntent Probe.
+- Run any additional non-synthetic implementation or isolated conformance
+  fixture through those contracts without enabling unsafe production execution
+  or requiring network credentials by default.
 - Keep any small conformance-only Pack out of the product registry.
 - Require two non-identical adapters/fixtures to pass the same conformance
   suite.
@@ -353,8 +374,9 @@ page. Browser lifecycle extraction is a later stage.
 Acceptance:
 
 - the second implementation imports no synthetic code or constants;
-- Stripe live execution remains fail-closed unless its durable recovery path is
-  genuinely complete;
+- Stripe live execution remains available only as an explicitly injected
+  test-mode composition with durable Permit/Attempt recovery and `sk_test_*`;
+  missing wiring or credentials remains fail-closed;
 - passing synthetic tests alone is not accepted as architecture evidence.
 
 ## Fault-Injection Matrix

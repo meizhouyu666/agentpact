@@ -97,28 +97,29 @@ Action execution is AgentPact-owned Playwright code even when this adapter is
 used. The direct `PlaywrightPageRuntime` has no Skyvern dependency, so callers
 can migrate immediately when they already own browser lifecycle/session setup.
 
-The synthetic Agent Run now routes its `precheck` and `confirm` Domain Pack
-steps through this loop with direct Playwright observation, deterministic Pack
-decisions, independent verification, and durable redacted events. Browser
-lifecycle still comes from the injected Skyvern browser manager, and the
-state-changing `submit` step still uses the legacy `ActionHandler` because it
-currently owns the proven Permit consumption and crash-safe Attempt boundary.
+The synthetic Agent Run test fixture routes its `precheck` and `confirm` Domain
+Pack steps through this loop with direct Playwright observation, deterministic
+Pack decisions, independent verification, and durable redacted events. Its
+state-changing `submit` step remains on the legacy `ActionHandler` boundary;
+this is test/reference composition and is not mounted by formal application
+startup. The explicit Stripe test-mode composition uses AgentPact's
+`PersistedBrowserExecutor` for the hosted submit and independent result probe.
 Removing Forge routes, workflows, Task/Step persistence, or `ActionHandler`
-would therefore still be premature.
+from the legacy product shell would therefore still be premature.
 
 ## Remaining Extraction Step
 
-`PlaywrightBrowserSessionFactory` now provides the narrow AgentPact-owned
-session/lifecycle seam and the direct runtime provides the current observation
-evidence capabilities. Production callers still need to migrate their browser
-manager setup to that seam, and the Skyvern compatibility adapter remains for
-callers that still depend on its scraper output. The remaining extraction is to
-port any additional Skyvern scraper behavior needed in production (for example
+`PlaywrightBrowserSessionFactory` provides the narrow AgentPact-owned
+session/lifecycle seam, and `PersistedBrowserExecutor` now validates freshness,
+consumes the Permit, commits the Attempt before the browser call, and exposes
+the exact Attempt to result-probe recovery for explicit composed callers such
+as Stripe. Production callers still need to migrate browser-manager setup to
+that seam, and the Skyvern compatibility adapter remains for callers that still
+depend on its scraper output. The remaining extraction is to port any
+additional Skyvern scraper behavior needed in production (for example
 iframe-aware interactable actions and split screenshots) without widening the
-AgentPact loop. Next, add an AgentPact-owned persisted execution runtime that
-validates freshness, consumes the Permit, commits the Attempt before the browser call, and exposes
-the exact Attempt to result-probe recovery. Only then switch the synthetic
-`submit` step away from `ActionHandler`. Once all callers use that path, remove
+AgentPact loop, then migrate the synthetic test fixture's `submit` step away
+from `ActionHandler`. Once all callers use the owned path, remove
 `SkyvernScraperRuntimeAdapter` and demonstrate that no AgentPact entrypoint
 imports `skyvern.forge.agent` or `skyvern.webeye.actions.handler` before
 deleting any legacy product shell.

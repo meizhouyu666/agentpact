@@ -1,7 +1,7 @@
 # AgentPact Phase 2 Master Status
 
 > Status: authoritative working status
-> Updated: 2026-08-28
+> Updated: 2026-09-03 (`d835bb5`)
 > Scope: Phase 2 governance foundation, audit hardening, and the controlled path to future enforce
 
 This document is the single operational entry point for Phase 2 work. Read it
@@ -9,9 +9,33 @@ before changing Phase 2 code or documentation. It resolves the distinction
 between architecture direction, interface-only foundations, live runtime
 behavior, and work that needs a separate approval.
 
-## 1. Non-Negotiable Runtime Boundary
+## 1. Current Runtime Boundary
 
-The only Skyvern-connected Phase 2 runtime behavior is audit observation:
+The current code has two deliberately separate execution surfaces:
+
+- `enterprise/browser_loop` owns the browser operation loop, direct Playwright
+  page runtime, `PlaywrightBrowserSessionFactory`, and the persisted
+  `Permit`/`Attempt` executor. `SkyvernScraperRuntimeAdapter` is a temporary
+  compatibility adapter for scraper observation only; it does not make Skyvern
+  the owner of AgentPact browser execution.
+- `stripe.payment` has an explicit governed test-mode hosted Checkout adapter.
+  With an injected `StripeHostedCheckoutFlow`, durable session factory, and
+  `sk_test_*` credentials, the hosted submit consumes a one-time
+  `ExecutionPermit`, persists an `ExecutionAttempt` before the browser call,
+  leaves uncertain outcomes in `UNKNOWN`, and resolves them only through the
+  independent PaymentIntent Probe. The adapter and its Permit/Attempt/UNKNOWN/
+  probe regression tests are implemented, but this is still a test-mode
+  candidate, not a production Pack.
+
+Generic `AgentRunService`, routes, and Pack runtime contracts are available as
+composable interfaces. Formal `skyvern/forge/api_app.py` startup does not mount
+a fully composed Agent Run service; the Synthetic Agent Run composition exists
+only in test fixtures. `GOVERNANCE_MODE=enforce` remains configuration-rejected,
+and no generic ForgeAgent-to-AgentPact production path is enabled.
+
+### Legacy Phase 2 audit boundary
+
+The legacy Skyvern-connected Phase 2 path remains audit observation:
 
 ```text
 Skyvern Task / Step
@@ -24,18 +48,21 @@ Skyvern Task / Step
 it available, silently degrade it to Phase 1 behavior, or add a tenant,
 workflow, or environment bypass.
 
-The following actions require an explicit future approval and are currently
-forbidden:
+The following production-facing actions require an explicit future approval and
+remain forbidden:
 
-- connecting CapabilityGrant, BusinessPlan, or ExecutionWorkOrder to ForgeAgent;
-- connecting Governor, Permit, Approval, Attempt, or ResultProbe to ActionHandler;
-- creating, assuming, or simulating a production Domain Pack or financial
-  business fact;
-- enabling approval-recovery execution or a browser retry driven by Phase 2;
+- connecting generic CapabilityGrant, BusinessPlan, or ExecutionWorkOrder to
+  ForgeAgent;
+- enabling global `enforce`, approval-recovery execution, or a browser retry
+  driven by the legacy Phase 2 path;
+- installing or declaring a production Pack without adopter-owned facts,
+  credentials, probes, controls, and scoped approval;
 - treating a synthetic policy outcome as a live authorization decision.
 
-Skyvern remains the sole browser executor. Constrained planning contracts and
-domain logic must never become a second browser automation loop.
+Legacy Skyvern remains the executor for its existing product paths. AgentPact's
+owned browser loop is the explicit execution boundary for composed callers, and
+constrained planning contracts and domain logic must not create another browser
+automation loop.
 
 The isolated synthetic application may also persist an audit-only admission
 aggregate and redacted pending outbox when an allowlisted repository is
@@ -53,17 +80,18 @@ call a browser/business transition.
 | BusinessPlan / WorkOrder | Interface only | Request/input/resource/version binding and per-step Work Order validation exist, but no ForgeAgent adapter is connected. |
 | Governed Task admission | Synthetic persistence, audit-only | `ent_007` atomically stores an allowlisted non-runnable aggregate plus redacted pending outbox; only the injected synthetic API calls it and no Skyvern Task is published. |
 | L0--L4 recovery | Interface only | Classification and replay fixtures exist; Skyvern keeps its existing recovery behavior. |
-| Observation / fallback policy | Dormant handler integration | Observation evidence remains offline; ExecutionProfile now constrains the future governed ActionHandler branch without changing normal `off/audit` execution. |
+| Legacy observation / fallback policy | Dormant handler integration | Legacy Skyvern observation evidence remains audit-only; ExecutionProfile constrains the future governed ActionHandler branch without changing normal `off/audit` execution. AgentPact-owned runtime observation is tracked separately below. |
 | Execution-entry sealing | 6 of 6 known families sealed | Handler/CUA mechanisms require profile, authorization, fresh evidence, and Attempt ordering; governed scripts reject enforce; cached/speculative state is not reused in enforce; SDK/direct callers have route-or-reject proof. |
 | Governed dry-run | Offline only | Validates Contract, Grant, BusinessPlan, WorkOrder, Domain-Pack business binding, observation, and typed Action policy into redacted evidence; it has no executor callback and cannot issue a Permit. |
 | Domain Pack Contract Catalog | Offline reference only | Holds immutable SDK contracts outside the active `DomainPackRegistry`; no external or domain-specific contract is installed, discoverable, or executable. |
 | Pack SDK and static Conformance Kit | Offline complete | M2 provides immutable SDK authoring shapes, deterministic versioned reports, invalid-Pack fixtures, complete fact/evidence binding checks, and static runtime-import exclusion. It has no runtime caller. |
 | Synthetic browser audit collector | Active, audit-only | Reads the isolated synthetic page's semantic DOM and screenshot, then emits a redacted test manifest; it never executes an Action. |
 | PendingAction / approval state | Persistence foundation | Models, state services, and round-history tests exist; no browser execution path invokes them. |
-| Permit / Attempt / UNKNOWN | Dormant handler boundary | The authorization path persists Attempt state around a browser call, but no runtime caller can issue and pass it to ActionHandler. |
+| Permit / Attempt / UNKNOWN | Active in explicit Stripe composition; dormant for generic legacy paths | `PersistedBrowserExecutor` persists Permit/Attempt ordering, leaves external writes `UNKNOWN`, and exposes the exact checkpoint for an independent probe. Generic ForgeAgent and formal app startup do not call this path. |
 | M4 governed browser proof | Accepted test evidence | One process-isolated synthetic ActionHandler path proves durable `EXECUTING -> UNKNOWN -> CONFIRMED`, independent probe confirmation, one commit, no replay, and complete cleanup. It is not runtime wiring. |
 | M5 developer/release experience | Implemented for review; now DONE/PASS locally | One cross-platform Python CLI, canonical release-report schema, Ubuntu CI, manual/release Windows smoke, public guide, and attribution are independently accepted at HEAD `d1c2587b2b03ae107429e1cd131dd5bc5082c390`; final review SHA-256 `d73196352e8f06512d69fc92a86127f19e370c11ffaf31f67183a39c55153707`. Publication has not occurred. |
-| Stripe test-mode hosted Checkout | Explicit smoke only | `live_browser.py` can create a real Stripe test Checkout Session, drive `checkout.stripe.com` with the 4242 test card, and verify the resulting PaymentIntent through the independent API Probe. It requires an environment `sk_test_*`, is not a governed M10 runtime or production Pack, and is never part of default tests. |
+| AgentPact browser operation loop | Active runtime (explicit composition) | AgentPact-owned loop, direct Playwright runtime, session factory, and persisted executor; `SkyvernScraperRuntimeAdapter` remains a temporary scraper compatibility layer. |
+| Stripe test-mode hosted Checkout | Active runtime (explicit governed test-mode composition) | `live_browser.py` can create a real Stripe test Checkout Session, drive `checkout.stripe.com` with the 4242 test card, persist Permit/Attempt and `UNKNOWN`, and resolve through the independent PaymentIntent Probe. It requires injected durable composition and `sk_test_*`, is not a production Pack, and is never part of default tests. |
 | Enforce | Disabled | Must remain disabled until all future gates in Section 7 are met. |
 
 ### Milestone state matrix
@@ -81,7 +109,7 @@ The following labels describe implementation state, not product readiness:
 | M7 Native Agent loop | Interface-only | Native execution contracts remain isolated |
 | M8 Sequential Agent loop | Interface-only | Journal/recovery contracts; no automatic UNKNOWN replay |
 | M9 Model-safe Planner | Offline | Deterministic proposal validation and fixtures |
-| M10 Agent Run | Active runtime | Recorded adapter only; Stripe hosted Checkout is not wired through durable Attempt/Permit recovery |
+| M10 Agent Run | Interface-only at formal app boundary | Generic Agent Run contracts/routes remain available; Synthetic composition is test-only and not mounted by formal application startup. Stripe's governed adapter is an explicit Pack composition, not a fully composed platform service. |
 | M11 Operations workbench | Interface-only | Safe projections and provider composition contracts |
 | M12 Evaluation and traces | Offline | Recorded evaluation and redacted, non-authoritative traces |
 
@@ -117,10 +145,17 @@ These achievements are foundations, not evidence that enforce is implemented.
 
 ## 4. Completed Work Packages: Audit Hardening and Pre-Enforce Closure
 
-This is the only approved implementation direction before a business boundary
-is selected. It may improve evidence quality, observability, testability, and
-data safety, but may not alter Action selection, browser execution, or policy
-outcomes.
+The following work-package narrative records the earlier legacy Phase 2
+audit/offline closure. Its statements about the absence of runtime callers apply
+to the legacy Skyvern/ForgeAgent path; they do not retract the AgentPact-owned
+browser loop or the explicitly composed Stripe test-mode adapter described in
+Section 1 and the current-state matrix above.
+
+For the legacy Phase 2 workstream, this remains the only approved direction
+before a production business boundary is selected. It may improve evidence
+quality, observability, testability, and data safety, but may not alter the
+legacy Action selection or policy outcomes. Explicitly composed test-mode
+adapters are tracked in the current-status sections above.
 
 ### P0: Finish Audit Safety and Persistence Closure
 
@@ -284,11 +319,11 @@ event IDs and aggregate counts.
 | Capability and authorization | Interface foundation complete | Keep offline contracts stable; runtime wiring requires separate approval. |
 | Capability request, planning, and admission | Synthetic persistence foundation | Keep request/Grant/Plan/WorkOrder bindings stable; no production caller, outbox publisher, or Skyvern Task publication. |
 | L0--L4 recovery | Offline policy foundation | Expand synthetic fault corpus only. |
-| Semantic observation and evidence | Audit hardening complete; synthetic browser audit validated | Extend offline evidence fixtures and data-quality checks only; no live execution wiring. |
+| Semantic observation and evidence | Audit hardening complete; AgentPact runtime observation also implemented | Extend offline evidence fixtures and data-quality checks; explicit runtime callers require their own composition and remain outside formal app startup. |
 | Fallback policy | Six known families sealed | Keep all closure regressions stable and extend the inventory when a new side-effect caller is discovered. |
 | Evaluation, audit, replay | Synthetic reference harness complete | Extend replay and benchmark coverage; synthetic results are not compliance evidence. |
 | Domain Pack SDK / Contract Catalog | M3 reference conformance complete; M4 accepted as test evidence | Keep `synthetic.payment` outside the active registry/runtime and preserve the accepted no-replay proof. |
-| `stripe.payment` hosted Checkout adapter | Explicit smoke / test mode only | Run only through the explicit smoke command with a test key; preserve recorded mode, redacted evidence, independent PaymentIntent reads, and no-replay UNKNOWN handling. M10 live execution remains fail-closed until durable Attempt/Permit recovery is wired. |
+| `stripe.payment` hosted Checkout adapter | Explicit governed test mode only | Run only through explicit hosted-flow composition or the manual smoke command with a test key; preserve durable Permit/Attempt, redacted evidence, independent PaymentIntent reads, and no-replay UNKNOWN handling. It remains a test-mode candidate and not a production Pack. |
 | External production Domain Pack | None | Installation or runtime use requires adopter-supplied Q1--Q10, conformance evidence, and a separate scoped approval. |
 | Real enforce wiring | Deferred | Requires every Section 7 gate and a separate approval. |
 
@@ -330,12 +365,14 @@ Any future production Pack or real enforce change requires a separate review and
 The repository now distinguishes three different claims. `app.py` plus
 `store.py` is a self-built loopback checkout used only for recorded tests.
 `StripeApiResultProbe` is a real Stripe test API read when supplied a
-`sk_test_*` key. `live_browser.py` is the explicit real hosted Checkout smoke
-adapter and visits `https://checkout.stripe.com/c/...`; it must not be described
-as the loopback E2E or as a governed M10 runtime. The adapter fails closed for missing or rejected
-credentials, unknown page states, transport failures, and non-terminal Stripe
-statuses. It never replays a Checkout after `UNKNOWN`, and its evidence contains
-only redacted digests and state.
+`sk_test_*` key. `live_browser.py` is the explicit real hosted Checkout adapter
+and visits `https://checkout.stripe.com/c/...`; with its injected durable
+Attempt/Permit session it is a governed test-mode composition, not a production
+Pack or a fully mounted platform Agent Run service. The adapter fails closed for
+missing or rejected credentials, missing composition, unknown page states,
+transport failures, and non-terminal Stripe statuses. It never replays a
+Checkout after `UNKNOWN`, and its evidence contains only redacted digests and
+state.
 
 The disposable-PostgreSQL `alembic upgrade heads` rehearsal is complete.
 A production Domain Pack, real enforce wiring, runtime Planner/WorkOrder

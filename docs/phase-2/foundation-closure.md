@@ -1,8 +1,18 @@
 # Phase 2 Foundation Closure
 
+## Current calibration (`d835bb5`)
+
+This closure document describes the legacy Skyvern/ForgeAgent audit and offline
+foundation boundary. It does not retract the AgentPact-owned browser loop,
+`PlaywrightBrowserSessionFactory`, or `PersistedBrowserExecutor` used by
+explicitly composed callers such as the Stripe test-mode adapter. The formal
+application still does not mount a fully composed `AgentRunService`, and the
+Synthetic Agent Run composition remains test-fixture-only.
+
 ## Current Runtime Boundary
 
-The only Skyvern-connected Phase 2 runtime write occurs when
+The only Skyvern-connected Phase 2 runtime write in this legacy foundation
+occurs when
 `GOVERNANCE_MODE=audit`. After Skyvern has already produced typed Action
 candidates, `ForgeAgent` records one
 `action_candidate` event per candidate and then continues through the unchanged
@@ -65,8 +75,9 @@ speculative state, disables speculative generation, and returns no legacy
 cached Actions before database retrieval. Generated/direct clients have a
 cross-layer route-or-reject regression covering the script HTTP route, shared
 service guard, and `/sdk/actions` adapter guard. These are dormant or
-enforce-only controls; no production caller, Permit issuer, or Domain Pack was
-connected.
+enforce-only controls for the legacy path; no generic production caller or
+production Pack was connected. The explicit Stripe test-mode composition is
+documented above and uses its own AgentPact-owned persisted boundary.
 
 ## PendingAction Data Closure
 
@@ -85,14 +96,22 @@ dependencies of the audit observer or the browser execution path:
 - CapabilityResolver and CapabilityGrant;
 - BusinessPlan and ExecutionWorkOrder;
 - TrustedTaskCreationSnapshot and versioned interface serialization;
-- observation-evidence policy (ExecutionProfile is consumed only by the dormant
-  governed ActionHandler branch);
+- observation-evidence policy (ExecutionProfile remains dormant on the legacy
+  ActionHandler branch; AgentPact-owned composed runtimes consume it at their
+  explicit boundary);
 - L0--L4 recovery decisions;
-- permit, execution-attempt, approval-pause, and result-probe models.
+- permit, execution-attempt, approval-pause, and result-probe models outside
+  explicit composed runtimes such as Stripe test mode.
 
 The synthetic policy analyzer remains an offline regression oracle. Its example
 operations and outcomes are not emitted by the runtime audit event and do not
 define a production Domain Pack or authorization rule.
+
+The explicit `stripe.payment` hosted Checkout adapter is a separate test-mode
+composition: it uses AgentPact's browser loop and persisted Permit/Attempt
+boundary, leaves uncertain writes in `UNKNOWN`, and resolves them through the
+independent Stripe PaymentIntent Probe. It is not a production Pack and is not
+mounted by formal application startup.
 
 CapabilityGrant expiry is now deterministic at the interface boundary: every
 grant has a positive resolver TTL, is active only before its exclusive

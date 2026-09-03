@@ -5,8 +5,12 @@
 This document freezes the versioned contracts and their isolated synthetic
 admission-persistence adapter. It creates no Planner, ForgeAgent, browser,
 permit, approval, recovery, production Task-creation, or enforce caller. The
-only Skyvern-connected Phase 2 runtime path remains audit-only candidate
-observation.
+legacy Skyvern/ForgeAgent-connected Phase 2 runtime path remains audit-only
+candidate observation. Separately, `enterprise/browser_loop` now provides an
+AgentPact-owned browser runtime/session boundary, and `stripe.payment` has an
+explicit governed test-mode composition with durable Permit/Attempt/UNKNOWN/
+probe handling. Those explicit compositions are not created by this contract
+document or mounted by formal application startup.
 
 The first 2026-07-25 slice added deterministic authorization, interaction, and
 admission contracts. The approved follow-on adds an audit-only SQLAlchemy
