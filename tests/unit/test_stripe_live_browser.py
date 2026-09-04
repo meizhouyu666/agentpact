@@ -10,6 +10,8 @@ from enterprise.domains.stripe_payment.live_browser import (
     StripeHostedCheckoutError,
     StripeHostedCheckoutFlow,
     StripeHostedCheckoutSession,
+    StripeTestApiClient,
+    _browser_completion_detected,
     _persist_probe_context,
     derive_live_idempotency_key,
     parse_stripe_checkout_url,
@@ -579,3 +581,119 @@ async def test_unknown_hosted_page_fails_closed_without_browser_replay(monkeypat
 def test_test_key_prefix_without_a_secret_is_rejected():
     with pytest.raises(RuntimeError, match="sk_test"):
         validate_stripe_test_key("sk_test_")
+
+
+def test_success_requires_the_configured_redirect_not_hosted_page_text():
+    hosted_url = "https://checkout.stripe.com/c/pay/cs_test_123"
+    success_url = "https://example.com/agentpact-stripe-success?session_id={CHECKOUT_SESSION_ID}"
+    assert not _browser_completion_detected(hosted_url, success_url)
+    assert _browser_completion_detected(
+        "https://example.com/agentpact-stripe-success?session_id=cs_test_123",
+        success_url,
+    )
+    # A hosted page may display this text before Stripe has completed the Session;
+    # text is intentionally not an input to the completion predicate.
+    assert not _browser_completion_detected("Payment successful", success_url)
+
+
+def test_retrieve_checkout_session_preserves_open_unpaid_null_payment_intent(monkeypatch: pytest.MonkeyPatch):
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {
+                "id": "cs_test_open_123",
+                "status": "open",
+                "payment_status": "unpaid",
+                "payment_intent": None,
+            }
+
+    calls = []
+
+    def request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        return Response()
+
+    monkeypatch.setattr("enterprise.domains.stripe_payment.live_browser.httpx.request", request)
+    session = StripeTestApiClient(secret_key="sk_test_123").retrieve_checkout_session(session_id="cs_test_open_123")
+
+    assert session.payment_intent_id is None
+    assert session.status == "open"
+    assert session.payment_status == "unpaid"
+    assert calls[0][2]["params"] == {"expand[]": "payment_intent"}
+
+
+@pytest.mark.asyncio
+async def test_open_checkout_session_after_misleading_browser_text_fails_closed_without_probe(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_123")
+
+    class OpenSessionApi(FakeCheckoutApi):
+        def retrieve_checkout_session(self, *, session_id: str):
+            self.retrieved += 1
+            return StripeHostedCheckoutSession(
+                session_id=session_id,
+                checkout_url="https://checkout.stripe.com/c/pay/cs_test_123",
+                payment_intent_id=None,
+                status="open",
+                payment_status="unpaid",
+            )
+
+    async def misleading_browser(_url: str, *, success_url: str) -> str:
+        # This simulates a page that says success without Stripe redirecting.
+        return "completed"
+
+    class ExplodingProbe:
+        def __init__(self, **_kwargs):
+            raise AssertionError("PaymentIntent probe must not run without Stripe's PaymentIntent id")
+
+    monkeypatch.setattr("enterprise.domains.stripe_payment.live_browser.StripeApiResultProbe", ExplodingProbe)
+    api = OpenSessionApi()
+    flow = StripeHostedCheckoutFlow(api_client_factory=lambda _key: api, browser_runner=misleading_browser)
+
+    with pytest.raises(StripeHostedCheckoutError, match="did not return a PaymentIntent"):
+        await flow.execute(facts=FACTS, idempotency_key="stripe-payment-live-v1:open-session")
+    assert api.created == 1
+    assert api.retrieved == 1
+
+
+@pytest.mark.asyncio
+async def test_governed_open_unpaid_session_keeps_unknown_attempt_bound_to_session(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_123")
+    store = _ExecutionStore()
+
+    class OpenSessionApi(FakeCheckoutApi):
+        def retrieve_checkout_session(self, *, session_id: str):
+            self.retrieved += 1
+            return StripeHostedCheckoutSession(
+                session_id=session_id,
+                checkout_url="https://checkout.stripe.com/c/pay/cs_test_123",
+                status="open",
+                payment_status="unpaid",
+            )
+
+    async def browser(_url: str, *, success_url: str) -> str:
+        return "completed"
+
+    api = OpenSessionApi()
+    flow = StripeHostedCheckoutFlow(api_client_factory=lambda _key: api, browser_runner=browser)
+    key = derive_live_idempotency_key(request_id="governed-open", payment_intent_id=FACTS.payment_intent_id)
+
+    with pytest.raises(StripeHostedCheckoutError, match="retry the exact Checkout Session"):
+        await flow.execute_governed(
+            facts=FACTS,
+            idempotency_key=key,
+            task_id="task-governed-open",
+            step_id="step-governed-open",
+            contract_id="contract-governed-open",
+            organization_id="stripe-test-tenant",
+            session_factory=store,
+            integrity_secret="stripe-governed-hmac",
+            runtime_factory=lambda _url: _CheckoutRuntime(),
+        )
+
+    assert store.attempts[0].status == ExecutionAttemptStatus.UNKNOWN.value
+    assert store.attempts[0].result_probe["resource_id"] is None
+    assert store.attempts[0].result_probe["metadata"]["checkout_session_id"] == "cs_test_123"
+    assert api.retrieved == 1

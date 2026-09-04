@@ -131,6 +131,8 @@ class StripeHostedCheckoutSession(BaseModel):
     session_id: str = Field(min_length=1)
     checkout_url: str = Field(min_length=1)
     payment_intent_id: str | None = None
+    status: str | None = None
+    payment_status: str | None = None
 
 
 class StripeHostedCheckoutEvidence(BaseModel):
@@ -231,16 +233,19 @@ class StripeTestApiClient:
         )
         payment_intent = payload.get("payment_intent")
         payment_intent_id = payment_intent.get("id") if isinstance(payment_intent, dict) else payment_intent
-        if not isinstance(payment_intent_id, str) or not payment_intent_id.startswith("pi_"):
-            raise StripeHostedCheckoutError("Completed Stripe Checkout Session did not expose a PaymentIntent")
-        try:
-            validate_payment_intent_id(payment_intent_id)
-        except StripeProbeError as exc:
-            raise StripeHostedCheckoutError("Completed Stripe Checkout Session exposed an invalid PaymentIntent") from exc
+        if payment_intent_id is not None:
+            if not isinstance(payment_intent_id, str) or not payment_intent_id.startswith("pi_"):
+                raise StripeHostedCheckoutError("Stripe Checkout Session exposed an invalid PaymentIntent")
+            try:
+                validate_payment_intent_id(payment_intent_id)
+            except StripeProbeError as exc:
+                raise StripeHostedCheckoutError("Stripe Checkout Session exposed an invalid PaymentIntent") from exc
         return StripeHostedCheckoutSession(
             session_id=str(payload.get("id", session_id)),
             checkout_url=str(payload.get("url", "https://checkout.stripe.com/c/unknown")),
             payment_intent_id=payment_intent_id,
+            status=payload.get("status") if isinstance(payload.get("status"), str) else None,
+            payment_status=payload.get("payment_status") if isinstance(payload.get("payment_status"), str) else None,
         )
 
     def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
@@ -272,6 +277,38 @@ class BrowserRunner(Protocol):
     async def __call__(self, checkout_url: str, *, success_url: str) -> str: ...
 
 
+def _find_installed_chromium() -> str | None:
+    """Locate an installed Chromium so launch does not require a fresh download.
+
+    Mirrors the project's own discovery (``tests/e2e/m4_synthetic_support``)
+    without importing test code: honor ``FINRPA_CHROMIUM_EXECUTABLE`` and the
+    standard Playwright browser roots. Returns None to let Playwright use its
+    pinned default (which then reports the usual install hint if absent).
+    """
+    override = os.environ.get("FINRPA_CHROMIUM_EXECUTABLE")
+    if override and Path(override).is_file():
+        return str(Path(override).resolve())
+    roots: list[Path] = []
+    browser_root = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if browser_root and browser_root != "0":
+        roots.append(Path(browser_root))
+    elif os.name == "nt" and os.environ.get("LOCALAPPDATA"):
+        roots.append(Path(os.environ["LOCALAPPDATA"]) / "ms-playwright")
+    else:
+        roots.append(Path.home() / ".cache" / "ms-playwright")
+    patterns = (
+        "chromium-*/chrome-win/chrome.exe",
+        "chromium-*/chrome-linux/chrome",
+        "chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+    )
+    for root in roots:
+        for pattern in patterns:
+            for candidate in sorted(root.glob(pattern), reverse=True):
+                if candidate.is_file():
+                    return str(candidate.resolve())
+    return None
+
+
 async def run_stripe_test_checkout(checkout_url: str, *, success_url: str, headless: bool = True) -> str:
     """Complete the Stripe hosted page with Stripe's documented 4242 test card."""
     parse_stripe_checkout_url(checkout_url)
@@ -281,8 +318,13 @@ async def run_stripe_test_checkout(checkout_url: str, *, success_url: str, headl
     except ImportError as exc:
         raise StripeHostedCheckoutError("Playwright is required for the explicit live browser flow") from exc
 
+    launch_options: dict[str, object] = {"headless": headless}
+    installed = _find_installed_chromium()
+    if installed is not None:
+        launch_options["executable_path"] = installed
+
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=headless)
+        browser = await playwright.chromium.launch(**launch_options)
         try:
             page = await browser.new_page()
             await page.goto(checkout_url, wait_until="domcontentloaded", timeout=30_000)
@@ -304,10 +346,14 @@ async def run_stripe_test_checkout(checkout_url: str, *, success_url: str, headl
             )
             await _fill_optional_checkout_field(page, ["input[autocomplete='email']", "input[type='email']"], "stripe-test@example.com")
             await _click_payment_button(page)
-            for _ in range(10):
+            for _ in range(25):
                 current_url = page.url
-                body_text = (await page.locator("body").inner_text()).lower()
-                if _success_redirect(current_url, success_url) or "payment successful" in body_text or "thank you" in body_text:
+                # Stripe's page text is non-authoritative and can show a success
+                # message while the Session is still open/unpaid. Only the
+                # configured redirect is a browser completion signal; the
+                # independent Checkout Session/PaymentIntent reads remain the
+                # business-result authority.
+                if _browser_completion_detected(current_url, success_url):
                     return "completed"
                 _require_hosted_checkout_page(current_url)
                 await page.wait_for_timeout(1_000)
@@ -388,13 +434,19 @@ class StripeHostedCheckoutBrowserRuntime:
 
 
 async def _fill_checkout_field(page: Any, selectors: list[str], value: str) -> None:
+    """Fill one card/billing field, waiting for Stripe's JS-rendered form.
+
+    Stripe's hosted Checkout is a heavy client-side app; the form fields are
+    rendered well after ``domcontentloaded``, so each candidate is awaited
+    with a generous visibility timeout instead of a short poll.
+    """
     for frame in [page, *page.frames]:
         for selector in selectors:
             locator = frame.locator(selector).first
             try:
-                if await locator.is_visible(timeout=1_000):
-                    await locator.fill(value)
-                    return
+                await locator.wait_for(state="visible", timeout=30_000)
+                await locator.fill(value)
+                return
             except Exception:
                 continue
     raise StripeHostedCheckoutError("Stripe hosted checkout card field was not found")
@@ -411,9 +463,9 @@ async def _click_payment_button(page: Any) -> None:
     for selector in ["button[type='submit']", "button:has-text('Pay')", "button:has-text('Subscribe')"]:
         button = page.locator(selector).first
         try:
-            if await button.is_visible(timeout=1_000):
-                await button.click()
-                return
+            await button.wait_for(state="visible", timeout=15_000)
+            await button.click()
+            return
         except Exception:
             continue
     raise StripeHostedCheckoutError("Stripe hosted checkout submit button was not found")
@@ -422,6 +474,15 @@ async def _click_payment_button(page: Any) -> None:
 def _success_redirect(current_url: str, success_url: str) -> bool:
     expected = success_url.split("{CHECKOUT_SESSION_ID}", 1)[0]
     return current_url.startswith(expected)
+
+
+def _browser_completion_detected(current_url: str, success_url: str) -> bool:
+    """Return true only for Stripe's configured success redirect.
+
+    Hosted page text is intentionally excluded: it is presentation evidence,
+    not an authoritative Checkout Session or PaymentIntent state transition.
+    """
+    return _success_redirect(current_url, success_url)
 
 
 def _require_hosted_checkout_page(url: str) -> None:
