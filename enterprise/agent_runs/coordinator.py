@@ -23,6 +23,8 @@ class AgentRunResultCoordinator:
                 return None
             if active is None:
                 raise GovernedPlanError("Completed Pack result has no active Agent Run step")
+            if result.step_id != active.native_step_id:
+                raise GovernedPlanError("Completed Pack result does not match the active Agent Run step")
             completed = active.model_copy(update={"state": PlanStepState.COMPLETED})
             remaining = checkpoint.remaining_suffix
             next_active = remaining[0].model_copy(update={"state": PlanStepState.ACTIVE}) if remaining else None

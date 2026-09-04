@@ -100,7 +100,7 @@ def test_pending_advance_becomes_probe_blocked_with_exact_checkpoint():
 def test_completed_advance_and_confirmed_probe_complete_the_generic_plan():
     completed, transition = AgentRunResultCoordinator.advance(
         _checkpoint(),
-        PackAdvanceResult(status=PackAdvanceStatus.COMPLETED, run_id="run-coordinator"),
+        PackAdvanceResult(status=PackAdvanceStatus.COMPLETED, run_id="run-coordinator", step_id="native-step"),
     ) or (None, None)
     assert transition is PlanJournalTransition.PLAN_COMPLETED
     assert completed.state is PlanRunState.COMPLETED
@@ -148,6 +148,15 @@ def test_confirmed_probe_advances_the_remaining_suffix():
     assert resolved.active_step is not None
     assert resolved.active_step.native_task_id == "native-task-2"
     assert len(resolved.completed_prefix) == 1
+
+
+@pytest.mark.parametrize("step_id", [None, "native-other"])
+def test_completed_advance_rejects_missing_or_substituted_step(step_id: str | None):
+    with pytest.raises(GovernedPlanError, match="does not match"):
+        AgentRunResultCoordinator.advance(
+            _checkpoint(),
+            PackAdvanceResult(status=PackAdvanceStatus.COMPLETED, run_id="run-coordinator", step_id=step_id),
+        )
 
 
 def test_coordinator_rejects_substituted_execution_checkpoint():
