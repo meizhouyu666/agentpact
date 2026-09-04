@@ -75,6 +75,37 @@ class StripeLiveConfigurationError(RuntimeError):
 class StripeHostedCheckoutError(RuntimeError):
     """The hosted checkout could not be completed or identified safely."""
 
+    def __init__(self, message: str, *, diagnostic: "StripeBrowserDiagnostic | None" = None) -> None:
+        super().__init__(message)
+        self.diagnostic = diagnostic
+
+
+class StripeBrowserDiagnostic(BaseModel):
+    """Small, redacted browser failure summary suitable for reports."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    stage: str
+    reason_code: str
+    final_url_summary: str | None = None
+    error_type: str | None = None
+    session_status: str | None = None
+    payment_status: str | None = None
+    payment_intent_present: bool | None = None
+    browser_stage: str | None = None
+    browser_reason_code: str | None = None
+
+
+class StripeBrowserOutcome(str):
+    """String-compatible browser result carrying optional diagnostics."""
+
+    diagnostic: StripeBrowserDiagnostic
+
+    def __new__(cls, state: str, diagnostic: StripeBrowserDiagnostic):
+        value = str.__new__(cls, state)
+        value.diagnostic = diagnostic
+        return value
+
 
 def validate_stripe_test_key(key: str | None) -> str:
     """Accept only a non-empty Stripe test secret; never accept a live key."""
@@ -148,6 +179,14 @@ class StripeHostedCheckoutEvidence(BaseModel):
     probe_status: ResultProbeStatus
     captured_at: datetime
     evidence_path: str | None = None
+    session_status: str | None = None
+    payment_status: str | None = None
+    payment_intent_present: bool = False
+    browser_stage: str | None = None
+    browser_reason_code: str | None = None
+    browser_final_url_summary: str | None = None
+    browser_error_type: str | None = None
+    probe_reason_code: str | None = None
 
 
 class StripeHostedCheckoutResult(BaseModel):
@@ -159,6 +198,7 @@ class StripeHostedCheckoutResult(BaseModel):
     evidence: StripeHostedCheckoutEvidence
     execution_checkpoint: ExecutionCheckpoint | None = None
     execution_status: ResultProbeStatus | None = None
+    diagnostic: StripeBrowserDiagnostic | None = None
 
 
 class GovernedCheckoutRuntimeFactory(Protocol):
@@ -312,7 +352,41 @@ def _find_installed_chromium() -> str | None:
     return None
 
 
-async def run_stripe_test_checkout(checkout_url: str, *, success_url: str, headless: bool = True) -> str:
+def _url_summary(url: str | None, *, success_url: str | None = None) -> str | None:
+    if not url:
+        return None
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return "invalid_url"
+    if parsed.hostname == STRIPE_CHECKOUT_HOST:
+        return "checkout.stripe.com:hosted_checkout"
+    if success_url and _success_redirect(url, success_url):
+        return f"{parsed.hostname or 'unknown'}:success_redirect"
+    if parsed.hostname == urlparse(DEFAULT_CANCEL_URL).hostname:
+        return f"{parsed.hostname}:cancel_redirect"
+    return f"{parsed.hostname or 'unknown'}:other_redirect"
+
+
+def _browser_diagnostic(
+    *, stage: str, reason_code: str, url: str | None = None, success_url: str | None = None,
+    error: BaseException | None = None, session: StripeHostedCheckoutSession | None = None,
+    browser: StripeBrowserDiagnostic | None = None,
+) -> StripeBrowserDiagnostic:
+    return StripeBrowserDiagnostic(
+        stage=stage,
+        reason_code=reason_code,
+        final_url_summary=_url_summary(url, success_url=success_url),
+        error_type=type(error).__name__ if error is not None else None,
+        session_status=session.status if session else None,
+        payment_status=session.payment_status if session else None,
+        payment_intent_present=session.payment_intent_id is not None if session else None,
+        browser_stage=browser.stage if browser else None,
+        browser_reason_code=browser.reason_code if browser else None,
+    )
+
+
+async def run_stripe_test_checkout(checkout_url: str, *, success_url: str, headless: bool = True) -> StripeBrowserOutcome:
     """Complete the Stripe hosted page with Stripe's documented 4242 test card."""
     parse_stripe_checkout_url(checkout_url)
     try:
@@ -330,25 +404,22 @@ async def run_stripe_test_checkout(checkout_url: str, *, success_url: str, headl
         browser = await playwright.chromium.launch(**launch_options)
         try:
             page = await browser.new_page()
-            await page.goto(checkout_url, wait_until="domcontentloaded", timeout=30_000)
-            _require_hosted_checkout_page(page.url)
-            await _fill_checkout_field(
-                page,
-                ["input[autocomplete='cc-number']", "input[name='cardnumber']", "input[name='cardNumber']", "input[placeholder*='Card number']"],
-                "4242424242424242",
-            )
-            await _fill_checkout_field(
-                page,
-                ["input[autocomplete='cc-exp']", "input[name='exp-date']", "input[name='cardExpiry']", "input[placeholder*='MM']"],
-                "12/34",
-            )
-            await _fill_checkout_field(
-                page,
-                ["input[autocomplete='cc-csc']", "input[name='cvc']", "input[name='cardCvc']", "input[placeholder*='CVC']"],
-                "123",
-            )
-            await _fill_optional_checkout_field(page, ["input[autocomplete='email']", "input[type='email']"], "stripe-test@example.com")
-            await _click_payment_button(page)
+            try:
+                await page.goto(checkout_url, wait_until="domcontentloaded", timeout=30_000)
+                _require_hosted_checkout_page(page.url)
+            except Exception as exc:
+                return StripeBrowserOutcome("unknown", _browser_diagnostic(stage="navigation", reason_code="browser_navigation_error", url=page.url, success_url=success_url, error=exc))
+            try:
+                await _fill_checkout_field(page, ["input[autocomplete='cc-number']", "input[name='cardnumber']", "input[name='cardNumber']", "input[placeholder*='Card number']"], "4242424242424242")
+                await _fill_checkout_field(page, ["input[autocomplete='cc-exp']", "input[name='exp-date']", "input[name='cardExpiry']", "input[placeholder*='MM']"], "12/34")
+                await _fill_checkout_field(page, ["input[autocomplete='cc-csc']", "input[name='cvc']", "input[name='cardCvc']", "input[placeholder*='CVC']"], "123")
+                await _fill_optional_checkout_field(page, ["input[autocomplete='email']", "input[type='email']"], "stripe-test@example.com")
+            except Exception as exc:
+                return StripeBrowserOutcome("unknown", _browser_diagnostic(stage="field", reason_code="browser_field_error", url=page.url, success_url=success_url, error=exc))
+            try:
+                await _click_payment_button(page)
+            except Exception as exc:
+                return StripeBrowserOutcome("unknown", _browser_diagnostic(stage="submit", reason_code="browser_submit_error", url=page.url, success_url=success_url, error=exc))
             for _ in range(25):
                 current_url = page.url
                 # Stripe's page text is non-authoritative and can show a success
@@ -357,12 +428,16 @@ async def run_stripe_test_checkout(checkout_url: str, *, success_url: str, headl
                 # independent Checkout Session/PaymentIntent reads remain the
                 # business-result authority.
                 if _browser_completion_detected(current_url, success_url):
-                    return "completed"
-                _require_hosted_checkout_page(current_url)
+                    return StripeBrowserOutcome("completed", _browser_diagnostic(stage="redirect", reason_code="browser_success_redirect", url=current_url, success_url=success_url))
+                try:
+                    _require_hosted_checkout_page(current_url)
+                except Exception as exc:
+                    return StripeBrowserOutcome("unknown", _browser_diagnostic(stage="redirect", reason_code="browser_unexpected_redirect", url=current_url, success_url=success_url, error=exc))
                 await page.wait_for_timeout(1_000)
-            return "unknown"
+            return StripeBrowserOutcome("unknown", _browser_diagnostic(stage="redirect", reason_code="browser_redirect_timeout", url=page.url, success_url=success_url))
         except PlaywrightTimeoutError as exc:
-            raise StripeHostedCheckoutError("Stripe hosted checkout timed out or showed an unknown page") from exc
+            diagnostic = _browser_diagnostic(stage="navigation", reason_code="browser_timeout", url=locals().get("page").url if "page" in locals() else None, success_url=success_url, error=exc)
+            return StripeBrowserOutcome("unknown", diagnostic)
         finally:
             await browser.close()
 
@@ -539,32 +614,52 @@ class StripeHostedCheckoutFlow:
             cancel_url=cancel_url,
         )
         parse_stripe_checkout_url(session.checkout_url)
-        browser_state = await self._browser_runner(session.checkout_url, success_url=success_url)
+        try:
+            browser_result = await self._browser_runner(session.checkout_url, success_url=success_url)
+        except Exception as exc:
+            diagnostic = getattr(exc, "diagnostic", None) or _browser_diagnostic(stage="browser", reason_code="browser_runner_error", error=exc)
+            raise StripeHostedCheckoutError("Stripe hosted checkout browser runner failed", diagnostic=diagnostic) from exc
+        browser_state = str(browser_result)
+        diagnostic = getattr(browser_result, "diagnostic", None) or _browser_diagnostic(
+            stage="redirect" if browser_state == "completed" else "browser",
+            reason_code="browser_success_redirect" if browser_state == "completed" else "browser_unknown",
+        )
         completed_session = api.retrieve_checkout_session(session_id=session.session_id)
         if completed_session.session_id != session.session_id:
             raise StripeHostedCheckoutError("Stripe Checkout Session response id does not match the requested id")
         if not completed_session.payment_intent_id:
-            raise StripeHostedCheckoutError("Stripe hosted checkout did not return a PaymentIntent")
+            raise StripeHostedCheckoutError(
+                "Stripe hosted checkout did not return a PaymentIntent",
+                diagnostic=_browser_diagnostic(
+                    stage="session",
+                    reason_code="checkout_session_payment_intent_missing",
+                    session=completed_session,
+                    browser=diagnostic,
+                ),
+            )
         probe = StripeApiResultProbe(secret_key=key, api_base=getattr(api, "api_base", STRIPE_API_BASE))
-        probe_evidence = probe.probe(
-            resource_id=completed_session.payment_intent_id,
-            idempotency_key=idempotency_key,
-        )
+        try:
+            probe_evidence = probe.probe(resource_id=completed_session.payment_intent_id, idempotency_key=idempotency_key)
+        except StripeProbeError as exc:
+            raise StripeHostedCheckoutError(
+                "Stripe PaymentIntent probe failed closed",
+                diagnostic=_browser_diagnostic(stage="probe", reason_code="probe_stripe_api_error", error=exc),
+            ) from exc
         evidence = self._build_evidence(
             session=completed_session,
             browser_state=browser_state,
             probe=probe_evidence,
             idempotency_key=idempotency_key,
+            diagnostic=diagnostic,
         )
         if browser_state != "completed":
-            raise StripeHostedCheckoutError(
-                "Stripe hosted checkout ended in an unknown page state after the independent probe; no replay is allowed"
-            )
+            raise StripeHostedCheckoutError("Stripe hosted checkout ended in an unknown page state after the independent probe; no replay is allowed", diagnostic=diagnostic)
         result = StripeHostedCheckoutResult(
             session=completed_session,
             browser_state=browser_state,
             probe=probe_evidence,
             evidence=evidence,
+            diagnostic=diagnostic,
         )
         self._results[idempotency_key] = result
         return result
@@ -824,6 +919,7 @@ class StripeHostedCheckoutFlow:
         browser_state: str,
         probe: ResultProbeEvidence,
         idempotency_key: str,
+        diagnostic: StripeBrowserDiagnostic | None = None,
     ) -> StripeHostedCheckoutEvidence:
         evidence = StripeHostedCheckoutEvidence(
             session_id=session.session_id,
@@ -833,6 +929,14 @@ class StripeHostedCheckoutFlow:
             browser_state=browser_state,
             probe_status=probe.status,
             captured_at=datetime.now(timezone.utc),
+            session_status=session.status,
+            payment_status=session.payment_status,
+            payment_intent_present=session.payment_intent_id is not None,
+            browser_stage=diagnostic.stage if diagnostic else None,
+            browser_reason_code=diagnostic.reason_code if diagnostic else None,
+            browser_final_url_summary=diagnostic.final_url_summary if diagnostic else None,
+            browser_error_type=diagnostic.error_type if diagnostic else None,
+            probe_reason_code=probe.metadata.get("reason_code") if isinstance(probe.metadata, dict) else None,
         )
         if self._evidence_dir is None:
             return evidence

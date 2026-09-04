@@ -13,6 +13,7 @@ from enterprise.domains.stripe_payment.live_browser import (
     StripeTestApiClient,
     _browser_completion_detected,
     _persist_probe_context,
+    _url_summary,
     derive_live_idempotency_key,
     parse_stripe_checkout_url,
     stripe_test_key_from_environment,
@@ -634,12 +635,23 @@ async def test_unknown_hosted_page_fails_closed_without_browser_replay(monkeypat
 
     monkeypatch.setattr("enterprise.domains.stripe_payment.live_browser.StripeApiResultProbe", FakeProbe)
     flow = StripeHostedCheckoutFlow(api_client_factory=lambda _key: api, browser_runner=unknown_browser)
-    with pytest.raises(StripeHostedCheckoutError, match="no replay"):
+    with pytest.raises(StripeHostedCheckoutError, match="no replay") as caught:
         await flow.execute(facts=FACTS, idempotency_key="stripe-payment-live-v1:test")
 
     assert len(browser_calls) == 1
     assert api.created == 1
     assert api.retrieved == 1
+    assert caught.value.diagnostic is not None
+    assert caught.value.diagnostic.reason_code == "browser_unknown"
+
+
+def test_browser_url_summary_never_contains_checkout_token_or_query_data():
+    summary = _url_summary(
+        "https://checkout.stripe.com/c/pay/cs_test_secret?prefilled_email=person@example.com",
+    )
+    assert summary == "checkout.stripe.com:hosted_checkout"
+    assert "cs_test_secret" not in summary
+    assert "person@example.com" not in summary
 
 
 def test_test_key_prefix_without_a_secret_is_rejected():
@@ -716,10 +728,16 @@ async def test_open_checkout_session_after_misleading_browser_text_fails_closed_
     api = OpenSessionApi()
     flow = StripeHostedCheckoutFlow(api_client_factory=lambda _key: api, browser_runner=misleading_browser)
 
-    with pytest.raises(StripeHostedCheckoutError, match="did not return a PaymentIntent"):
+    with pytest.raises(StripeHostedCheckoutError, match="did not return a PaymentIntent") as caught:
         await flow.execute(facts=FACTS, idempotency_key="stripe-payment-live-v1:open-session")
     assert api.created == 1
     assert api.retrieved == 1
+    assert caught.value.diagnostic is not None
+    assert caught.value.diagnostic.stage == "session"
+    assert caught.value.diagnostic.reason_code == "checkout_session_payment_intent_missing"
+    assert caught.value.diagnostic.session_status == "open"
+    assert caught.value.diagnostic.payment_status == "unpaid"
+    assert caught.value.diagnostic.payment_intent_present is False
 
 
 @pytest.mark.asyncio

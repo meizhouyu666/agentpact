@@ -64,6 +64,7 @@ def test_recorded_probe_transport_failure_is_unknown():
 
     assert evidence.status is ResultProbeStatus.UNKNOWN
     assert "recorded transport failure" in evidence.reasons[0]
+    assert evidence.metadata["reason_code"] == "probe_network_or_stripe_api_error"
 
 
 def test_recorded_probe_missing_fixture_fails_closed():
@@ -102,3 +103,4 @@ def test_evidence_redacts_idempotency_key_value():
     assert "idempotency_key_digest" in evidence.metadata
     assert evidence.metadata["idempotency_key_digest"] != "stripe:pi_x"
     assert evidence.facts_hash is not None
+    assert evidence.metadata["reason_code"] == "payment_intent_succeeded"

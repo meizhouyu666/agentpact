@@ -43,6 +43,7 @@ from enterprise.domains.stripe_payment.result_probe import (
     StripeApiResultProbe,
 )
 from enterprise.domains.stripe_payment.live_browser import (
+    StripeHostedCheckoutError,
     StripeHostedCheckoutFlow,
     derive_live_idempotency_key,
     stripe_test_key_from_environment,
@@ -60,7 +61,12 @@ def _secret_key() -> str:
 
 def _probe_one(probe: StripeApiResultProbe, payment_intent_id: str, idempotency_key: str) -> None:
     evidence = probe.probe(resource_id=payment_intent_id, idempotency_key=idempotency_key)
-    print(json_round_trip(evidence.model_dump(mode="json")))
+    print(json_round_trip({
+        "status": evidence.status.value,
+        "reason_codes": [evidence.metadata.get("reason_code")],
+        "reasons": evidence.reasons,
+        "stripe_status": evidence.metadata.get("stripe_status"),
+    }))
 
 
 def json_round_trip(value: object) -> str:
@@ -89,7 +95,7 @@ def _create_payment_intent(key: str, amount_minor: int, currency: str, idempoten
     response.raise_for_status()
     payload = response.json()
     payment_intent_id = str(payload["id"])
-    print(f"created test PaymentIntent {payment_intent_id} (status={payload['status']})")
+    print(f"created test PaymentIntent (status={payload['status']})")
     return payment_intent_id
 
 
@@ -141,8 +147,16 @@ def main() -> int:
             )
             print(json_round_trip({
                 "browser_state": result.browser_state,
-                "probe": result.probe.model_dump(mode="json"),
-                "evidence": result.evidence.model_dump(mode="json"),
+                "browser_stage": result.evidence.browser_stage,
+                "browser_reason_code": result.evidence.browser_reason_code,
+                "browser_final_url_summary": result.evidence.browser_final_url_summary,
+                "browser_error_type": result.evidence.browser_error_type,
+                "session_status": result.session.status,
+                "payment_status": result.session.payment_status,
+                "payment_intent_present": result.session.payment_intent_id is not None,
+                "probe_status": result.probe.status.value,
+                "probe_reason_code": result.evidence.probe_reason_code,
+                "probe_reasons": result.probe.reasons,
             }))
         elif args.create:
             # Phase 1: confirmed with the reusable test card -> probe must CONFIRM.
@@ -162,8 +176,24 @@ def main() -> int:
             _probe_one(probe, pending_id, f"agentpact-live-smoke-pending-{os.getpid()}")
         elif args.payment_intent_id:
             _probe_one(probe, args.payment_intent_id, f"agentpact-live-smoke-read-{os.getpid()}")
+    except StripeHostedCheckoutError as exc:
+        diagnostic = exc.diagnostic
+        print(json_round_trip({
+            "failed": True,
+            "error_type": type(exc).__name__,
+            "stage": diagnostic.stage if diagnostic else "unknown",
+            "reason_code": diagnostic.reason_code if diagnostic else "stripe_hosted_checkout_error",
+            "final_url_summary": diagnostic.final_url_summary if diagnostic else None,
+            "diagnostic_error_type": diagnostic.error_type if diagnostic else None,
+            "browser_stage": diagnostic.browser_stage if diagnostic else None,
+            "browser_reason_code": diagnostic.browser_reason_code if diagnostic else None,
+            "session_status": diagnostic.session_status if diagnostic else None,
+            "payment_status": diagnostic.payment_status if diagnostic else None,
+            "payment_intent_present": diagnostic.payment_intent_present if diagnostic else None,
+        }), file=sys.stderr)
+        return 3
     except (httpx.HTTPError, RuntimeError, ValueError) as exc:
-        print(f"FAILED: {exc}", file=sys.stderr)
+        print(json_round_trip({"failed": True, "error_type": type(exc).__name__}), file=sys.stderr)
         return 3
     print("live smoke completed; no credentials were printed")
     return 0

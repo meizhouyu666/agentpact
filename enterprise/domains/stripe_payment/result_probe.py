@@ -126,6 +126,7 @@ def build_probe_evidence(
     status: ResultProbeStatus,
     read: StripePaymentIntentRead | None,
     reasons: list[str],
+    reason_code: str | None = None,
     checked_at: datetime | None = None,
 ) -> ResultProbeEvidence:
     """Build redacted evidence; the idempotency key is stored only as a digest."""
@@ -139,9 +140,24 @@ def build_probe_evidence(
         reasons=reasons,
         metadata={
             "idempotency_key_digest": hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest(),
+            "reason_code": reason_code or _probe_reason_code(status=status, reasons=reasons),
             **({"stripe_status": read.status, "failure_code": read.failure_code} if read is not None else {}),
         },
     )
+
+
+def _probe_reason_code(*, status: ResultProbeStatus, reasons: list[str]) -> str:
+    """Return a stable, low-cardinality diagnostic code without copying errors."""
+    text = " ".join(reasons).lower()
+    if "does not exist" in text or "404" in text:
+        return "payment_intent_absent"
+    if "unavailable" in text or "transport" in text or "returned http" in text:
+        return "probe_network_or_stripe_api_error"
+    if status is ResultProbeStatus.CONFIRMED:
+        return "payment_intent_succeeded"
+    if status is ResultProbeStatus.NOT_CONFIRMED:
+        return "payment_intent_not_confirmed"
+    return "payment_intent_status_unknown"
 
 
 def _facts_digest(read: StripePaymentIntentRead) -> str:
