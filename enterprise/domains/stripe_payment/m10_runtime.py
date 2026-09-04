@@ -98,6 +98,7 @@ from .models import StripePaymentFacts
 
 M10_ADAPTER_ID = "stripe.payment.agent-run-runtime.v1"
 M10_HMAC_SECRET_ENV = "AGENT_RUN_HMAC_SECRET"
+M10_DEMO_HMAC_SECRET = "stripe-m10-demo-only-hmac"
 
 StripePlannerFactory = Callable[[dict[str, object]], object]
 
@@ -176,7 +177,12 @@ class StripePaymentRuntimeAdapter:
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._session_factory = session_factory
-        self._secret = hmac_secret or os.environ.get(M10_HMAC_SECRET_ENV) or "stripe-m10-demo-only-hmac"
+        configured_secret = hmac_secret or os.environ.get(M10_HMAC_SECRET_ENV)
+        if provider_mode == "live" and (not configured_secret or configured_secret == M10_DEMO_HMAC_SECRET):
+            raise ValueError(
+                "Stripe live Agent Run composition requires a non-default injected HMAC integrity secret"
+            )
+        self._secret = configured_secret or M10_DEMO_HMAC_SECRET
         self._provider_mode = provider_mode
         self._provider_factory = provider_factory or build_stripe_provider_factory(provider_mode)
         self._live_browser = live_browser

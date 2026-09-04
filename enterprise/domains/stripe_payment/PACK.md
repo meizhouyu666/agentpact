@@ -42,7 +42,7 @@
 | `tests/unit/test_stripe_payment_pack_conformance.py` | ✅ 完成 | 静态 Conformance 门禁（确定性、无网络） |
 | `tests/unit/test_stripe_payment_probe.py` | ✅ 完成 | Probe 状态映射/recorded/脱敏测试 |
 | `tests/unit/test_stripe_payment_m6_runtime.py` | ✅ 完成 | M6 编译/绑定/追踪 + Probe 接线测试（16 个，确定性） |
-| `tests/unit/test_stripe_payment_m10_runtime.py` | ✅ 完成 | M10 适配器/registry 协议测试（8 个，确定性） |
+| `tests/unit/test_stripe_payment_m10_runtime.py` | ✅ 完成 | M10 适配器/registry 协议测试（13 个，确定性） |
 | `tests/unit/test_stripe_payment_harness.py` | ✅ 完成 | 全流程/UNKNOWN 恢复/禁重放/职责分离（13 个） |
 | `tests/unit/test_stripe_payment_app.py` | ✅ 完成 | 控制台双通道 API 冒烟（4 个） |
 | `tests/e2e/test_stripe_payment_governed_browser.py` | ✅ 完成（recorded） | 自建 loopback checkout 的 Chromium 治理证明；不是 Stripe hosted E2E |
@@ -172,7 +172,7 @@ Checkout Session，浏览器访问 `checkout.stripe.com`，完成后独立 `GET 
 | 活动 kind | `SYNTHETIC`（强制 `synthetic.` 前缀） | `PRODUCTION`（`production_eligible=False`） |
 | 权威源 | `synthetic.payment.store/v1`（回环） | `stripe.api/v1`（真实 API） |
 | Probe | 查询自建 store | `GET /v1/payment_intents/{id}` |
-| 幂等键 | `synthetic:{payment_id}` | `stripe:{payment_intent_id}`（待 P1 落实） |
+| 幂等键 | `synthetic:{payment_id}` | `stripe:{payment_intent_id}`（P1-3 已落实） |
 | 生命周期 | `draft→submitted` | 同左（业务终态由 Probe 判定） |
 | 策略规则 | `synthetic.payment.*` | `stripe.payment.*`（同结构） |
 | 控制台 | `app.py` 合成控制台 | 不需要（P2 自建测试 checkout 页可选） |
@@ -209,10 +209,17 @@ production-eligible.
 ## Live boundary (authoritative)
 
 The hosted Stripe flow is an explicit test-mode candidate with a governed M10
-execution path. Live `advance_run` and `probe_run` are executable only with an
+execution path. Live construction also requires a non-default injected HMAC
+integrity secret. Live `advance_run` and `probe_run` are executable only with an
 injected hosted flow and durable `ExecutionAttempt`/`ExecutionPermit` lifecycle
 around the browser side effect and its independent result probe; otherwise they
 fail closed.
+
+Durability evidence is limited to the persisted Attempt, execution checkpoint,
+and redacted Checkout/Probe correlation used by restart recovery. The hosted
+flow's in-memory result/start caches and browser session are process-local; a
+restart must reconstruct the flow and re-read the exact persisted Checkout
+Session before probing. No generic lifecycle or new persistence model is added.
 
 ## Current review decision
 

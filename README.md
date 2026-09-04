@@ -106,7 +106,7 @@ M9 将模型限制为 proposal-only 边界：
 
 ### Governed Agent Run API 与操作入口
 
-M10 提供可组合的受治理 Agent Run API、routes 和操作员投影契约。创建请求可以经过同一套 Planner、可信编译、Admission、审批、最新观察、Permit、Attempt、原生 Agent 执行与 Probe 路径；但正式应用启动尚未挂载 fully composed `AgentRunService`，Synthetic 组合只用于测试。公开投影只返回安全的 Pack 元数据、计划摘要、状态、原因码和服务器声明的 `legal_actions`。
+M10 提供可组合的受治理 Agent Run API、routes 和操作员投影契约。创建请求可以经过同一套 Planner、可信编译、Admission、审批、最新观察、Permit、Attempt、原生 Agent 执行与 Probe 路径；正式应用启动挂载 app-scoped generic `AgentRunService`，但默认 registry 为空，因此不会执行任何 Pack。Synthetic 组合只用于测试。公开投影只返回安全的 Pack 元数据、计划摘要、状态、原因码和服务器声明的 `legal_actions`。
 
 操作员只能执行权威详情投影当前允许的 `approve`、`reject`、`cancel` 或 `probe`。列表或前端状态不能自行推断命令权限。
 
@@ -149,7 +149,7 @@ M12 在既有 M9-M11 治理链上增加只读证据面，不引入新的执行�
 | M7 原生 Agent 闭环 | Interface-only | ForgeAgent/Chromium、原生 Task/Step、Permit/Attempt 和 Probe 关联接口 |
 | M8 顺序 Agent Loop | Interface-only | 多步骤计划、不可变完成前缀、有界后缀 Replan 和持久 Journal 接口 |
 | M9 模型安全 Planner | Offline | 值隔离、终止优先拒绝、单次结构修复和确定性评估边界 |
-| M10 Agent Run API | Interface-only at formal app boundary | Generic Agent Run contracts/routes remain available; Synthetic composition is test-only and is not mounted by formal application startup |
+| M10 Agent Run API | Mounted, fail-closed at formal app boundary | Generic Agent Run contracts/routes are mounted with an empty default registry; Synthetic composition is test-only, while Stripe remains explicit Pack composition |
 | M11 操作工作台 | Interface-only | recorded/live 服务器组合和安全投影接口；不打开生产 enforce |
 | M12 评估与决策轨迹 | Offline tests | 安全 Planner 观察、非权威 Decision trace 和确定性评估夹具 |
 

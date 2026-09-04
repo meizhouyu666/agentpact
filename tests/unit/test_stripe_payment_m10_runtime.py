@@ -282,6 +282,22 @@ def test_explicit_stripe_live_composition_requires_test_key_and_hosted_flow(monk
     assert adapter.provider_mode == "live"  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize("hmac_secret", [None, "stripe-m10-demo-only-hmac"])
+def test_explicit_stripe_live_composition_rejects_missing_or_demo_hmac_secret(monkeypatch, hmac_secret):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_composition")
+    monkeypatch.delenv("AGENT_RUN_HMAC_SECRET", raising=False)
+
+    with pytest.raises(ValueError, match="non-default injected HMAC integrity secret"):
+        compose_stripe_agent_run_service(
+            session_factory=_unused_session_factory,
+            target_url="https://stripe.example.test/live",
+            provider_mode="live",
+            provider_factory=lambda _inputs: object(),
+            live_browser=StripeHostedCheckoutFlow(),
+            hmac_secret=hmac_secret,
+        )
+
+
 def test_live_provider_factory_fails_closed_without_complete_configuration(monkeypatch):
     monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
     with pytest.raises(ValueError, match="configuration is incomplete"):

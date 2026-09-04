@@ -30,8 +30,16 @@ The current code has two deliberately separate execution surfaces:
 The Pack-owned `compose_stripe_agent_run_service` composition root now binds
 the Stripe adapter to the generic `AgentRunService` for explicit recorded or
 live use. Live construction requires `sk_test_*` and an explicitly injected
-hosted flow. It does not populate the formal application's default registry,
-change `production_eligible=false`, or enable `enforce`.
+hosted flow and a non-default injected HMAC integrity secret. It does not
+populate the formal application's default registry, change
+`production_eligible=false`, or enable `enforce`.
+
+Durability evidence for the live path is limited to the persisted
+`ExecutionAttempt`, execution checkpoint, and redacted Checkout/Probe
+correlation used by restart recovery. The hosted flow's in-memory result/start
+caches and browser session remain process-local; recovery must reconstruct the
+flow and re-read the exact persisted Checkout Session before probing. A durable
+browser-session model is not claimed or added.
 
 Generic `AgentRunService`, routes, and Pack runtime contracts are available as
 composable interfaces. Formal `skyvern/forge/api_app.py` startup now mounts an
