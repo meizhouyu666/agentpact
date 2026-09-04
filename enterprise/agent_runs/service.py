@@ -58,6 +58,7 @@ from enterprise.governance.pack_runtime import (
     validate_pack_probe_result,
 )
 
+from .coordinator import AgentRunResultCoordinator
 from .journal import AgentRunJournal
 from .persistence import (
     AgentRunNativeStore,
@@ -567,6 +568,7 @@ class AgentRunService:
                 result = validate_pack_advance_result(advanced, run_id=prepared.run_id)
                 if result.status is PackAdvanceStatus.FAILED:
                     raise AgentRunError(result.reason_code or "PACK_ADVANCE_FAILED")
+                await self._reflect_advance_result(result, user=user, operation_key=command.operation_key)
             except PackLifecycleError as exc:
                 raise AgentRunError(exc.code, status_code=503) from exc
             except (ValueError, GovernedPlanError) as exc:
@@ -710,11 +712,59 @@ class AgentRunService:
                 permit_id=active.permit_id,
                 attempt_id=active.attempt_id,
             )
+            await self._reflect_probe_result(
+                probed,
+                run_id=run_id,
+                user=user,
+                operation_key=command.operation_key,
+            )
         except PackLifecycleError as exc:
             raise AgentRunError(exc.code, status_code=503) from exc
         except (ValueError, GovernedPlanError) as exc:
             raise AgentRunError("PACK_PROBE_FAILED", status_code=503) from exc
         return await self.get(run_id, user=user)
+
+    async def _reflect_advance_result(
+        self, result: Any, *, user: UserContext, operation_key: str
+    ) -> None:
+        async with self._session_factory() as session:
+            async with session.begin():
+                locked = await self._load_locked(session, run_id=result.run_id, user=user)
+                translated = AgentRunResultCoordinator.advance(locked.checkpoint, result)
+                if translated is None:
+                    return
+                checkpoint, transition = translated
+                await self._journal.append(
+                    session,
+                    organization_id=user.org_id,
+                    checkpoint=checkpoint,
+                    transition=transition,
+                    authority_digests=locked.authority_digests,
+                    operation_key=operation_key,
+                    created_at=self._clock(),
+                )
+
+    async def _reflect_probe_result(
+        self, result: Any, *, run_id: str, user: UserContext, operation_key: str
+    ) -> None:
+        async with self._session_factory() as session:
+            async with session.begin():
+                locked = await self._load_locked(session, run_id=run_id, user=user)
+                if locked.checkpoint.state is not PlanRunState.PROBE_BLOCKED:
+                    return
+                translated = AgentRunResultCoordinator.probe(locked.checkpoint, result)
+                if translated is None:
+                    return
+                checkpoint, transition = translated
+                await self._journal.append(
+                    session,
+                    organization_id=user.org_id,
+                    checkpoint=checkpoint,
+                    transition=transition,
+                    authority_digests=locked.authority_digests,
+                    operation_key=operation_key,
+                    created_at=self._clock(),
+                )
 
     async def _pause_for_approval(
         self,

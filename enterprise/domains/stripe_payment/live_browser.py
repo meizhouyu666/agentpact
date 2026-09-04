@@ -231,6 +231,9 @@ class StripeTestApiClient:
             f"/checkout/sessions/{session_id}",
             params={"expand[]": "payment_intent"},
         )
+        returned_id = payload.get("id")
+        if returned_id != session_id:
+            raise StripeHostedCheckoutError("Stripe Checkout Session response id does not match the requested id")
         payment_intent = payload.get("payment_intent")
         payment_intent_id = payment_intent.get("id") if isinstance(payment_intent, dict) else payment_intent
         if payment_intent_id is not None:
@@ -241,7 +244,7 @@ class StripeTestApiClient:
             except StripeProbeError as exc:
                 raise StripeHostedCheckoutError("Stripe Checkout Session exposed an invalid PaymentIntent") from exc
         return StripeHostedCheckoutSession(
-            session_id=str(payload.get("id", session_id)),
+            session_id=session_id,
             checkout_url=str(payload.get("url", "https://checkout.stripe.com/c/unknown")),
             payment_intent_id=payment_intent_id,
             status=payload.get("status") if isinstance(payload.get("status"), str) else None,
@@ -538,6 +541,8 @@ class StripeHostedCheckoutFlow:
         parse_stripe_checkout_url(session.checkout_url)
         browser_state = await self._browser_runner(session.checkout_url, success_url=success_url)
         completed_session = api.retrieve_checkout_session(session_id=session.session_id)
+        if completed_session.session_id != session.session_id:
+            raise StripeHostedCheckoutError("Stripe Checkout Session response id does not match the requested id")
         if not completed_session.payment_intent_id:
             raise StripeHostedCheckoutError("Stripe hosted checkout did not return a PaymentIntent")
         probe = StripeApiResultProbe(secret_key=key, api_base=getattr(api, "api_base", STRIPE_API_BASE))
@@ -670,6 +675,10 @@ class StripeHostedCheckoutFlow:
         # UNKNOWN until the independent PaymentIntent probe runs.
         try:
             completed_session = api.retrieve_checkout_session(session_id=session.session_id)
+            if completed_session.session_id != session.session_id:
+                raise StripeHostedCheckoutError(
+                    "Stripe Checkout Session response id does not match the requested id"
+                )
             if not completed_session.payment_intent_id:
                 raise StripeHostedCheckoutError(
                     "Stripe Checkout Session did not expose the exact PaymentIntent"
@@ -768,6 +777,10 @@ class StripeHostedCheckoutFlow:
         api = self._api_client_factory(key)
         if checkout_session_id:
             session = api.retrieve_checkout_session(session_id=checkout_session_id)
+            if session.session_id != checkout_session_id:
+                raise StripeHostedCheckoutError(
+                    "Stripe Checkout Session response id does not match the requested id"
+                )
             if resource_id is not None and resource_id != session.payment_intent_id:
                 raise StripeHostedCheckoutError(
                     "Stripe Checkout Session returned a different PaymentIntent than the persisted context"

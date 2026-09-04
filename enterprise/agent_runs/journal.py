@@ -209,12 +209,16 @@ async def append_agent_run_transition(
 
     transition = PlanJournalTransition(transition)
     if transition not in {
+        PlanJournalTransition.CHILD_COMPLETED,
+        PlanJournalTransition.PLAN_COMPLETED,
+        PlanJournalTransition.PROBE_BLOCKED,
+        PlanJournalTransition.PROBE_RESOLVED,
         PlanJournalTransition.APPROVAL_REQUIRED,
         PlanJournalTransition.APPROVAL_RESUMED,
         PlanJournalTransition.APPROVAL_REJECTED,
         PlanJournalTransition.RUN_CANCELLED,
     }:
-        raise GovernedPlanError("Agent Run append accepts only orchestration-owned transitions")
+        raise GovernedPlanError("Agent Run append received an unsupported transition")
     root = await native_store.get_root(
         session,
         run_id=checkpoint.root_task_id,

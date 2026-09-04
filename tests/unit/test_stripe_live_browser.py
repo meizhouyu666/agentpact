@@ -63,6 +63,21 @@ def test_live_idempotency_key_is_stable_and_does_not_contain_business_value():
     assert FACTS.payment_intent_id not in first
 
 
+def test_stripe_test_api_client_rejects_checkout_session_id_mismatch(monkeypatch: pytest.MonkeyPatch):
+    client = StripeTestApiClient(secret_key="sk_test_123")
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda *_args, **_kwargs: {
+            "id": "cs_test_other",
+            "url": "https://checkout.stripe.com/c/pay/cs_test_other",
+            "payment_intent": {"id": FACTS.payment_intent_id},
+        },
+    )
+    with pytest.raises(StripeHostedCheckoutError, match="does not match"):
+        client.retrieve_checkout_session(session_id="cs_test_requested")
+
+
 class FakeCheckoutApi:
     api_base = "https://api.stripe.test/v1"
 
@@ -495,6 +510,55 @@ async def test_governed_probe_rejects_mismatched_checkout_session_before_api_or_
             probe_factory=ExplodingProbe,
         )
     assert api.retrieved == retrieved_before
+
+
+@pytest.mark.asyncio
+async def test_governed_probe_rejects_api_session_id_mismatch_before_payment_intent_binding(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_123")
+    store = _ExecutionStore()
+    runtime = _CheckoutRuntime()
+
+    class MismatchedReadApi(FakeCheckoutApi):
+        def retrieve_checkout_session(self, *, session_id: str):
+            self.retrieved += 1
+            if self.retrieved == 1:
+                return StripeHostedCheckoutSession(
+                    session_id=session_id,
+                    checkout_url="https://checkout.stripe.com/c/pay/cs_test_123",
+                    payment_intent_id=FACTS.payment_intent_id,
+                )
+            return StripeHostedCheckoutSession(
+                session_id="cs_returned_other",
+                checkout_url="https://checkout.stripe.com/c/pay/cs_returned_other",
+                payment_intent_id=FACTS.payment_intent_id,
+            )
+
+    api = MismatchedReadApi()
+    flow = StripeHostedCheckoutFlow(api_client_factory=lambda _key: api)
+    key = derive_live_idempotency_key(request_id="probe-api-session", payment_intent_id=FACTS.payment_intent_id)
+    result = await flow.execute_governed(
+        facts=FACTS,
+        idempotency_key=key,
+        task_id="task-probe-api-session",
+        step_id="step-probe-api-session",
+        contract_id="contract-probe-api-session",
+        organization_id="stripe-test-tenant",
+        session_factory=store,
+        integrity_secret="stripe-governed-hmac",
+        runtime_factory=lambda _url: runtime,
+    )
+
+    with pytest.raises(StripeHostedCheckoutError, match="does not match"):
+        await flow.probe_governed(
+            facts=FACTS,
+            idempotency_key=key,
+            checkpoint=result.execution_checkpoint,
+            checkout_session_id="cs_test_123",
+            session_factory=store,
+            probe_factory=_StableProbe,
+        )
 
 
 @pytest.mark.asyncio
