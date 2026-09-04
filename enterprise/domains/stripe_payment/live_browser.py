@@ -94,6 +94,8 @@ class StripeBrowserDiagnostic(BaseModel):
     payment_intent_present: bool | None = None
     browser_stage: str | None = None
     browser_reason_code: str | None = None
+    browser_final_url_summary: str | None = None
+    browser_error_type: str | None = None
 
 
 class StripeBrowserOutcome(str):
@@ -383,6 +385,8 @@ def _browser_diagnostic(
         payment_intent_present=session.payment_intent_id is not None if session else None,
         browser_stage=browser.stage if browser else None,
         browser_reason_code=browser.reason_code if browser else None,
+        browser_final_url_summary=browser.final_url_summary if browser else None,
+        browser_error_type=browser.error_type if browser else None,
     )
 
 

@@ -187,6 +187,8 @@ def main() -> int:
             "diagnostic_error_type": diagnostic.error_type if diagnostic else None,
             "browser_stage": diagnostic.browser_stage if diagnostic else None,
             "browser_reason_code": diagnostic.browser_reason_code if diagnostic else None,
+            "browser_final_url_summary": diagnostic.browser_final_url_summary if diagnostic else None,
+            "browser_error_type": diagnostic.browser_error_type if diagnostic else None,
             "session_status": diagnostic.session_status if diagnostic else None,
             "payment_status": diagnostic.payment_status if diagnostic else None,
             "payment_intent_present": diagnostic.payment_intent_present if diagnostic else None,
