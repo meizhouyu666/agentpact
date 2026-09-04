@@ -19,7 +19,7 @@ Concrete Domain Packs    -> implementations of those contracts and ports
 Boot composition may import concrete Packs to register them. Core Agent Run,
 browser-loop, and governance modules must not import concrete Pack modules.
 
-## Current Status (`2026-09-03`)
+## Current Status (`2026-09-04`)
 
 The generic Pack runtime contracts and AgentPact-owned browser operation loop
 are implemented, including the persisted browser executor and session boundary.
@@ -28,7 +28,7 @@ The formal application now mounts an app-scoped, fully composed generic
 registry is empty, so startup exposes the API but no Pack is executable. A
 concrete Pack, target URL, and adapter remain explicit composition inputs.
 Synthetic Agent Run composition remains test-fixture-only. The explicit Stripe
-test-mode hosted Checkout composition exercises the persisted
+test-mode `compose_stripe_agent_run_service` composition exercises the persisted
 Permit/Attempt/UNKNOWN/probe boundary, but remains a test-mode candidate rather
 than a production Pack.
 

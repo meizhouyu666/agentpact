@@ -9,11 +9,11 @@ AgentPact 是一个面向高风险浏览器任务的 Agentic RPA 执行与恢复
 
 ## 当前实现状态
 
-截至 `d835bb5`，代码与接口的边界如下：
+截至 P1-3（`51236c5`），代码与接口的边界如下：
 
 - `enterprise/browser_loop` 的 AgentPact-owned loop、直接 Playwright runtime 和 `PlaywrightBrowserSessionFactory` 已实现。`SkyvernScraperRuntimeAdapter` 只是临时兼容适配器，读取注入的 Skyvern scraper 输出；它不是新的产品执行器。
-- `stripe.payment` 有显式 governed test-mode adapter：hosted Checkout 的浏览器副作用经过一次性 `ExecutionPermit`、持久化 `ExecutionAttempt`，不确定结果进入 `UNKNOWN`，再由独立 PaymentIntent Probe 解决。该路径由显式组合和 `sk_test_*` 凭据启用，带有 Permit/Attempt/UNKNOWN/probe 回归测试，但仍不是 production Pack。
-- Generic `AgentRunService`、routes 和 Pack runtime contracts 已实现为可组合接口；正式 `skyvern/forge/api_app.py` 启动不会挂载一个 fully composed Agent Run service。Synthetic Agent Run 的组合只存在于测试夹具。
+- `stripe.payment` 有显式 governed test-mode adapter：hosted Checkout 的浏览器副作用经过一次性 `ExecutionPermit`、持久化 `ExecutionAttempt`，不确定结果进入 `UNKNOWN`，再由独立 PaymentIntent Probe 解决。该路径只能通过 Pack-owned `compose_stripe_agent_run_service` 和 `sk_test_*` 凭据显式启用，带有 Permit/Attempt/UNKNOWN/probe 回归测试，但仍不是 production Pack。
+- Generic `AgentRunService`、routes 和 Pack runtime contracts 已实现为可组合接口；正式 `skyvern/forge/api_app.py` 启动挂载 app-scoped generic Agent Run service，但默认 registry 为空，因此不会执行任何 Pack。Synthetic Agent Run 的组合只存在于测试夹具。
 - `synthetic.payment` 只用于测试和离线参考，`production_eligible=false`，不代表生产安装、生产连接器或生产授权。
 
 ## 为什么需要 AgentPact

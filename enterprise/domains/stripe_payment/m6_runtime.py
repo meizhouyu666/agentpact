@@ -1,9 +1,9 @@
 """Stripe test-mode M6 coordinator: installation, constrained compilation,
 execution binding, Permit binding, and independent probe resolution.
 
-This module mirrors ``enterprise.domains.synthetic_payment.m6_runtime`` with
-``stripe.*`` bindings. The two differences from the synthetic reference are
-architectural:
+This module follows the same generic M6 contracts exercised by the Synthetic
+test/reference fixture, without importing that fixture or making it a runtime
+dependency. The two Stripe-specific differences are architectural:
 
 1. There is no loopback store: the authoritative read and the business-result
    probe both come from the Stripe API (``result_probe.py``).

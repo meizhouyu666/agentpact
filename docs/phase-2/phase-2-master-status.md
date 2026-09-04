@@ -1,7 +1,7 @@
 # AgentPact Phase 2 Master Status
 
 > Status: authoritative working status
-> Updated: 2026-09-03 (`P0 composition root`)
+> Updated: 2026-09-04 (`P1-3 Stripe explicit composition`)
 > Scope: Phase 2 governance foundation, audit hardening, and the controlled path to future enforce
 
 This document is the single operational entry point for Phase 2 work. Read it
@@ -26,6 +26,12 @@ The current code has two deliberately separate execution surfaces:
   independent PaymentIntent Probe. The adapter and its Permit/Attempt/UNKNOWN/
   probe regression tests are implemented, but this is still a test-mode
   candidate, not a production Pack.
+
+The Pack-owned `compose_stripe_agent_run_service` composition root now binds
+the Stripe adapter to the generic `AgentRunService` for explicit recorded or
+live use. Live construction requires `sk_test_*` and an explicitly injected
+hosted flow. It does not populate the formal application's default registry,
+change `production_eligible=false`, or enable `enforce`.
 
 Generic `AgentRunService`, routes, and Pack runtime contracts are available as
 composable interfaces. Formal `skyvern/forge/api_app.py` startup now mounts an
