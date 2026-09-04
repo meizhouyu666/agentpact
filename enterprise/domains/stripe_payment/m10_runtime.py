@@ -13,10 +13,10 @@ using the same admission primitives as the synthetic adapter:
 - ``probe_run`` resolves an UNKNOWN attempt through the independent probe.
 
 Platform boundary (documented in PACK.md): ``AgentRunService`` state tracking
-is built around the synthetic M8 journal/checkpoint. This adapter is the
-pack-side of the M10 boundary and is registry-conformant; making the service
-itself multi-pack is a separate platform refactor. Live browser execution is
-available only when an explicit ``StripeHostedCheckoutFlow`` and durable
+uses the pack-neutral M8 journal/checkpoint contract. This adapter is the
+pack-side of the M10 boundary and is registry-conformant; callers compose it
+explicitly through ``compose_stripe_agent_run_service``. Live browser execution
+is available only when an explicit ``StripeHostedCheckoutFlow`` and durable
 Attempt/Permit session factory are injected; missing wiring, credentials,
 approval/capability expiry, unsafe browser state, or inconclusive probes fail
 closed. The hosted flow remains a test-mode candidate and never falls back to
@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Protocol
 
@@ -42,6 +43,8 @@ from enterprise.agent.constrained_planner import (
     PlannerTransport,
 )
 from enterprise.agent.interactions import CapabilityRequest, CapabilityRequestKind, EntryMode
+from enterprise.agent_runs.service import AgentRunService
+from enterprise.applications.agent_runs import compose_agent_run_service
 from enterprise.auth.schemas import DepartmentRole, UserContext
 from enterprise.browser_loop.persisted_executor import recover_abandoned_persisted_executions
 from enterprise.governance.admission import AdmissionAuditRecord, GovernedTaskDraft, TaskAdmissionBundle
@@ -62,6 +65,7 @@ from enterprise.governance.pack_runtime import (
     PackRunRequest,
     PackRunRestoreRequest,
     PackRuntimeBinding,
+    PackRuntimeRegistry,
     PreparedRunReference,
 )
 
@@ -76,7 +80,12 @@ from .constants import (
     RESULT_PROBE_REF,
 )
 from .harness import ChallengeState, StripePaymentEnforceHarness, StripeSubmissionChallenge
-from .live_browser import StripeHostedCheckoutError, StripeHostedCheckoutFlow, derive_live_idempotency_key
+from .live_browser import (
+    StripeHostedCheckoutError,
+    StripeHostedCheckoutFlow,
+    derive_live_idempotency_key,
+    stripe_test_key_from_environment,
+)
 from .m6_runtime import (
     STRIPE_RUNTIME_CONTRACT,
     StripeM6Compilation,
@@ -765,6 +774,51 @@ class StripePaymentRuntimeAdapter:
             )
             self._harnesses[run.run_id] = harness
         return harness
+
+
+def compose_stripe_agent_run_service(
+    *,
+    session_factory: Callable[[], AbstractAsyncContextManager[Any]],
+    target_url: str,
+    provider_mode: Literal["recorded", "live"] = "recorded",
+    hmac_secret: str | None = None,
+    provider_factory: StripePlannerFactory | None = None,
+    live_browser: StripeHostedCheckoutFlow | None = None,
+    provider_timeout_seconds: float = 30.0,
+    clock: Callable[[], datetime] | None = None,
+) -> AgentRunService:
+    """Compose Stripe's adapter into the generic Agent Run service explicitly.
+
+    This is a Pack-owned composition edge, not formal application startup. A
+    live composition must prove the test-mode credential and inject both the
+    hosted browser flow and durable session factory; it never falls back to the
+    recorded adapter when those requirements are absent.
+    """
+
+    if provider_mode not in {"recorded", "live"}:
+        raise ValueError("Stripe Agent Run provider mode must be recorded or live")
+    if provider_mode == "live":
+        if live_browser is None:
+            raise ValueError("Stripe live Agent Run composition requires an explicit hosted browser flow")
+        stripe_test_key_from_environment()
+    registry = PackRuntimeRegistry([STRIPE_RUNTIME_CONTRACT])
+    adapter = StripePaymentRuntimeAdapter(
+        session_factory,
+        hmac_secret=hmac_secret,
+        provider_mode=provider_mode,
+        provider_factory=provider_factory,
+        live_browser=live_browser,
+        clock=clock,
+    )
+    registry.register(adapter)
+    return compose_agent_run_service(
+        session_factory,
+        runtime_registry=registry,
+        target_url=target_url,
+        default_pack_binding=adapter.binding,
+        provider_timeout_seconds=provider_timeout_seconds,
+        clock=clock,
+    )
 
 
 def _compile_authority(

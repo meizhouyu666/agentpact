@@ -22,6 +22,9 @@ from tests.fixtures.fake_domain_pack import (
     FakeDomainPackAdapter,
 )
 
+SECOND_PACK_ID = "second.domain"
+SECOND_PACK_VERSION = "1.0.0"
+
 
 @asynccontextmanager
 async def _unused_session():
@@ -74,6 +77,34 @@ def test_registered_runtime_requires_target_and_accepts_explicit_binding() -> No
         default_pack_binding=FAKE_RUNTIME_BINDING,
     )
     assert service is not None
+
+
+def test_formal_composition_accepts_multiple_explicit_pack_runtimes() -> None:
+    second_contract = FAKE_RUNTIME_CONTRACT.model_copy(
+        update={
+            "pack_id": SECOND_PACK_ID,
+            "pack_version": SECOND_PACK_VERSION,
+            "display_name": "Second Domain Pack",
+            "manifest_digest": "e" * 64,
+        }
+    )
+    second_binding = FAKE_RUNTIME_BINDING.model_copy(
+        update={"pack_id": SECOND_PACK_ID, "pack_version": SECOND_PACK_VERSION}
+    )
+    registry = PackRuntimeRegistry([FAKE_RUNTIME_CONTRACT, second_contract])
+    registry.register(FakeDomainPackAdapter())
+    registry.register(FakeDomainPackAdapter(second_binding))
+
+    service = compose_agent_run_service(
+        _unused_session,
+        runtime_registry=registry,
+        target_url="https://operations.example.test",
+    )
+
+    assert {binding.pack_id for binding in service._registry.registered_bindings} == {
+        FAKE_PACK_ID,
+        SECOND_PACK_ID,
+    }
 
 
 def test_agent_run_mount_is_app_scoped_and_rejects_duplicate_mount() -> None:

@@ -5,6 +5,7 @@ recorded harness in memory, exactly like the standalone M10 proof.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import pytest
@@ -15,6 +16,7 @@ from enterprise.domains.stripe_payment.constants import (
     CAPABILITY_ID,
     TENANT_ID,
 )
+from enterprise.domains.stripe_payment.live_browser import StripeHostedCheckoutFlow
 from enterprise.domains.stripe_payment.m6_runtime import STRIPE_RUNTIME_CONTRACT
 from enterprise.domains.stripe_payment.m10_runtime import (
     M10_ADAPTER_ID,
@@ -22,6 +24,7 @@ from enterprise.domains.stripe_payment.m10_runtime import (
     StripeM10PreparedRun,
     StripePaymentRuntimeAdapter,
     build_stripe_provider_factory,
+    compose_stripe_agent_run_service,
     derive_stripe_agent_run_id,
 )
 from enterprise.governance.pack_runtime import (
@@ -46,6 +49,12 @@ INPUTS = {
     "description": "Stripe M10 test payment",
     "object_version": 1,
 }
+
+
+@asynccontextmanager
+async def _unused_session_factory():
+    raise AssertionError("composition tests must not access persistence")
+    yield
 
 
 def _user() -> UserContext:
@@ -223,6 +232,54 @@ def test_recorded_provider_factory_returns_deterministic_planner():
     from enterprise.agent.constrained_planner import DeterministicPlanner
 
     assert isinstance(planner, DeterministicPlanner)
+
+
+def test_explicit_stripe_recorded_composition_registers_the_generic_runtime():
+    service = compose_stripe_agent_run_service(
+        session_factory=_unused_session_factory,
+        target_url="https://stripe.example.test/recorded",
+        provider_mode="recorded",
+        hmac_secret="stripe-m10-test-hmac",
+    )
+
+    assert service._registry.registered_bindings == (service._default_pack_binding,)
+    assert service._default_pack_binding is not None
+    assert service._default_pack_binding.pack_id == "stripe.payment"
+
+
+def test_explicit_stripe_live_composition_requires_test_key_and_hosted_flow(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "provider-test-key")
+    monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="sk_test"):
+        compose_stripe_agent_run_service(
+            session_factory=_unused_session_factory,
+            target_url="https://stripe.example.test/live",
+            provider_mode="live",
+            provider_factory=lambda _inputs: object(),
+            live_browser=object(),  # type: ignore[arg-type]
+            hmac_secret="stripe-m10-test-hmac",
+        )
+
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_composition")
+    with pytest.raises(ValueError, match="hosted browser flow"):
+        compose_stripe_agent_run_service(
+            session_factory=_unused_session_factory,
+            target_url="https://stripe.example.test/live",
+            provider_mode="live",
+            provider_factory=lambda _inputs: object(),
+            hmac_secret="stripe-m10-test-hmac",
+        )
+
+    service = compose_stripe_agent_run_service(
+        session_factory=_unused_session_factory,
+        target_url="https://stripe.example.test/live",
+        provider_mode="live",
+        provider_factory=lambda _inputs: object(),
+        live_browser=StripeHostedCheckoutFlow(),
+        hmac_secret="stripe-m10-test-hmac",
+    )
+    adapter = service._registry.require(pack_id="stripe.payment", pack_version="0.1.0-draft.1")
+    assert adapter.provider_mode == "live"  # type: ignore[attr-defined]
 
 
 def test_live_provider_factory_fails_closed_without_complete_configuration(monkeypatch):

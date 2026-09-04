@@ -129,9 +129,10 @@ Checkout Session，浏览器访问 `checkout.stripe.com`，完成后独立 `GET 
       restore_run / admit_run / advance_run / probe_run），复用 M6 编译 + harness
       确定性执行 + admission 原语；recorded 模式全流程可用，live 模式只有显式
       注入 `StripeHostedCheckoutFlow` 才能执行，否则 `StripeM10NotWired` fail closed
-- [ ] **M10 平台侧多包化**（独立重构）：`AgentRunService` 的 approve/advance/reject
-      状态追踪基于 synthetic M8 journal/checkpoint；把 stripe 挂上
-      `agent_runs/service.py` 与工作台需要先抽象 journal/checkpoint 为包无关接口
+- [x] **M10 平台侧多包化**：`AgentRunService` 的 approve/advance/reject
+      状态追踪使用包无关的 journal/checkpoint 与 runtime binding；平台 registry
+      可显式注册多个 Pack，Stripe 通过 `compose_stripe_agent_run_service` 接入。
+      formal app 仍保持空 registry，Stripe 不会被默认安装或启用 enforce
 - [ ] 决定 `GovernanceMode`：P2/P3 阶段用 `AUDIT` 演练，不得启用 `enforce`
       （README：enforce 配置被拒，未来需单独批准）
 
