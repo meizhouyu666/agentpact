@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy.dialects import postgresql
 
+from enterprise.approval.models import ApprovalRequestModel
 from enterprise.governance.models import (
     ExecutionAttemptModel,
     ExecutionPermitModel,
@@ -33,6 +34,8 @@ def _bind(model: type, column_name: str, value: datetime | None) -> datetime | N
         (GovernanceAuditEventModel, "created_at"),
         (ExecutionAttemptModel, "started_at"),
         (ExecutionAttemptModel, "completed_at"),
+        (ApprovalRequestModel, "requested_at"),
+        (ApprovalRequestModel, "decided_at"),
     ],
 )
 def test_governance_naive_timestamps_normalize_aware_values_at_bind_boundary(model, column_name: str) -> None:

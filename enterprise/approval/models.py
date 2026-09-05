@@ -10,7 +10,6 @@ import enum
 from sqlalchemy import (
     CheckConstraint,
     Column,
-    DateTime,
     ForeignKey,
     Index,
     Integer,
@@ -18,8 +17,9 @@ from sqlalchemy import (
     Text,
 )
 
-from skyvern.forge.sdk.db.models import Base
+from enterprise.governance.models import UtcNaiveDateTime
 from skyvern.forge.sdk.db.id import generate_id
+from skyvern.forge.sdk.db.models import Base
 
 
 class ApprovalStatus(str, enum.Enum):
@@ -86,10 +86,10 @@ class ApprovalRequestModel(Base):
     # Lifecycle
     status = Column(String, default=ApprovalStatus.PENDING.value, nullable=False)
     requested_at = Column(
-        DateTime, default=datetime.datetime.utcnow, nullable=False, index=True
+        UtcNaiveDateTime, default=datetime.datetime.utcnow, nullable=False, index=True
     )
     approver_user_id = Column(String, nullable=True)
-    decided_at = Column(DateTime, nullable=True)
+    decided_at = Column(UtcNaiveDateTime, nullable=True)
     decision_note = Column(Text, nullable=True)
     timeout_seconds = Column(Integer, default=3600, nullable=False)
 
