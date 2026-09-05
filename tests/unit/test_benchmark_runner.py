@@ -3,20 +3,22 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from enterprise.evaluation import (
+from benchmarks.stripe_browser import (
     ArmDefinition,
-    BenchmarkCaseResult,
-    CaseOpportunity,
-    CountObservation,
     ExecutionProfile,
     InMemoryResultSink,
     RunBudget,
-    SafetyObservations,
     StripeBenchmarkManifest,
     StripeBenchmarkRunnerConfig,
     compose_stripe_benchmark_runner,
     inject_stripe_test_secret,
     validate_stripe_test_secret,
+)
+from enterprise.evaluation import (
+    BenchmarkCaseResult,
+    CaseOpportunity,
+    CountObservation,
+    SafetyObservations,
 )
 
 

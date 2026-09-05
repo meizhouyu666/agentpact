@@ -17,12 +17,13 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import ConfigDict, Field, model_validator
 
-from .benchmark_protocol import (
+from enterprise.evaluation.quantitative_benchmark import Arm, BenchmarkCaseResult, PairedBenchmarkCaseResult
+
+from .protocol import (
     ExecutionProfile,
     StripeBenchmarkManifest,
     build_paired_benchmark_case_result,
 )
-from .quantitative_benchmark import Arm, BenchmarkCaseResult, PairedBenchmarkCaseResult
 
 _SECRET_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,127}$")
 _REDACTED = "[REDACTED_SECRET]"

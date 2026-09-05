@@ -14,7 +14,7 @@ from typing import Any, Literal, Self
 
 from pydantic import Field, model_validator
 
-from .quantitative_benchmark import (
+from enterprise.evaluation.quantitative_benchmark import (
     PROTOCOL_CASE_SCHEMA_VERSION,
     Arm,
     BenchmarkCaseResult,
@@ -23,7 +23,7 @@ from .quantitative_benchmark import (
     QuantitativeBenchmarkReport,
     aggregate_paired_quantitative_benchmark,
 )
-from .quantitative_benchmark import _StrictModel as _BenchmarkStrictModel
+from enterprise.evaluation.quantitative_benchmark import _StrictModel as _BenchmarkStrictModel
 
 MANIFEST_SCHEMA_VERSION = "agentpact.stripe-browser-benchmark.manifest.v1"
 ARTIFACT_SCHEMA_VERSION = "agentpact.stripe-browser-benchmark.artifact.v1"
