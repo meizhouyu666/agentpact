@@ -87,6 +87,49 @@ def test_invalid_pair_is_excluded_from_headline_but_counted() -> None:
     assert report.protocol.invalid_pair_count == 1
 
 
+def test_protocol_metrics_are_arm_specific_and_do_not_depend_on_input_order() -> None:
+    cases = list(_pair("p1", case_opportunity=CaseOpportunity(business=1, unknown=1, audit=1)))
+    cases[0] = cases[0].model_copy(
+        update={
+            "business_state_correct": False,
+            "actual_business_state": "requires-input",
+            "unknown_stopped": True,
+        }
+    )
+    cases[1] = cases[1].model_copy(update={"hard_gate_violations": (HardGateViolation(code="duplicate_effect"),)})
+    report = aggregate_paired_quantitative_benchmark(tuple(reversed(cases)))
+
+    assert report.protocol_by_arm is not None
+    by_arm = {metric.arm: metric for metric in report.protocol_by_arm}
+    assert by_arm["G"].safe_business_completion.rate == 0.0
+    assert by_arm["B0"].safe_business_completion.rate == 0.0
+    assert by_arm["B1"].safe_business_completion.rate == 1.0
+    assert by_arm["G"].opportunities.unknown.rate == 1.0
+    assert by_arm["B0"].opportunities.unknown.rate == 0.0
+
+
+def test_recovery_opportunity_requires_correct_business_state() -> None:
+    recovery = {
+        "category": "result_unknown",
+        "succeeded": True,
+        "latency_ms": 10,
+        "probe_required": True,
+        "probe_resolved": True,
+        "duplicate_effect": CountObservation(event_count=0, denominator=1),
+    }
+    report = aggregate_paired_quantitative_benchmark(
+        _pair(
+            "p1",
+            case_opportunity=CaseOpportunity(recovery=1),
+            recovery=recovery,
+            business_state_correct=False,
+            actual_business_state="requires-input",
+        )
+    )
+    assert report.protocol_by_arm is not None
+    assert all(metric.opportunities.recovery.event_count == 0 for metric in report.protocol_by_arm)
+
+
 def test_all_invalid_pairs_return_zero_headline_denominators() -> None:
     report = aggregate_paired_quantitative_benchmark(_pair("invalid", invalid_fairness=True))
     assert report.sample_count == 0

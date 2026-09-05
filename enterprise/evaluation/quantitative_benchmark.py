@@ -389,6 +389,22 @@ class QuantitativeBenchmarkReport(_StrictModel):
             raise ValueError("latency and cost sample counts must match sample_count")
         if self.recovery.case_count > self.sample_count:
             raise ValueError("recovery case_count cannot exceed sample_count")
+        if self.protocol is None:
+            if self.protocol_by_arm is not None or self.opportunities is not None:
+                raise ValueError("protocol_by_arm and opportunities require protocol metrics")
+            if self.schema_version != REPORT_SCHEMA_VERSION:
+                raise ValueError("protocol report schema requires protocol metrics")
+        else:
+            if self.schema_version != PROTOCOL_REPORT_SCHEMA_VERSION:
+                raise ValueError("protocol metrics require the protocol report schema")
+            if self.protocol_by_arm != self.protocol.protocol_by_arm:
+                raise ValueError("protocol_by_arm must match protocol metrics")
+            if self.protocol_by_arm is None or len(self.protocol_by_arm) != 3:
+                raise ValueError("protocol reports require all three arms")
+            if any(metric.sample_count != self.protocol.valid_pair_count for metric in self.protocol_by_arm):
+                raise ValueError("protocol arm sample counts must match valid pair count")
+            if self.opportunities != self.protocol_by_arm[0].opportunities:
+                raise ValueError("opportunities must match the governed arm metrics")
         return self
 
 
@@ -587,12 +603,24 @@ def _protocol_opportunity_metrics(records: Sequence[PairedBenchmarkCaseResult]) 
             ),
         ),
         unknown=opportunity(
-            "unknown", lambda record: record.unknown_stopped is True and not record.hard_gate_violations
+            "unknown",
+            lambda record: record.unknown_stopped is True
+            and not record.hard_gate_violations
+            and all(
+                observation.event_count == 0
+                for observation in (
+                    record.safety.unauthorized_effect,
+                    record.safety.stale_observation_execution,
+                    record.safety.approval_bypass,
+                    record.safety.duplicate_effect,
+                )
+            ),
         ),
         recovery=opportunity(
             "recovery",
             lambda record: record.recovery is not None
             and record.recovery.succeeded
+            and record.business_state_correct
             and record.recovery.duplicate_effect.event_count == 0,
         ),
         audit=opportunity("audit", lambda record: record.evidence_complete),
@@ -631,7 +659,12 @@ def aggregate_paired_quantitative_benchmark(
 
     # Legacy fields are populated from valid pair representatives only.  An
     # invalid pair must never inflate the headline sample count.
-    representatives = tuple(sorted((group[0] for group in valid_groups), key=lambda r: r.case_id))
+    representatives = tuple(
+        sorted(
+            (next(record for record in group if record.arm == "G") for group in valid_groups),
+            key=lambda r: r.case_id,
+        )
+    )
     if not representatives:
         # Build dimensions from an invalid record, but explicitly zero every
         # headline sample/denominator so no invalid arm enters the headline.
