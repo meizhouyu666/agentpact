@@ -43,6 +43,13 @@ from enterprise.agent.constrained_planner import (
     PlannerTransport,
 )
 from enterprise.agent.interactions import CapabilityRequest, CapabilityRequestKind, EntryMode
+from enterprise.agent_runs.pause_signal import (
+    RunPauseAction,
+    RunPauseOutcome,
+    RunPausePromptMetadata,
+    RunPauseSignal,
+    RunResumePolicy,
+)
 from enterprise.agent_runs.service import AgentRunService
 from enterprise.applications.agent_runs import compose_agent_run_service
 from enterprise.auth.schemas import DepartmentRole, UserContext
@@ -51,6 +58,14 @@ from enterprise.governance.admission import AdmissionAuditRecord, GovernedTaskDr
 from enterprise.governance.capabilities import CapabilityDataScope
 from enterprise.governance.contracts import ExecutionAttemptStatus
 from enterprise.governance.creation_snapshot import TaskCreationPath, TrustedTaskCreationSnapshot
+from enterprise.governance.input_contracts import (
+    InputRequest,
+    InputSensitivity,
+    InputSlotSpec,
+    InputSlotStatus,
+    InputSource,
+    InputTargetKind,
+)
 from enterprise.governance.models import ExecutionAttemptModel, GovernedTaskAdmissionModel
 from enterprise.governance.pack_runtime import (
     ApprovalHandler,
@@ -105,6 +120,87 @@ StripePlannerFactory = Callable[[dict[str, object]], object]
 
 class StripeM10NotWired(RuntimeError):
     """Fail-closed marker for missing explicit live M10 composition."""
+
+
+_STRIPE_INPUT_STEP_ID = "stripe.payment.input-preflight.v1"
+_STRIPE_INPUT_TARGETS: dict[str, InputTargetKind] = {
+    "payment_intent_id": InputTargetKind.IDENTIFIER,
+    "amount_minor": InputTargetKind.NUMBER,
+}
+
+
+def _missing_stripe_business_slots(business_inputs: dict[str, Any]) -> tuple[str, ...]:
+    """Return only absent required Pack slots; invalid supplied values still fail closed."""
+
+    return tuple(
+        name
+        for name in _STRIPE_INPUT_TARGETS
+        if name not in business_inputs or business_inputs[name] is None
+    )
+
+
+def missing_stripe_inputs(business_inputs: dict[str, Any]) -> tuple[str, ...]:
+    """Return missing required Stripe semantic inputs without observing a page."""
+
+    return _missing_stripe_business_slots(business_inputs)
+
+
+def build_stripe_input_pause_signal(
+    *,
+    run_id: str,
+    missing_slots: tuple[str, ...],
+    task_id: str | None = None,
+    step_id: str = _STRIPE_INPUT_STEP_ID,
+    checkpoint_id: str | None = None,
+) -> RunPauseSignal:
+    """Compose a redacted, pre-effect Stripe input pause at the Pack edge.
+
+    This helper deliberately carries semantic slot names only. Adapter field
+    bindings and observed Checkout values stay outside the platform contract.
+    """
+
+    unknown = set(missing_slots) - set(_STRIPE_INPUT_TARGETS)
+    if unknown:
+        raise ValueError(f"Unsupported Stripe semantic input slots: {sorted(unknown)}")
+    if not missing_slots:
+        raise ValueError("Stripe input pause requires at least one missing slot")
+    unique_slots = tuple(dict.fromkeys(missing_slots))
+    checkpoint = checkpoint_id or "stripe-input-" + _digest([run_id, step_id, unique_slots])[:32]
+    slots = tuple(
+        InputSlotSpec(
+            slot_name=name,
+            target_kind=_STRIPE_INPUT_TARGETS[name],
+            source=InputSource.USER,
+            sensitivity=InputSensitivity.SENSITIVE,
+            allowed_sources=(InputSource.USER,),
+        )
+        for name in unique_slots
+    )
+    request = InputRequest(
+        request_id=f"stripe-input-request:{checkpoint}",
+        pack_id=PACK_ID,
+        pack_version=PACK_VERSION,
+        slots=slots,
+        status={name: InputSlotStatus.MISSING for name in unique_slots},
+        recovery=True,
+        external_effect_started=False,
+    )
+    return RunPauseSignal(
+        outcome=RunPauseOutcome.AWAITING_INPUT,
+        reason_code="STRIPE_INPUT_REQUIRED",
+        run_id=run_id,
+        task_id=task_id or run_id,
+        step_id=step_id,
+        checkpoint_id=checkpoint,
+        input_request=request,
+        prompt=RunPausePromptMetadata(
+            title="Payment details required",
+            message="Provide the missing payment details to continue this test-mode run.",
+        ),
+        allowed_actions=(RunPauseAction.SUBMIT_INPUT, RunPauseAction.CANCEL),
+        resume_policy=RunResumePolicy.INPUT_SUBMISSION,
+        external_effect_started=False,
+    )
 
 
 def derive_stripe_agent_run_id(*, tenant_id: str, request_id: str) -> str:
@@ -194,6 +290,33 @@ class StripePaymentRuntimeAdapter:
     @property
     def provider_mode(self) -> Literal["recorded", "live"]:
         return self._provider_mode
+
+    @staticmethod
+    def missing_input_pause(
+        *,
+        run_id: str,
+        business_inputs: dict[str, Any],
+        task_id: str | None = None,
+        checkpoint_id: str | None = None,
+    ) -> RunPauseSignal | None:
+        """Return the Pack-local preflight pause, if required inputs are absent.
+
+        The generic runtime protocol still receives a validated
+        ``PackRunRequest``. Explicit compositions may call this helper before
+        invoking that protocol when their API accepts partially filled input.
+        Supplied-but-invalid values continue through normal validation and are
+        never repaired from browser observation.
+        """
+
+        missing = missing_stripe_inputs(business_inputs)
+        if not missing:
+            return None
+        return build_stripe_input_pause_signal(
+            run_id=run_id,
+            missing_slots=missing,
+            task_id=task_id,
+            checkpoint_id=checkpoint_id,
+        )
 
     @property
     def binding(self) -> PackRuntimeBinding:

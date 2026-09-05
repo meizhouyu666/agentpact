@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from enterprise.agent_runs.pause_signal import RunPauseAction, RunPauseOutcome, RunResumePolicy
 from enterprise.auth.schemas import UserContext
 from enterprise.domains.stripe_payment.accounts import require_stripe_account
 from enterprise.domains.stripe_payment.constants import (
@@ -23,9 +24,11 @@ from enterprise.domains.stripe_payment.m10_runtime import (
     StripeM10NotWired,
     StripeM10PreparedRun,
     StripePaymentRuntimeAdapter,
+    build_stripe_input_pause_signal,
     build_stripe_provider_factory,
     compose_stripe_agent_run_service,
     derive_stripe_agent_run_id,
+    missing_stripe_inputs,
 )
 from enterprise.governance.pack_runtime import (
     ApprovalRequestSpecification,
@@ -144,6 +147,44 @@ def test_prepare_run_compiles_one_trusted_plan_with_immutable_digests():
     assert CAPABILITY_ID in projection.capability_ids
     assert "payment_intent_id" in projection.input_slot_names
     assert "amount_minor" in projection.input_slot_names
+
+
+def test_stripe_missing_inputs_compose_generic_pre_effect_pause_without_vendor_fields():
+    missing = missing_stripe_inputs({"currency": "usd"})
+    assert missing == ("payment_intent_id", "amount_minor")
+    signal = build_stripe_input_pause_signal(run_id="run-stripe-input", missing_slots=missing)
+    assert signal.outcome is RunPauseOutcome.AWAITING_INPUT
+    assert signal.external_effect_started is False
+    assert signal.resume_policy is RunResumePolicy.INPUT_SUBMISSION
+    assert signal.allowed_actions == (RunPauseAction.SUBMIT_INPUT, RunPauseAction.CANCEL)
+    assert signal.input_request is not None
+    assert tuple(slot.slot_name for slot in signal.input_request.slots) == missing
+    assert signal.prompt is not None and signal.prompt.redacted is True
+    assert "stripe" not in signal.prompt.message.lower()
+    assert "payment_intent_id" not in signal.prompt.message
+    assert signal.model_dump(mode="json")["input_request"]["pack_id"] == "stripe.payment"
+    assert _adapter().missing_input_pause(run_id="run-stripe-input", business_inputs={"currency": "usd"}) == signal
+
+
+def test_stripe_input_pause_has_stable_checkpoint_and_no_replay_after_effect():
+    signal = build_stripe_input_pause_signal(run_id="run-stripe-input", missing_slots=("amount_minor",))
+    resumed = build_stripe_input_pause_signal(
+        run_id="run-stripe-input",
+        missing_slots=("amount_minor",),
+        checkpoint_id=signal.checkpoint_id,
+    )
+    assert resumed.checkpoint_id == signal.checkpoint_id
+    assert resumed.input_request is not None
+    assert resumed.input_request.recovery is True
+    from pydantic import ValidationError
+
+    invalid = signal.model_dump(mode="json")
+    invalid["external_effect_started"] = True
+    invalid["input_request"]["external_effect_started"] = True
+    with pytest.raises(ValidationError, match="Input recovery is permitted only before"):
+        from enterprise.agent_runs.pause_signal import RunPauseSignal
+
+        RunPauseSignal.model_validate(invalid)
 
 
 async def test_recorded_m10_lifecycle_pauses_then_advances_to_confirmed():
