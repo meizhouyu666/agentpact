@@ -21,6 +21,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
+from sqlalchemy.types import TypeDecorator
 
 from skyvern.forge.sdk.db.id import generate_id
 from skyvern.forge.sdk.db.models import Base
@@ -28,6 +29,24 @@ from skyvern.forge.sdk.db.models import Base
 
 def _governance_id(prefix: str) -> str:
     return f"{prefix}_{generate_id()}"
+
+
+class UtcNaiveDateTime(TypeDecorator):
+    """Bind UTC-aware datetimes to an existing ``timestamp`` column.
+
+    The governance domain uses aware UTC values, while the legacy
+    ``task_contracts.expires_at`` column is declared without time zone.
+    Normalize only at the database bind boundary so comparisons and API
+    contracts continue to use aware values.
+    """
+
+    impl = DateTime
+    cache_ok = True
+
+    def process_bind_param(self, value: datetime.datetime | None, dialect: object) -> datetime.datetime | None:
+        if value is None or value.tzinfo is None:
+            return value
+        return value.astimezone(datetime.timezone.utc).replace(tzinfo=None)
 
 
 class TaskContractModel(Base):
@@ -49,9 +68,9 @@ class TaskContractModel(Base):
     success_criteria = Column(JSON, nullable=False, default=list)
     mode = Column(String, nullable=False, default="audit")
     version = Column(Integer, nullable=False, default=1)
-    expires_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.datetime.utcnow)
-    modified_at = Column(DateTime, nullable=False, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    expires_at = Column(UtcNaiveDateTime(), nullable=True)
+    created_at = Column(UtcNaiveDateTime(), nullable=False, default=datetime.datetime.utcnow)
+    modified_at = Column(UtcNaiveDateTime(), nullable=False, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
     __table_args__ = (
         CheckConstraint("mode IN ('off', 'audit', 'enforce')", name="ck_task_contract_mode"),
@@ -74,7 +93,7 @@ class GovernanceAuditEventModel(Base):
     observation_hash = Column(String, nullable=True)
     policy_version = Column(String, nullable=True)
     payload = Column(JSON, nullable=False, default=dict)
-    created_at = Column(DateTime, nullable=False, default=datetime.datetime.utcnow, index=True)
+    created_at = Column(UtcNaiveDateTime(), nullable=False, default=datetime.datetime.utcnow, index=True)
 
     __table_args__ = (
         CheckConstraint("mode IN ('off', 'audit', 'enforce')", name="ck_governance_event_mode"),
@@ -146,9 +165,9 @@ class ExecutionPermitModel(Base):
     policy_decision_id = Column(String, nullable=False)
     decision_payload = Column(JSON, nullable=False)
     status = Column(String, nullable=False, default="issued")
-    issued_at = Column(DateTime, nullable=False, default=datetime.datetime.utcnow)
-    expires_at = Column(DateTime, nullable=False)
-    used_at = Column(DateTime, nullable=True)
+    issued_at = Column(UtcNaiveDateTime(), nullable=False, default=datetime.datetime.utcnow)
+    expires_at = Column(UtcNaiveDateTime(), nullable=False)
+    used_at = Column(UtcNaiveDateTime(), nullable=True)
 
     __table_args__ = (
         CheckConstraint("status IN ('issued', 'consumed', 'revoked', 'expired')", name="ck_execution_permit_status"),
@@ -172,9 +191,9 @@ class PendingActionModel(Base):
     approval_id = Column(String, nullable=True, unique=True)
     status = Column(String, nullable=False, default="pending")
     row_version = Column(Integer, nullable=False, default=1)
-    expires_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.datetime.utcnow)
-    modified_at = Column(DateTime, nullable=False, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    expires_at = Column(UtcNaiveDateTime(), nullable=True)
+    created_at = Column(UtcNaiveDateTime(), nullable=False, default=datetime.datetime.utcnow)
+    modified_at = Column(UtcNaiveDateTime(), nullable=False, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
     __table_args__ = (
         CheckConstraint(
@@ -213,10 +232,10 @@ class ExecutionAttemptModel(Base):
     result_probe_ref = Column(String, nullable=True)
     result_probe = Column(JSON, nullable=True)
     error_message = Column(Text, nullable=True)
-    started_at = Column(DateTime, nullable=True)
-    completed_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.datetime.utcnow)
-    modified_at = Column(DateTime, nullable=False, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    started_at = Column(UtcNaiveDateTime(), nullable=True)
+    completed_at = Column(UtcNaiveDateTime(), nullable=True)
+    created_at = Column(UtcNaiveDateTime(), nullable=False, default=datetime.datetime.utcnow)
+    modified_at = Column(UtcNaiveDateTime(), nullable=False, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
     __table_args__ = (
         CheckConstraint(
