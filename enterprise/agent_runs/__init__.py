@@ -1,5 +1,16 @@
 """Enterprise Agent Run API application boundary."""
 
+from .pause_signal import (
+    PauseAction,
+    PauseOutcome,
+    PromptMetadata,
+    ResumePolicy,
+    RunPauseAction,
+    RunPauseOutcome,
+    RunPausePromptMetadata,
+    RunPauseSignal,
+    RunResumePolicy,
+)
 from .persistence import (
     AgentPactStepSnapshot,
     AgentPactStepStatus,
@@ -26,4 +37,13 @@ __all__ = [
     "AgentPactStepStatus",
     "AgentPactTaskSnapshot",
     "AgentPactTaskStatus",
+    "PauseAction",
+    "PauseOutcome",
+    "PromptMetadata",
+    "ResumePolicy",
+    "RunPauseAction",
+    "RunPauseOutcome",
+    "RunPausePromptMetadata",
+    "RunPauseSignal",
+    "RunResumePolicy",
 ]
