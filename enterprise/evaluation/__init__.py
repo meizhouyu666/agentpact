@@ -2,7 +2,17 @@
 
 from .benchmark import BenchmarkMetrics, BenchmarkRecord, replay_fault, summarize
 from .quantitative_benchmark import (
+    Arm,
+    ArmMetrics,
     CASE_SCHEMA_VERSION,
+    CaseOpportunity,
+    HardGateViolation,
+    OpportunityMetrics,
+    PairIdentity,
+    PairedBenchmarkCaseResult,
+    ProtocolMetrics,
+    PROTOCOL_CASE_SCHEMA_VERSION,
+    PROTOCOL_REPORT_SCHEMA_VERSION,
     REPORT_SCHEMA_VERSION,
     BenchmarkCaseResult,
     CountObservation,
@@ -10,10 +20,21 @@ from .quantitative_benchmark import (
     RecoveryObservation,
     SafetyObservations,
     aggregate_quantitative_benchmark,
+    aggregate_paired_quantitative_benchmark,
 )
 
 __all__ = [
     "CASE_SCHEMA_VERSION",
+    "PROTOCOL_CASE_SCHEMA_VERSION",
+    "PROTOCOL_REPORT_SCHEMA_VERSION",
+    "Arm",
+    "ArmMetrics",
+    "CaseOpportunity",
+    "HardGateViolation",
+    "OpportunityMetrics",
+    "PairIdentity",
+    "PairedBenchmarkCaseResult",
+    "ProtocolMetrics",
     "REPORT_SCHEMA_VERSION",
     "BenchmarkCaseResult",
     "BenchmarkMetrics",
@@ -23,6 +44,7 @@ __all__ = [
     "RecoveryObservation",
     "SafetyObservations",
     "aggregate_quantitative_benchmark",
+    "aggregate_paired_quantitative_benchmark",
     "replay_fault",
     "summarize",
 ]
