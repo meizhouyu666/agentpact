@@ -134,6 +134,9 @@ class StripePaymentEnforceHarness:
         *,
         requester: UserContext,
         facts: StripePaymentFacts,
+        task_id: str | None = None,
+        step_id: str | None = None,
+        contract_id: str | None = None,
     ) -> StripeSubmissionChallenge:
         now = self._now()
         self._require_operator(requester)
@@ -160,10 +163,10 @@ class StripePaymentEnforceHarness:
         )
 
         record = self.store.create_draft(facts=facts, requester_user_id=requester.user_id)
-        task_id = f"stripe_task_{uuid4().hex}"
-        step_id = f"stripe_step_{uuid4().hex}"
+        task_id = task_id or f"stripe_task_{uuid4().hex}"
+        step_id = step_id or f"stripe_step_{uuid4().hex}"
         contract = TaskContract(
-            contract_id=f"stripe_contract_{uuid4().hex}",
+            contract_id=contract_id or f"stripe_contract_{uuid4().hex}",
             task_id=task_id,
             organization_id=TENANT_ID,
             initiator_id=requester.user_id,

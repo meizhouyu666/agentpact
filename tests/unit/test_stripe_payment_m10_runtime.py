@@ -17,7 +17,7 @@ from enterprise.domains.stripe_payment.constants import (
     CAPABILITY_ID,
     TENANT_ID,
 )
-from enterprise.domains.stripe_payment.live_browser import StripeHostedCheckoutFlow
+from enterprise.domains.stripe_payment.live_browser import StripeCheckoutInputs, StripeHostedCheckoutFlow
 from enterprise.domains.stripe_payment.m6_runtime import STRIPE_RUNTIME_CONTRACT
 from enterprise.domains.stripe_payment.m10_runtime import (
     M10_ADAPTER_ID,
@@ -72,6 +72,28 @@ def _adapter(*, provider_mode: str = "recorded") -> StripePaymentRuntimeAdapter:
         hmac_secret="stripe-m10-test-hmac",
         clock=lambda: NOW,
     )
+
+
+def test_live_composition_keeps_checkout_inputs_at_the_stripe_adapter_edge(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_composition")
+    inputs = StripeCheckoutInputs(
+        email="stripe-test@example.com",
+        cardholder_name="AgentPact Test",
+        billing_country="US",
+        billing_postal_code="10001",
+    )
+    flow = StripeHostedCheckoutFlow(checkout_inputs=inputs)
+    service = compose_stripe_agent_run_service(
+        session_factory=_unused_session_factory,
+        target_url="https://stripe.example.test/live",
+        provider_mode="live",
+        provider_factory=lambda _inputs: object(),
+        live_browser=flow,
+        checkout_inputs=inputs,
+        hmac_secret="stripe-m10-test-hmac",
+    )
+    adapter = service._registry.require(pack_id="stripe.payment", pack_version="0.1.0-draft.1")
+    assert adapter._checkout_inputs == inputs  # type: ignore[attr-defined]
 
 
 def _prepared(adapter: StripePaymentRuntimeAdapter) -> StripeM10PreparedRun:

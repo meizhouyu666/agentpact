@@ -43,6 +43,16 @@ from enterprise.agent.constrained_planner import (
     PlannerTransport,
 )
 from enterprise.agent.interactions import CapabilityRequest, CapabilityRequestKind, EntryMode
+from enterprise.agent_runs.journal import (
+    PLAN_APPLICATION_MARKER,
+    GovernedPlanCheckpoint,
+    GovernedPlanStepRef,
+    PlanJournalTransition,
+    PlanStepState,
+)
+from enterprise.agent_runs.journal import (
+    _event as _build_plan_event,
+)
 from enterprise.agent_runs.pause_signal import (
     RunPauseAction,
     RunPauseOutcome,
@@ -68,7 +78,12 @@ from enterprise.governance.input_contracts import (
     InputSource,
     InputTargetKind,
 )
-from enterprise.governance.models import ExecutionAttemptModel, GovernedTaskAdmissionModel
+from enterprise.governance.models import (
+    ExecutionAttemptModel,
+    GovernanceAuditEventModel,
+    GovernedTaskAdmissionModel,
+    TaskContractModel,
+)
 from enterprise.governance.pack_runtime import (
     ApprovalHandler,
     ApprovalRequestSpecification,
@@ -85,6 +100,9 @@ from enterprise.governance.pack_runtime import (
     PackRuntimeRegistry,
     PreparedRunReference,
 )
+from skyvern.forge.sdk.db.models import StepModel, TaskModel
+from skyvern.forge.sdk.models import StepStatus
+from skyvern.forge.sdk.schemas.tasks import TaskStatus
 
 from .accounts import require_stripe_account
 from .constants import (
@@ -98,6 +116,7 @@ from .constants import (
 )
 from .harness import ChallengeState, StripePaymentEnforceHarness, StripeSubmissionChallenge
 from .live_browser import (
+    StripeCheckoutInputs,
     StripeHostedCheckoutError,
     StripeHostedCheckoutFlow,
     derive_live_idempotency_key,
@@ -318,6 +337,7 @@ class StripePaymentRuntimeAdapter:
         provider_mode: Literal["recorded", "live"] = "recorded",
         provider_factory: StripePlannerFactory | None = None,
         live_browser: StripeHostedCheckoutFlow | None = None,
+        checkout_inputs: StripeCheckoutInputs | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._session_factory = session_factory
@@ -330,6 +350,7 @@ class StripePaymentRuntimeAdapter:
         self._provider_mode = provider_mode
         self._provider_factory = provider_factory or build_stripe_provider_factory(provider_mode)
         self._live_browser = live_browser
+        self._checkout_inputs = checkout_inputs
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._harnesses: dict[str, StripePaymentEnforceHarness] = {}
         self._challenge_ids: dict[str, str] = {}
@@ -560,10 +581,14 @@ class StripePaymentRuntimeAdapter:
     async def _prepare_challenge(self, run: StripeM10PreparedRun) -> StripeSubmissionChallenge:
         if self._session_factory is not None:
             await self._persist_admission(run)
+            await self._initialize_agent_run_state(run)
         harness = self._harness_for(run)
         challenge = harness.prepare_submission(
             requester=run.user,
             facts=StripePaymentFacts.model_validate(run.business_inputs),
+            task_id=_stripe_native_task_id(run),
+            step_id=_stripe_native_step_id(run),
+            contract_id=run.compilation.work_order.contract_id,
         )
         self._challenge_ids[run.run_id] = challenge.challenge_id
         return challenge
@@ -643,30 +668,57 @@ class StripePaymentRuntimeAdapter:
             raise StripeM10NotWired("stripe.payment live Attempt already crossed the browser boundary")
 
         facts = StripePaymentFacts.model_validate(run.business_inputs)
-        step_id = run.compilation.business_plan.steps[0].step_id
-        result = await self._live_browser.execute_governed(
-            facts=facts,
-            idempotency_key=derive_live_idempotency_key(
-                request_id=run.admission_bundle.request.request_id,
-                payment_intent_id=facts.payment_intent_id,
-            ),
-            task_id=run.run_id,
-            step_id=step_id,
-            contract_id=run.compilation.task_contract.contract_id,
-            organization_id=run.user.org_id,
-            session_factory=self._session_factory,
-            integrity_secret=self._secret,
-            runtime_factory=trusted_inputs.get("runtime_factory"),
-            success_url=trusted_inputs.get(
-                "success_url",
-                "https://example.com/agentpact-stripe-success?session_id={CHECKOUT_SESSION_ID}",
-            ),
-            cancel_url=trusted_inputs.get("cancel_url", "https://example.com/agentpact-stripe-cancel"),
-            now=self._clock(),
-        )
+        step_id = _stripe_native_step_id(run)
+        try:
+            result = await self._live_browser.execute_governed(
+                facts=facts,
+                idempotency_key=derive_live_idempotency_key(
+                    request_id=run.admission_bundle.request.request_id,
+                    payment_intent_id=facts.payment_intent_id,
+                ),
+                task_id=_stripe_native_task_id(run),
+                step_id=step_id,
+                contract_id=run.compilation.work_order.contract_id,
+                organization_id=run.user.org_id,
+                session_factory=self._session_factory,
+                integrity_secret=self._secret,
+                runtime_factory=trusted_inputs.get("runtime_factory"),
+                success_url=trusted_inputs.get(
+                    "success_url",
+                    "https://example.com/agentpact-stripe-success?session_id={CHECKOUT_SESSION_ID}",
+                ),
+                cancel_url=trusted_inputs.get("cancel_url", "https://example.com/agentpact-stripe-cancel"),
+                checkout_inputs=trusted_inputs.get("checkout_inputs", self._checkout_inputs),
+                now=self._clock(),
+            )
+        except StripeHostedCheckoutError:
+            # The browser boundary may have committed before a follow-up
+            # Checkout Session read failed. Preserve UNKNOWN and expose the
+            # exact checkpoint to the generic Agent Run probe command.
+            uncertain = await self._load_live_attempt(run)
+            if uncertain is None or uncertain.status != ExecutionAttemptStatus.UNKNOWN.value:
+                raise
+            uncertain_checkpoint = self._checkpoint_from_live_attempt(uncertain)
+            await self._set_live_native_status(
+                run,
+                task_status=TaskStatus.pending_result_probe.value,
+                step_status=StepStatus.pending_result_probe.value,
+            )
+            return PackAdvanceResult(
+                status=PackAdvanceStatus.PENDING_RESULT_PROBE,
+                run_id=run.run_id,
+                step_id=uncertain_checkpoint.step_id,
+                reason_code="RESULT_UNCERTAIN",
+                execution_checkpoint=uncertain_checkpoint,
+            )
         checkpoint = result.execution_checkpoint
         if checkpoint is None:
             raise StripeHostedCheckoutError("Stripe hosted Checkout did not persist an execution checkpoint")
+        await self._set_live_native_status(
+            run,
+            task_status=TaskStatus.pending_result_probe.value,
+            step_status=StepStatus.pending_result_probe.value,
+        )
         self._live_results[run.run_id] = result
         return PackAdvanceResult(
             status=PackAdvanceStatus.PENDING_RESULT_PROBE,
@@ -706,6 +758,12 @@ class StripePaymentRuntimeAdapter:
             PackProbeStatus.NOT_CONFIRMED: "BUSINESS_RESULT_NOT_CONFIRMED",
             PackProbeStatus.INCONCLUSIVE: "BUSINESS_RESULT_INCONCLUSIVE",
         }[status]
+        if status is not PackProbeStatus.INCONCLUSIVE:
+            await self._set_live_native_status(
+                run,
+                task_status=TaskStatus.completed.value,
+                step_status=StepStatus.completed.value,
+            )
         return PackProbeResult(
             status=status,
             checkpoint=checkpoint,
@@ -734,7 +792,9 @@ class StripePaymentRuntimeAdapter:
             attempts = list(
                 (
                     await session.scalars(
-                        select(ExecutionAttemptModel).where(ExecutionAttemptModel.task_id == run.run_id)
+                        select(ExecutionAttemptModel).where(
+                            ExecutionAttemptModel.task_id == _stripe_native_task_id(run)
+                        )
                     )
                 ).all()
             )
@@ -745,6 +805,39 @@ class StripePaymentRuntimeAdapter:
                     session.expunge(attempts[0])
                 return attempts[0]
         return None
+
+    async def _set_live_native_status(
+        self,
+        run: StripeM10PreparedRun,
+        *,
+        task_status: str,
+        step_status: str,
+    ) -> None:
+        if self._session_factory is None:
+            raise StripeM10NotWired("Stripe live native state requires a persisted session")
+        async with self._session_factory() as session:
+            async with session.begin():
+                task = (
+                    await session.scalars(
+                        select(TaskModel).where(
+                            TaskModel.task_id == _stripe_native_task_id(run),
+                            TaskModel.organization_id == run.user.org_id,
+                        ).with_for_update()
+                    )
+                ).first()
+                step = (
+                    await session.scalars(
+                        select(StepModel).where(
+                            StepModel.task_id == _stripe_native_task_id(run),
+                            StepModel.step_id == _stripe_native_step_id(run),
+                            StepModel.organization_id == run.user.org_id,
+                        ).with_for_update()
+                    )
+                ).first()
+                if task is None or step is None:
+                    raise StripeM10NotWired("Stripe live native Task/Step is missing")
+                task.status = task_status
+                step.status = step_status
 
     @staticmethod
     def _checkpoint_from_live_attempt(attempt: ExecutionAttemptModel) -> ExecutionCheckpoint:
@@ -822,9 +915,9 @@ class StripePaymentRuntimeAdapter:
     ) -> ApprovalRequestSpecification:
         approver = challenge.decision.required_approver or {}
         return ApprovalRequestSpecification(
-            task_id=challenge.intent.task_id,
-            step_id=challenge.intent.step_id,
-            contract_id=challenge.contract.contract_id,
+            task_id=_stripe_native_task_id(run),
+            step_id=_stripe_native_step_id(run),
+            contract_id=run.compilation.work_order.contract_id,
             organization_id=run.user.org_id,
             intent_id=challenge.intent.intent_id,
             action_fingerprint=challenge.intent.action_fingerprint,
@@ -842,6 +935,154 @@ class StripePaymentRuntimeAdapter:
             redacted_description="Submit one approved Stripe test-mode payment",
             policy_decision=challenge.decision.model_dump(mode="json"),
         )
+
+    async def _initialize_agent_run_state(self, run: StripeM10PreparedRun) -> None:
+        """Publish the formal Agent Run root and its one active native child."""
+
+        work_order = run.compilation.work_order
+        root_task_id = run.run_id
+        native_task_id = _stripe_native_task_id(run)
+        native_step_id = _stripe_native_step_id(run)
+        native_contract_id = work_order.contract_id
+        checkpoint = _stripe_initial_checkpoint(run, native_step_id=native_step_id)
+        authority = run.compilation.task_contract
+        authority_digests = {
+            "admission": _digest(run.admission_bundle),
+            "compilation": _digest(run.compilation),
+        }
+        async with self._session_factory() as session:
+            async with session.begin():
+                root = (
+                    await session.scalars(
+                        select(TaskModel).where(
+                            TaskModel.task_id == root_task_id,
+                            TaskModel.organization_id == run.user.org_id,
+                        ).with_for_update()
+                    )
+                ).first()
+                if root is None:
+                    session.add(
+                        TaskModel(
+                            task_id=root_task_id,
+                            organization_id=run.user.org_id,
+                            status=TaskStatus.running.value,
+                            title="AgentPact Stripe governed payment plan",
+                            url=run.target_url,
+                            navigation_goal=authority.goal,
+                            navigation_payload={},
+                            application=PLAN_APPLICATION_MARKER,
+                            errors=[],
+                        )
+                    )
+                    await session.flush()
+                elif root.application != PLAN_APPLICATION_MARKER:
+                    raise ValueError("Stripe Agent Run root Task has an untrusted application marker")
+
+                child = (
+                    await session.scalars(
+                        select(TaskModel).where(
+                            TaskModel.task_id == native_task_id,
+                            TaskModel.organization_id == run.user.org_id,
+                        ).with_for_update()
+                    )
+                ).first()
+                if child is None:
+                    session.add(
+                        TaskModel(
+                            task_id=native_task_id,
+                            organization_id=run.user.org_id,
+                            status=TaskStatus.running.value,
+                            title="AgentPact Stripe governed payment effect",
+                            url=run.target_url,
+                            navigation_goal=work_order.navigation_goal,
+                            navigation_payload=run.business_inputs,
+                            application=PLAN_APPLICATION_MARKER,
+                            errors=[],
+                        )
+                    )
+                    await session.flush()
+                elif child.application != PLAN_APPLICATION_MARKER:
+                    raise ValueError("Stripe Agent Run child Task has an untrusted application marker")
+
+                step = (
+                    await session.scalars(
+                        select(StepModel).where(
+                            StepModel.step_id == native_step_id,
+                            StepModel.task_id == native_task_id,
+                            StepModel.organization_id == run.user.org_id,
+                        ).with_for_update()
+                    )
+                ).first()
+                if step is None:
+                    session.add(
+                        StepModel(
+                            step_id=native_step_id,
+                            organization_id=run.user.org_id,
+                            task_id=native_task_id,
+                            status=StepStatus.running.value,
+                            order=0,
+                            retry_index=0,
+                            is_last=True,
+                            created_by=PLAN_APPLICATION_MARKER,
+                        )
+                    )
+                    await session.flush()
+                elif step.created_by != PLAN_APPLICATION_MARKER:
+                    raise ValueError("Stripe Agent Run native Step has an untrusted creator")
+
+                root_contract = (
+                    await session.scalars(
+                        select(TaskContractModel).where(TaskContractModel.contract_id == authority.contract_id)
+                    )
+                ).first()
+                if root_contract is None:
+                    session.add(_task_contract_model(authority, task_id=root_task_id, contract_id=authority.contract_id))
+                    await session.flush()
+                elif root_contract.task_id != root_task_id:
+                    raise ValueError("Stripe Agent Run authority contract identity conflicts")
+
+                child_contract = (
+                    await session.scalars(
+                        select(TaskContractModel).where(TaskContractModel.contract_id == native_contract_id)
+                    )
+                ).first()
+                if native_contract_id == authority.contract_id:
+                    if child_contract is None or child_contract.task_id != root_task_id:
+                        raise ValueError("Stripe Agent Run shared contract identity conflicts")
+                elif child_contract is None:
+                    session.add(_task_contract_model(authority, task_id=native_task_id, contract_id=native_contract_id))
+                    await session.flush()
+                elif child_contract.task_id != native_task_id:
+                    raise ValueError("Stripe Agent Run native contract identity conflicts")
+
+                existing_events = list(
+                    await session.scalars(
+                        select(GovernanceAuditEventModel).where(
+                            GovernanceAuditEventModel.task_id == root_task_id,
+                            GovernanceAuditEventModel.event_type == "agent-run.plan.admitted",
+                        )
+                    )
+                )
+                if not existing_events:
+                    event = _build_plan_event(
+                        checkpoint=checkpoint,
+                        transition=PlanJournalTransition.ADMITTED,
+                        authority_digests=authority_digests,
+                        created_at=self._clock(),
+                    )
+                    session.add(
+                        GovernanceAuditEventModel(
+                            event_id=event.event_id,
+                            task_id=root_task_id,
+                            step_id=None,
+                            contract_id=authority.contract_id,
+                            organization_id=run.user.org_id,
+                            event_type="agent-run.plan.admitted",
+                            mode="audit",
+                            payload=event.model_dump(mode="json"),
+                            created_at=event.created_at,
+                        )
+                    )
 
     def _reference(self, run: StripeM10PreparedRun) -> PreparedRunReference:
         return PreparedRunReference(
@@ -961,6 +1202,7 @@ def compose_stripe_agent_run_service(
     hmac_secret: str | None = None,
     provider_factory: StripePlannerFactory | None = None,
     live_browser: StripeHostedCheckoutFlow | None = None,
+    checkout_inputs: StripeCheckoutInputs | None = None,
     provider_timeout_seconds: float = 30.0,
     clock: Callable[[], datetime] | None = None,
 ) -> AgentRunService:
@@ -985,6 +1227,7 @@ def compose_stripe_agent_run_service(
         provider_mode=provider_mode,
         provider_factory=provider_factory,
         live_browser=live_browser,
+        checkout_inputs=checkout_inputs,
         clock=clock,
     )
     registry.register(adapter)
@@ -1122,3 +1365,62 @@ def _admission_bundle(
 def _digest(value: object) -> str:
     canonical = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _stripe_native_task_id(run: StripeM10PreparedRun) -> str:
+    return run.run_id
+
+
+def _stripe_native_step_id(run: StripeM10PreparedRun) -> str:
+    return "stripe_step_" + _digest([run.run_id, run.compilation.work_order.work_order_id])[:48]
+
+
+def _stripe_initial_checkpoint(
+    run: StripeM10PreparedRun,
+    *,
+    native_step_id: str,
+) -> GovernedPlanCheckpoint:
+    work_order = run.compilation.work_order
+    business_step = run.compilation.business_plan.steps[0]
+    active = GovernedPlanStepRef(
+        business_plan_step_id=business_step.step_id,
+        step_digest=_digest(business_step),
+        work_order_id=work_order.work_order_id,
+        work_order_digest=_digest(work_order),
+        native_task_id=_stripe_native_task_id(run),
+        native_step_id=native_step_id,
+        native_contract_id=work_order.contract_id,
+        authority_contract_id=run.compilation.task_contract.contract_id,
+        state=PlanStepState.ACTIVE,
+    )
+    return GovernedPlanCheckpoint(
+        plan_run_id=run.run_id,
+        admission_id=run.admission_bundle.admission_id,
+        root_task_id=run.run_id,
+        plan_id=run.compilation.business_plan.plan_id,
+        plan_version=run.compilation.business_plan.version,
+        authority_contract_id=run.compilation.task_contract.contract_id,
+        active_step=active,
+    )
+
+
+def _task_contract_model(authority: Any, *, task_id: str, contract_id: str) -> TaskContractModel:
+    return TaskContractModel(
+        contract_id=contract_id,
+        task_id=task_id,
+        organization_id=authority.organization_id,
+        initiator_id=authority.initiator_id,
+        service_principal_id=authority.service_principal_id,
+        department_id=authority.department_id,
+        business_line_id=authority.business_line_id,
+        goal=authority.goal,
+        allowed_operations=sorted(authority.allowed_operations),
+        data_scope=authority.data_scope,
+        authorization_snapshot=authority.authorization_snapshot,
+        policy_profile=authority.policy_profile,
+        policy_version=authority.policy_version,
+        success_criteria=authority.success_criteria,
+        mode="audit",
+        version=authority.version,
+        expires_at=authority.expires_at,
+    )

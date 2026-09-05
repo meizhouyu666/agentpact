@@ -9,6 +9,7 @@ import pytest
 
 from enterprise.browser_loop.contracts import BrowserSessionMode, BrowserSessionPolicy
 from enterprise.domains.stripe_payment.live_browser import (
+    StripeCheckoutInputs,
     StripeHostedCheckoutError,
     StripeHostedCheckoutFlow,
     StripeHostedCheckoutSession,
@@ -58,6 +59,26 @@ def test_stripe_browser_policy_defaults_headless_and_rejects_implicit_remote_upg
                 ),
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_checkout_inputs_are_forwarded_at_the_adapter_edge(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def runner(_url: str, **kwargs: object) -> str:
+        captured.update(kwargs)
+        return "completed"
+
+    inputs = StripeCheckoutInputs(
+        email="stripe-test@example.com",
+        cardholder_name="AgentPact Test",
+        billing_country="US",
+        billing_postal_code="10001",
+    )
+    flow = StripeHostedCheckoutFlow(browser_runner=runner, checkout_inputs=inputs)
+    assert flow.checkout_inputs == inputs
+    assert await flow._run_browser("https://checkout.stripe.com/c/pay/cs_test_123", success_url="https://example.com/s", checkout_inputs=inputs) == "completed"
+    assert captured == {"success_url": "https://example.com/s"}
 
 
 def test_checkout_url_parser_accepts_only_real_hosted_stripe_urls():

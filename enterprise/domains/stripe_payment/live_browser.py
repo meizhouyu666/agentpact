@@ -658,14 +658,7 @@ class StripeHostedCheckoutFlow:
         self._session_policy = session_policy
         self._checkout_inputs = checkout_inputs
         self._api_client_factory = api_client_factory or (lambda key: StripeTestApiClient(secret_key=key))
-        self._browser_runner = browser_runner or (
-            lambda url, *, success_url: run_stripe_test_checkout(
-                url,
-                success_url=success_url,
-                session_policy=session_policy,
-                checkout_inputs=checkout_inputs,
-            )
-        )
+        self._browser_runner = browser_runner
         self._evidence_dir = Path(evidence_dir) if evidence_dir is not None else None
         self._results: dict[str, StripeHostedCheckoutResult] = {}
         self._started_keys: set[str] = set()
@@ -674,6 +667,26 @@ class StripeHostedCheckoutFlow:
     def session_policy(self) -> BrowserSessionPolicy:
         return self._session_policy
 
+    @property
+    def checkout_inputs(self) -> StripeCheckoutInputs | None:
+        return self._checkout_inputs
+
+    async def _run_browser(
+        self,
+        checkout_url: str,
+        *,
+        success_url: str,
+        checkout_inputs: StripeCheckoutInputs | None,
+    ) -> str:
+        if self._browser_runner is not None:
+            return await self._browser_runner(checkout_url, success_url=success_url)
+        return await run_stripe_test_checkout(
+            checkout_url,
+            success_url=success_url,
+            session_policy=self._session_policy,
+            checkout_inputs=checkout_inputs,
+        )
+
     async def execute(
         self,
         *,
@@ -681,6 +694,7 @@ class StripeHostedCheckoutFlow:
         idempotency_key: str,
         success_url: str = DEFAULT_SUCCESS_URL,
         cancel_url: str = DEFAULT_CANCEL_URL,
+        checkout_inputs: StripeCheckoutInputs | None = None,
     ) -> StripeHostedCheckoutResult:
         if not idempotency_key:
             raise StripeHostedCheckoutError("Stripe hosted Checkout requires a non-empty idempotency key")
@@ -702,7 +716,11 @@ class StripeHostedCheckoutFlow:
         )
         parse_stripe_checkout_url(session.checkout_url)
         try:
-            browser_result = await self._browser_runner(session.checkout_url, success_url=success_url)
+            browser_result = await self._run_browser(
+                session.checkout_url,
+                success_url=success_url,
+                checkout_inputs=checkout_inputs or self._checkout_inputs,
+            )
         except Exception as exc:
             diagnostic = getattr(exc, "diagnostic", None) or _browser_diagnostic(stage="browser", reason_code="browser_runner_error", error=exc)
             raise StripeHostedCheckoutError("Stripe hosted checkout browser runner failed", diagnostic=diagnostic) from exc
@@ -765,6 +783,7 @@ class StripeHostedCheckoutFlow:
         runtime_factory: GovernedCheckoutRuntimeFactory | None = None,
         success_url: str = DEFAULT_SUCCESS_URL,
         cancel_url: str = DEFAULT_CANCEL_URL,
+        checkout_inputs: StripeCheckoutInputs | None = None,
         now: datetime | None = None,
     ) -> StripeHostedCheckoutResult:
         """Execute one hosted Checkout submit through the AgentPact boundary.
@@ -781,7 +800,10 @@ class StripeHostedCheckoutFlow:
             raise StripeHostedCheckoutError("Governed Stripe Checkout requires an integrity secret")
         if not idempotency_key:
             raise StripeHostedCheckoutError("Governed Stripe Checkout requires a non-empty idempotency key")
-        runtime_factory = runtime_factory or self.governed_runtime_factory(success_url=success_url)
+        runtime_factory = runtime_factory or self.governed_runtime_factory(
+            success_url=success_url,
+            checkout_inputs=checkout_inputs or self._checkout_inputs,
+        )
         prior = self._results.get(idempotency_key)
         if prior is not None:
             return prior
@@ -990,12 +1012,21 @@ class StripeHostedCheckoutFlow:
     def result_for(self, idempotency_key: str) -> StripeHostedCheckoutResult | None:
         return self._results.get(idempotency_key)
 
-    def governed_runtime_factory(self, *, success_url: str = DEFAULT_SUCCESS_URL) -> GovernedCheckoutRuntimeFactory:
+    def governed_runtime_factory(
+        self,
+        *,
+        success_url: str = DEFAULT_SUCCESS_URL,
+        checkout_inputs: StripeCheckoutInputs | None = None,
+    ) -> GovernedCheckoutRuntimeFactory:
         """Return the hosted browser callback as a preflight-capable runtime."""
 
         return lambda checkout_url: StripeHostedCheckoutBrowserRuntime(
             checkout_url,
-            self._browser_runner,
+            lambda url, *, success_url: self._run_browser(
+                url,
+                success_url=success_url,
+                checkout_inputs=checkout_inputs,
+            ),
             success_url=success_url,
         )
 
