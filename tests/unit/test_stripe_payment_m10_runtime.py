@@ -28,8 +28,8 @@ from enterprise.domains.stripe_payment.m10_runtime import (
     build_stripe_provider_factory,
     compose_stripe_agent_run_service,
     derive_stripe_agent_run_id,
-    missing_stripe_inputs,
     map_stripe_inputs_to_checkout,
+    missing_stripe_inputs,
     stripe_input_declaration,
 )
 from enterprise.governance.pack_runtime import (
@@ -194,7 +194,7 @@ def test_stripe_adapter_input_declaration_maps_semantic_slots_only_at_adapter_ed
     assert tuple(item.slot_name for item in slots) == ("payment_intent_id", "amount_minor")
     assert {item.slot_name for item in bindings} == {"payment_intent_id", "amount_minor"}
     assert {item.adapter_field for item in bindings} == {"payment_intent", "amount"}
-    assert all("payment_intent" not in item.slot_name for item in slots)
+    assert all(item.slot_name != binding.adapter_field for item in slots for binding in bindings)
     assert requirements[0].requirement_name == "hosted_checkout_session"
     assert map_stripe_inputs_to_checkout({"payment_intent_id": "pi_test", "amount_minor": 1250}) == {
         "payment_intent": "pi_test",

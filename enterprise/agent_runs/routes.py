@@ -6,19 +6,19 @@ from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, Response,
 
 from enterprise.auth.dependencies import CurrentUser
 
+from .pause_signal import RunPauseSignal
 from .service import (
     AgentRunCommandRequest,
     AgentRunCreateRequest,
-    AgentRunInputSubmissionRequest,
     AgentRunDecisionTrace,
     AgentRunError,
+    AgentRunInputSubmissionRequest,
     AgentRunPage,
     AgentRunProjection,
     AgentRunReport,
     AgentRunService,
     AgentRunTimelineEvent,
 )
-from .pause_signal import RunPauseSignal
 
 router = APIRouter(prefix="/enterprise/agent-runs", tags=["enterprise-agent-runs"])
 _SERVICE_STATE_KEY = "agentpact_agent_run_service"

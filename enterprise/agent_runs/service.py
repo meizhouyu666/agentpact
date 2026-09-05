@@ -60,6 +60,7 @@ from enterprise.governance.pack_runtime import (
 
 from .coordinator import AgentRunResultCoordinator
 from .journal import AgentRunJournal
+from .pause_signal import RunPauseAction, RunPauseOutcome, RunPauseSignal
 from .persistence import (
     AgentRunNativeStore,
     AgentRunPauseSnapshot,
@@ -67,7 +68,6 @@ from .persistence import (
     AgentRunTaskSnapshot,
     AgentRunTaskStatus,
 )
-from .pause_signal import RunPauseAction, RunPauseOutcome, RunPauseSignal
 
 logger = logging.getLogger(__name__)
 
