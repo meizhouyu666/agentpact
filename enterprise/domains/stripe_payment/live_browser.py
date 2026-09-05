@@ -111,6 +111,17 @@ class StripeBrowserOutcome(str):
         return value
 
 
+class StripeCheckoutInputs(BaseModel):
+    """Adapter-local values required by the current hosted Checkout form."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    email: str = Field(min_length=3, max_length=320)
+    cardholder_name: str = Field(min_length=1, max_length=160)
+    billing_country: str = Field(min_length=2, max_length=2, pattern=r"^[A-Za-z]{2}$")
+    billing_postal_code: str = Field(min_length=1, max_length=32)
+
+
 def validate_stripe_test_key(key: str | None) -> str:
     """Accept only a non-empty Stripe test secret; never accept a live key."""
     if not key:
@@ -398,6 +409,7 @@ async def run_stripe_test_checkout(
     success_url: str,
     session_policy: BrowserSessionPolicy | None = None,
     headless: bool | None = None,
+    checkout_inputs: StripeCheckoutInputs | None = None,
 ) -> StripeBrowserOutcome:
     """Complete the Stripe hosted page with Stripe's documented 4242 test card."""
     parse_stripe_checkout_url(checkout_url)
@@ -434,10 +446,23 @@ async def run_stripe_test_checkout(
             except Exception as exc:
                 return StripeBrowserOutcome("unknown", _browser_diagnostic(stage="navigation", reason_code="browser_navigation_error", url=page.url, success_url=success_url, error=exc))
             try:
+                if checkout_inputs is None:
+                    return StripeBrowserOutcome(
+                        "unknown",
+                        _browser_diagnostic(
+                            stage="field",
+                            reason_code="browser_input_required",
+                            url=page.url,
+                            success_url=success_url,
+                        ),
+                    )
                 await _fill_checkout_field(page, ["input[autocomplete='cc-number']", "input[name='cardnumber']", "input[name='cardNumber']", "input[placeholder*='Card number']"], "4242424242424242")
                 await _fill_checkout_field(page, ["input[autocomplete='cc-exp']", "input[name='exp-date']", "input[name='cardExpiry']", "input[placeholder*='MM']"], "12/34")
                 await _fill_checkout_field(page, ["input[autocomplete='cc-csc']", "input[name='cvc']", "input[name='cardCvc']", "input[placeholder*='CVC']"], "123")
-                await _fill_optional_checkout_field(page, ["input[autocomplete='email']", "input[type='email']"], "stripe-test@example.com")
+                await _fill_checkout_field(page, ["input[autocomplete='email']", "input[type='email']"], checkout_inputs.email)
+                await _fill_checkout_field(page, ["input[autocomplete='cc-name']", "input[name='billingName']"], checkout_inputs.cardholder_name)
+                await _select_checkout_field(page, ["select[autocomplete='billing country']", "select[name='billingCountry']"], checkout_inputs.billing_country)
+                await _fill_checkout_field(page, ["input[autocomplete='billing postal-code']", "input[name='billingPostalCode']"], checkout_inputs.billing_postal_code)
             except Exception as exc:
                 return StripeBrowserOutcome("unknown", _browser_diagnostic(stage="field", reason_code="browser_field_error", url=page.url, success_url=success_url, error=exc))
             try:
@@ -561,6 +586,19 @@ async def _fill_optional_checkout_field(page: Any, selectors: list[str], value: 
         return
 
 
+async def _select_checkout_field(page: Any, selectors: list[str], value: str) -> None:
+    for frame in [page, *page.frames]:
+        for selector in selectors:
+            locator = frame.locator(selector).first
+            try:
+                await locator.wait_for(state="visible", timeout=30_000)
+                await locator.select_option(value)
+                return
+            except Exception:
+                continue
+    raise StripeHostedCheckoutError("Stripe hosted checkout country field was not found")
+
+
 async def _click_payment_button(page: Any) -> None:
     for selector in ["button[type='submit']", "button:has-text('Pay')", "button:has-text('Subscribe')"]:
         button = page.locator(selector).first
@@ -605,6 +643,7 @@ class StripeHostedCheckoutFlow:
         evidence_dir: str | Path | None = None,
         session_policy: BrowserSessionPolicy | None = None,
         headless: bool | None = None,
+        checkout_inputs: StripeCheckoutInputs | None = None,
     ) -> None:
         if session_policy is not None and headless is not None:
             raise StripeLiveConfigurationError("Specify session_policy or legacy headless, not both")
@@ -617,12 +656,14 @@ class StripeHostedCheckoutFlow:
                 "remote_interactive Stripe checkout requires an injected controlled browser runner"
             )
         self._session_policy = session_policy
+        self._checkout_inputs = checkout_inputs
         self._api_client_factory = api_client_factory or (lambda key: StripeTestApiClient(secret_key=key))
         self._browser_runner = browser_runner or (
             lambda url, *, success_url: run_stripe_test_checkout(
                 url,
                 success_url=success_url,
                 session_policy=session_policy,
+                checkout_inputs=checkout_inputs,
             )
         )
         self._evidence_dir = Path(evidence_dir) if evidence_dir is not None else None

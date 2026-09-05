@@ -36,8 +36,12 @@ signal with Pack semantic slots and a stable checkpoint identity. The generic
 `PackRuntimeAdapter` protocol is intentionally unchanged because its typed
 request currently carries a dictionary and has no pause return channel.
 
-The hosted live browser path is not rewired to replay input: it currently
-hard-codes Stripe test card data and crosses the external-effect boundary
-through Permit/Attempt. A future live UI integration must collect any needed
-semantic values before that boundary; after it, outcomes remain `UNKNOWN` and
-are resolved only by the authoritative Stripe probe.
+The hosted live browser path keeps card data adapter-owned and crosses the
+external-effect boundary through Permit/Attempt. The current Stripe Checkout
+adapter declares its non-card hosted fields (`email`, `cardholder_name`,
+`billing_country`, and `billing_postal_code`) locally and maps them to the
+hosted form only at the browser edge. These values are not added to
+`StripePaymentFacts` or the platform input contract. A future product UI may
+collect them through an `AWAITING_INPUT` signal before that boundary; after it,
+outcomes remain `UNKNOWN` and are resolved only by the authoritative Stripe
+probe.

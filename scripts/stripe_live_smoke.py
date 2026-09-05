@@ -45,6 +45,7 @@ from enterprise.domains.stripe_payment.result_probe import (
 from enterprise.domains.stripe_payment.live_browser import (
     StripeHostedCheckoutError,
     StripeHostedCheckoutFlow,
+    StripeCheckoutInputs,
     derive_live_idempotency_key,
     stripe_test_key_from_environment,
 )
@@ -115,6 +116,10 @@ def main() -> int:
     parser.add_argument("--create", action="store_true", help="create + cancel one test PaymentIntent to exercise mapping")
     parser.add_argument("--hosted-checkout", action="store_true", help="explicitly create and complete a real Stripe hosted test Checkout")
     parser.add_argument("--evidence-dir", help="optional directory for redacted hosted Checkout evidence")
+    parser.add_argument("--email", default="stripe-test@example.com", help="test-mode Checkout email")
+    parser.add_argument("--cardholder-name", default="AgentPact Test", help="test-mode Checkout cardholder name")
+    parser.add_argument("--billing-country", default="US", help="test-mode Checkout billing country")
+    parser.add_argument("--billing-postal-code", default="10001", help="test-mode Checkout postal code")
     parser.add_argument("--amount-minor", type=int, default=5000, help="amount in minor units when --create")
     parser.add_argument("--currency", default="usd")
     args = parser.parse_args()
@@ -140,7 +145,15 @@ def main() -> int:
                 payment_intent_id=facts.payment_intent_id,
             )
             result = asyncio.run(
-                StripeHostedCheckoutFlow(evidence_dir=args.evidence_dir).execute(
+                StripeHostedCheckoutFlow(
+                    evidence_dir=args.evidence_dir,
+                    checkout_inputs=StripeCheckoutInputs(
+                        email=args.email,
+                        cardholder_name=args.cardholder_name,
+                        billing_country=args.billing_country,
+                        billing_postal_code=args.billing_postal_code,
+                    ),
+                ).execute(
                     facts=facts,
                     idempotency_key=idempotency_key,
                 )

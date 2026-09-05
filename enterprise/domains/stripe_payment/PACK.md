@@ -193,6 +193,11 @@ UNKNOWN 只允许重新 GET Probe，绝不自动重放 Checkout。证据只保�
 的标识。没有真实凭据时，不能把任何离线或 loopback E2E 称为 live Stripe E2E。
 ## Review boundary
 
+The hosted browser adapter fills Stripe-specific email, cardholder name,
+country, and postal-code fields from an adapter-local `StripeCheckoutInputs`
+value. These names and selectors do not cross into the platform contract;
+explicit live callers must supply them before hosted Checkout execution.
+
 `live_browser.py` is an explicit test-mode hosted Checkout adapter. It uses the
 real Stripe API, visits `https://checkout.stripe.com/c/...`, and uses an
 independent PaymentIntent GET probe. It is not the recorded `app.py`/`store.py`
