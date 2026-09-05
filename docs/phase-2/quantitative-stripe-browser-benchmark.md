@@ -1,5 +1,9 @@
 # AgentPact Stripe Browser-Agent Quantitative Benchmark
 
+> 执行本 benchmark 前，先按
+> [Stripe 实验方案：从可运行链路到可复核简历证据](stripe-experiment-plan-for-evidence.md)
+> 的 Gate 0--4 顺序取得真实数据。本文定义完整指标与长期口径；配套实验方案负责控制首批实验范围，避免在尚未得到第一条真实 Stripe 记录前扩张 benchmark 实现。
+
 ## 目的与边界
 
 本方案比较同一模型、同一浏览器运行时、同一 Stripe test-mode 条件下的三种执行臂：
