@@ -44,6 +44,11 @@ services, or account infrastructure.
   scraper. The direct adapter exposes fresh observation, page state, screenshot,
   child-frame metadata, and normalized interactable-tree capabilities without
   exposing browser handles to callers.
+- `BrowserSessionPolicy` makes rendering and operator access explicit:
+  `headless` is the default, `headed` is an explicit local-debug choice, and
+  `remote_interactive` requires an explicitly injected controlled session and
+  human-takeover permission. A failed headless run never upgrades itself to a
+  headed session or replays a write.
 - `integrations.py` maps the existing Domain Pack `BusinessResultProbe`
   contract into authoritative loop verification.
 
@@ -83,6 +88,9 @@ event sink and maps these results into its own transaction/journal boundary.
    It is never replayed by the generic retry loop; a Domain Pack result probe or
    owner-specific recovery path must resolve it.
 6. A model `SUCCESS` is only a claim. The injected verifier must confirm it.
+7. `AWAITING_INPUT` is a semantic input boundary and does not require a visible
+   browser. `NEEDS_HUMAN` may request a controlled interactive session, but the
+   session owner must be composed explicitly by the Pack/runtime boundary.
 
 ## Temporary Skyvern Dependency
 

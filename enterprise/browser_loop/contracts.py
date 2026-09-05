@@ -56,6 +56,31 @@ class BrowserLoopStatus(StrEnum):
     AWAITING_APPROVAL = "AWAITING_APPROVAL"
 
 
+class BrowserSessionMode(StrEnum):
+    """How a browser session is rendered and exposed to an operator."""
+
+    HEADLESS = "headless"
+    HEADED = "headed"
+    REMOTE_INTERACTIVE = "remote_interactive"
+
+
+class BrowserSessionPolicy(BaseModel):
+    """Explicit browser-session capability requested by a Pack composition."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    mode: BrowserSessionMode = BrowserSessionMode.HEADLESS
+    allow_human_takeover: bool = False
+    persistent_context: bool = False
+    reason: str | None = Field(default=None, max_length=240)
+
+    @model_validator(mode="after")
+    def validate_mode(self) -> "BrowserSessionPolicy":
+        if self.mode is BrowserSessionMode.REMOTE_INTERACTIVE and not self.allow_human_takeover:
+            raise ValueError("remote_interactive browser sessions require human takeover")
+        return self
+
+
 class BrowserLoopRunContext(BaseModel):
     """Execution input supplied by the existing orchestration layer."""
 

@@ -2,20 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 import pytest
 
+from enterprise.browser_loop.contracts import BrowserSessionMode, BrowserSessionPolicy
 from enterprise.domains.stripe_payment.live_browser import (
     StripeHostedCheckoutError,
     StripeHostedCheckoutFlow,
     StripeHostedCheckoutSession,
+    StripeLiveConfigurationError,
     StripeTestApiClient,
     _browser_completion_detected,
     _persist_probe_context,
     _url_summary,
     derive_live_idempotency_key,
     parse_stripe_checkout_url,
+    run_stripe_test_checkout,
     stripe_test_key_from_environment,
     validate_stripe_test_key,
 )
@@ -31,6 +35,29 @@ FACTS = StripePaymentFacts(
     currency="usd",
     description="offline flow test",
 )
+
+
+def test_stripe_browser_policy_defaults_headless_and_rejects_implicit_remote_upgrade() -> None:
+    flow = StripeHostedCheckoutFlow()
+    assert flow.session_policy.mode is BrowserSessionMode.HEADLESS
+    with pytest.raises(StripeLiveConfigurationError, match="controlled browser runner"):
+        StripeHostedCheckoutFlow(
+            session_policy=BrowserSessionPolicy(
+                mode=BrowserSessionMode.REMOTE_INTERACTIVE,
+                allow_human_takeover=True,
+            )
+        )
+    with pytest.raises(StripeLiveConfigurationError, match="controlled browser runner"):
+        asyncio.run(
+            run_stripe_test_checkout(
+                "https://checkout.stripe.com/c/pay/cs_test_policy",
+                success_url="https://example.com/success",
+                session_policy=BrowserSessionPolicy(
+                    mode=BrowserSessionMode.REMOTE_INTERACTIVE,
+                    allow_human_takeover=True,
+                ),
+            )
+        )
 
 
 def test_checkout_url_parser_accepts_only_real_hosted_stripe_urls():

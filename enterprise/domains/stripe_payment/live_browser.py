@@ -32,6 +32,8 @@ from enterprise.browser_loop.contracts import (
     BrowserLoopRunContext,
     BrowserLoopStatus,
     BrowserObservation,
+    BrowserSessionMode,
+    BrowserSessionPolicy,
     DecisionKind,
     ModelInput,
     PolicyAuthorization,
@@ -390,16 +392,34 @@ def _browser_diagnostic(
     )
 
 
-async def run_stripe_test_checkout(checkout_url: str, *, success_url: str, headless: bool = True) -> StripeBrowserOutcome:
+async def run_stripe_test_checkout(
+    checkout_url: str,
+    *,
+    success_url: str,
+    session_policy: BrowserSessionPolicy | None = None,
+    headless: bool | None = None,
+) -> StripeBrowserOutcome:
     """Complete the Stripe hosted page with Stripe's documented 4242 test card."""
     parse_stripe_checkout_url(checkout_url)
+    if session_policy is not None and headless is not None:
+        raise StripeLiveConfigurationError("Specify session_policy or legacy headless, not both")
+    if session_policy is None:
+        session_policy = BrowserSessionPolicy(
+            mode=BrowserSessionMode.HEADLESS if headless is not False else BrowserSessionMode.HEADED,
+        )
+    if session_policy.mode is BrowserSessionMode.REMOTE_INTERACTIVE:
+        raise StripeLiveConfigurationError(
+            "remote_interactive Stripe checkout requires an injected controlled browser runner"
+        )
     try:
         from playwright.async_api import TimeoutError as PlaywrightTimeoutError
         from playwright.async_api import async_playwright
     except ImportError as exc:
         raise StripeHostedCheckoutError("Playwright is required for the explicit live browser flow") from exc
 
-    launch_options: dict[str, object] = {"headless": headless}
+    launch_options: dict[str, object] = {
+        "headless": session_policy.mode is BrowserSessionMode.HEADLESS,
+    }
     installed = _find_installed_chromium()
     if installed is not None:
         launch_options["executable_path"] = installed
@@ -583,13 +603,35 @@ class StripeHostedCheckoutFlow:
         api_client_factory: Callable[[str], HostedCheckoutApi] | None = None,
         browser_runner: BrowserRunner | None = None,
         evidence_dir: str | Path | None = None,
-        headless: bool = True,
+        session_policy: BrowserSessionPolicy | None = None,
+        headless: bool | None = None,
     ) -> None:
+        if session_policy is not None and headless is not None:
+            raise StripeLiveConfigurationError("Specify session_policy or legacy headless, not both")
+        if session_policy is None:
+            session_policy = BrowserSessionPolicy(
+                mode=BrowserSessionMode.HEADLESS if headless is not False else BrowserSessionMode.HEADED,
+            )
+        if session_policy.mode is BrowserSessionMode.REMOTE_INTERACTIVE and browser_runner is None:
+            raise StripeLiveConfigurationError(
+                "remote_interactive Stripe checkout requires an injected controlled browser runner"
+            )
+        self._session_policy = session_policy
         self._api_client_factory = api_client_factory or (lambda key: StripeTestApiClient(secret_key=key))
-        self._browser_runner = browser_runner or (lambda url, *, success_url: run_stripe_test_checkout(url, success_url=success_url, headless=headless))
+        self._browser_runner = browser_runner or (
+            lambda url, *, success_url: run_stripe_test_checkout(
+                url,
+                success_url=success_url,
+                session_policy=session_policy,
+            )
+        )
         self._evidence_dir = Path(evidence_dir) if evidence_dir is not None else None
         self._results: dict[str, StripeHostedCheckoutResult] = {}
         self._started_keys: set[str] = set()
+
+    @property
+    def session_policy(self) -> BrowserSessionPolicy:
+        return self._session_policy
 
     async def execute(
         self,

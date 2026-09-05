@@ -6,7 +6,13 @@ import hashlib
 
 import pytest
 
-from enterprise.browser_loop.contracts import ActionKind, AuthorizedAction, BrowserAction
+from enterprise.browser_loop.contracts import (
+    ActionKind,
+    AuthorizedAction,
+    BrowserAction,
+    BrowserSessionMode,
+    BrowserSessionPolicy,
+)
 from enterprise.browser_loop.ports import AgentPactBrowserRuntime, BrowserRuntimeError, StaleObservationError
 from enterprise.browser_loop.runtime import (
     PlaywrightBrowserSessionFactory,
@@ -15,6 +21,13 @@ from enterprise.browser_loop.runtime import (
 )
 from enterprise.governance.contracts import ExecutionAuthorization, ExecutionEffect
 from enterprise.governance.execution_profiles import ExecutionMechanism, ExecutionProfile
+
+
+def test_browser_session_policy_defaults_to_headless_and_requires_takeover_for_remote_mode() -> None:
+    assert BrowserSessionPolicy().mode is BrowserSessionMode.HEADLESS
+    assert BrowserSessionPolicy(mode=BrowserSessionMode.HEADED).allow_human_takeover is False
+    with pytest.raises(ValueError, match="require human takeover"):
+        BrowserSessionPolicy(mode=BrowserSessionMode.REMOTE_INTERACTIVE)
 
 
 class FakeLocator:
