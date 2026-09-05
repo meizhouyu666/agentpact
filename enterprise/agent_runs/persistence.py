@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .pause_signal import RunPauseSignal
+
 if TYPE_CHECKING:
     from .journal import GovernedPlanCheckpoint, PlanJournalTransition
 
@@ -76,6 +78,16 @@ class AgentRunStepSnapshot(BaseModel):
 AgentRunNativePair = tuple[AgentRunTaskSnapshot | None, AgentRunStepSnapshot | None]
 
 
+class AgentRunPauseSnapshot(BaseModel):
+    """Durable, redacted pause state bound to one exact journal checkpoint."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    signal: "RunPauseSignal"
+    checkpoint_digest: str = Field(min_length=1)
+    modified_at: datetime
+
+
 class AgentRunNativeStore(Protocol):
     """Persistence boundary consumed by Agent Run service and journal code.
 
@@ -126,6 +138,32 @@ class AgentRunNativeStore(Protocol):
         checkpoint: "GovernedPlanCheckpoint",
         *,
         transition: "PlanJournalTransition",
+        organization_id: str,
+    ) -> None: ...
+
+    async def save_pause_signal(
+        self,
+        session: Any,
+        signal: "RunPauseSignal",
+        *,
+        checkpoint_digest: str,
+        organization_id: str,
+        modified_at: datetime,
+    ) -> None: ...
+
+    async def get_pause_signal(
+        self,
+        session: Any,
+        *,
+        run_id: str,
+        organization_id: str,
+    ) -> AgentRunPauseSnapshot | None: ...
+
+    async def clear_pause_signal(
+        self,
+        session: Any,
+        *,
+        run_id: str,
         organization_id: str,
     ) -> None: ...
 

@@ -32,3 +32,10 @@ One Pack can expose multiple adapters. Each adapter owns its own
 `FieldBinding`/`AdapterRequirement` set and is selected by an explicit adapter
 identity; the platform contracts remain generic and import no Stripe or
 Synthetic implementation.
+
+Stripe's hosted Checkout adapter declares the semantic `payment_intent_id` and
+`amount_minor` slots locally and maps them to adapter-owned `payment_intent`
+and `amount` fields only at the adapter edge. Those hosted names are never
+returned in the platform pause contract. The declaration is pre-effect only;
+after Permit/Attempt execution, recovery follows the existing UNKNOWN and
+authoritative probe path.

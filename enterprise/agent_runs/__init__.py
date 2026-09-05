@@ -23,12 +23,13 @@ from .persistence import (
     AgentRunTaskSnapshot,
     AgentRunTaskStatus,
 )
-from .service import AgentRunService
+from .service import AgentRunInputSubmissionRequest, AgentRunService
 
 __all__ = [
     "AgentRunNativePair",
     "AgentRunNativeStore",
     "AgentRunService",
+    "AgentRunInputSubmissionRequest",
     "AgentRunStepSnapshot",
     "AgentRunStepStatus",
     "AgentRunTaskSnapshot",

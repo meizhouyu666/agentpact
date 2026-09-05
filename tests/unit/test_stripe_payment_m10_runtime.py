@@ -29,6 +29,8 @@ from enterprise.domains.stripe_payment.m10_runtime import (
     compose_stripe_agent_run_service,
     derive_stripe_agent_run_id,
     missing_stripe_inputs,
+    map_stripe_inputs_to_checkout,
+    stripe_input_declaration,
 )
 from enterprise.governance.pack_runtime import (
     ApprovalRequestSpecification,
@@ -185,6 +187,21 @@ def test_stripe_input_pause_has_stable_checkpoint_and_no_replay_after_effect():
         from enterprise.agent_runs.pause_signal import RunPauseSignal
 
         RunPauseSignal.model_validate(invalid)
+
+
+def test_stripe_adapter_input_declaration_maps_semantic_slots_only_at_adapter_edge():
+    slots, bindings, requirements = stripe_input_declaration()
+    assert tuple(item.slot_name for item in slots) == ("payment_intent_id", "amount_minor")
+    assert {item.slot_name for item in bindings} == {"payment_intent_id", "amount_minor"}
+    assert {item.adapter_field for item in bindings} == {"payment_intent", "amount"}
+    assert all("payment_intent" not in item.slot_name for item in slots)
+    assert requirements[0].requirement_name == "hosted_checkout_session"
+    assert map_stripe_inputs_to_checkout({"payment_intent_id": "pi_test", "amount_minor": 1250}) == {
+        "payment_intent": "pi_test",
+        "amount": 1250,
+    }
+    with pytest.raises(ValueError, match="Missing Stripe semantic inputs"):
+        map_stripe_inputs_to_checkout({"payment_intent_id": "pi_test"})
 
 
 async def test_recorded_m10_lifecycle_pauses_then_advances_to_confirmed():

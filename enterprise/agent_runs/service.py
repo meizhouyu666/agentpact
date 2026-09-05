@@ -62,10 +62,12 @@ from .coordinator import AgentRunResultCoordinator
 from .journal import AgentRunJournal
 from .persistence import (
     AgentRunNativeStore,
+    AgentRunPauseSnapshot,
     AgentRunStepStatus,
     AgentRunTaskSnapshot,
     AgentRunTaskStatus,
 )
+from .pause_signal import RunPauseAction, RunPauseOutcome, RunPauseSignal
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +82,8 @@ class AgentRunError(RuntimeError):
 class AgentRunState(StrEnum):
     PLANNING = "PLANNING"
     AWAITING_APPROVAL = "AWAITING_APPROVAL"
+    AWAITING_INPUT = "AWAITING_INPUT"
+    NEEDS_HUMAN = "NEEDS_HUMAN"
     RUNNING = "RUNNING"
     UNKNOWN = "UNKNOWN"
     SUCCEEDED = "SUCCEEDED"
@@ -93,6 +97,9 @@ class AgentRunAction(StrEnum):
     REJECT = "reject"
     PROBE = "probe"
     CANCEL = "cancel"
+    SUBMIT_INPUT = "submit_input"
+    RESUME = "resume"
+    TAKE_OVER = "take_over"
 
 
 class AgentRunCreateRequest(BaseModel):
@@ -116,6 +123,13 @@ class AgentRunCommandRequest(BaseModel):
 
     operation_key: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
     reason: str | None = Field(default=None, max_length=240)
+
+
+class AgentRunInputSubmissionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operation_key: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
+    values: dict[str, JsonValue]
 
 
 class _ApprovalIntentRecord(BaseModel):
@@ -149,6 +163,7 @@ class AgentRunProjection(BaseModel):
     completed_steps: int = Field(ge=0)
     total_steps: int = Field(ge=1)
     reason_code: str | None = None
+    pause_signal: RunPauseSignal | None = None
 
 
 class AgentRunTimelineEvent(BaseModel):
@@ -446,7 +461,7 @@ class AgentRunService:
                     items.append(
                         AgentRunSummary(
                             **projection.model_dump(
-                                exclude={"legal_actions", "plan"},
+                                exclude={"legal_actions", "plan", "pause_signal"},
                             ),
                             created_at=_as_utc(root.created_at),
                             modified_at=_as_utc(root.modified_at),
@@ -462,6 +477,38 @@ class AgentRunService:
             async with session.begin():
                 locked = await self._load_locked(session, run_id=run_id, user=user)
                 return await self._project_locked(session, locked)
+
+    async def record_pause_signal(
+        self,
+        run_id: str,
+        signal: RunPauseSignal,
+        *,
+        user: UserContext,
+    ) -> AgentRunProjection:
+        """Persist one adapter-produced pause at the neutral AgentPact boundary."""
+
+        _require_operator(user)
+        if signal.run_id != run_id:
+            raise AgentRunError("PAUSE_SIGNAL_CORRELATION_INVALID")
+        async with self._session_factory() as session:
+            async with session.begin():
+                locked = await self._load_locked(session, run_id=run_id, user=user)
+                active = locked.checkpoint.active_step
+                if signal.step_id is not None and (active is None or signal.step_id != active.native_step_id):
+                    raise AgentRunError("PAUSE_SIGNAL_CHECKPOINT_INVALID")
+                if signal.task_id is not None and signal.task_id not in {run_id, active.native_task_id if active else ""}:
+                    raise AgentRunError("PAUSE_SIGNAL_CHECKPOINT_INVALID")
+                effect_started = await _effect_may_have_started(session, locked.checkpoint)
+                if signal.external_effect_started != effect_started:
+                    raise AgentRunError("PAUSE_SIGNAL_EFFECT_BOUNDARY")
+                safe_signal = _redact_pause_signal(signal)
+                await self._persist_pause_signal(
+                    session,
+                    safe_signal,
+                    checkpoint=locked.checkpoint,
+                    organization_id=user.org_id,
+                )
+        return await self.get(run_id, user=user)
 
     async def events(self, run_id: str, *, user: UserContext) -> tuple[AgentRunTimelineEvent, ...]:
         async with self._session_factory() as session:
@@ -656,6 +703,7 @@ class AgentRunService:
                 if await _effect_may_have_started(session, locked.checkpoint):
                     raise AgentRunError("CANCEL_EFFECT_BOUNDARY_CROSSED")
                 await self._cancel_native_pair(session, locked.checkpoint, user.org_id)
+                await self._clear_pause_signal(session, run_id=run_id, organization_id=user.org_id)
                 cancelled = locked.checkpoint.model_copy(
                     update={
                         "state": PlanRunState.CANCELLED,
@@ -724,6 +772,74 @@ class AgentRunService:
             raise AgentRunError("PACK_PROBE_FAILED", status_code=503) from exc
         return await self.get(run_id, user=user)
 
+    async def submit_input(
+        self,
+        run_id: str,
+        request: AgentRunInputSubmissionRequest,
+        *,
+        user: UserContext,
+    ) -> AgentRunProjection:
+        """Validate and hand off a pre-effect input recovery without replaying effects."""
+
+        _require_operator(user)
+        async with self._session_factory() as session:
+            async with session.begin():
+                locked = await self._load_locked(session, run_id=run_id, user=user)
+                projection = await self._project_locked(session, locked)
+                signal = projection.pause_signal
+                if (
+                    signal is None
+                    or projection.state is not AgentRunState.AWAITING_INPUT
+                    or AgentRunAction.SUBMIT_INPUT not in projection.legal_actions
+                    or signal.external_effect_started
+                    or signal.input_request is None
+                ):
+                    raise AgentRunError("ILLEGAL_ACTION")
+                slots = {slot.slot_name: slot for slot in signal.input_request.slots}
+                if set(request.values) - set(slots):
+                    raise AgentRunError("INPUT_CONTRACT_INVALID", status_code=422)
+                missing = [name for name, slot in slots.items() if slot.required and name not in request.values]
+                if missing:
+                    raise AgentRunError("INPUT_CONTRACT_INVALID", status_code=422)
+                adapter = self._adapter(
+                    self._binding_for_bundle(locked.bundle),
+                    tenant_id=user.org_id,
+                    capability_ids=(locked.bundle.request.capability_ref,),
+                )
+                prepared = self._restore_prepared(locked.bundle)[1]
+                resume = getattr(adapter, "resume_run", None)
+                if resume is None:
+                    raise AgentRunError("INPUT_RESUME_UNSUPPORTED", status_code=503)
+                await resume(
+                    prepared,
+                    business_inputs=request.values,
+                    operation_key=request.operation_key,
+                )
+                await self._clear_pause_signal(session, run_id=run_id, organization_id=user.org_id)
+        return await self.get(run_id, user=user)
+
+    async def resume(self, run_id: str, command: AgentRunCommandRequest, *, user: UserContext) -> AgentRunProjection:
+        """Resume a human-takeover pause only through an adapter-owned boundary."""
+
+        _require_operator(user)
+        async with self._session_factory() as session:
+            async with session.begin():
+                locked = await self._load_locked(session, run_id=run_id, user=user)
+                projection = await self._project_locked(session, locked)
+                signal = projection.pause_signal
+                if signal is None or projection.state is not AgentRunState.NEEDS_HUMAN:
+                    return projection
+                if RunPauseAction.RESUME not in signal.allowed_actions and RunPauseAction.TAKE_OVER not in signal.allowed_actions:
+                    raise AgentRunError("ILLEGAL_ACTION")
+                adapter = self._adapter(self._binding_for_bundle(locked.bundle), tenant_id=user.org_id, capability_ids=(locked.bundle.request.capability_ref,))
+                prepared = self._restore_prepared(locked.bundle)[1]
+                resume = getattr(adapter, "resume_run", None)
+                if resume is None:
+                    raise AgentRunError("HUMAN_RESUME_UNSUPPORTED", status_code=503)
+                await resume(prepared, operation_key=command.operation_key, takeover=True)
+                await self._clear_pause_signal(session, run_id=run_id, organization_id=user.org_id)
+        return await self.get(run_id, user=user)
+
     async def _reflect_advance_result(
         self, result: Any, *, user: UserContext, operation_key: str
     ) -> None:
@@ -743,6 +859,33 @@ class AgentRunService:
                     operation_key=operation_key,
                     created_at=self._clock(),
                 )
+
+    async def _persist_pause_signal(self, session: Any, signal: RunPauseSignal, *, checkpoint: GovernedPlanCheckpoint, organization_id: str) -> None:
+        if signal.run_id != checkpoint.root_task_id:
+            raise AgentRunError("PAUSE_SIGNAL_CORRELATION_INVALID")
+        if signal.outcome is RunPauseOutcome.AWAITING_INPUT and signal.external_effect_started:
+            raise AgentRunError("PAUSE_SIGNAL_EFFECT_BOUNDARY")
+        saver = getattr(self._native_store, "save_pause_signal", None)
+        if saver is None:
+            raise AgentRunError("PAUSE_PERSISTENCE_UNSUPPORTED", status_code=503)
+        await saver(
+            session,
+            signal,
+            checkpoint_digest=_digest(checkpoint.model_dump(mode="json")),
+            organization_id=organization_id,
+            modified_at=self._clock(),
+        )
+
+    async def _load_pause_signal(self, session: Any, *, run_id: str, organization_id: str) -> AgentRunPauseSnapshot | None:
+        loader = getattr(self._native_store, "get_pause_signal", None)
+        if loader is None:
+            return None
+        return await loader(session, run_id=run_id, organization_id=organization_id)
+
+    async def _clear_pause_signal(self, session: Any, *, run_id: str, organization_id: str) -> None:
+        clearer = getattr(self._native_store, "clear_pause_signal", None)
+        if clearer is not None:
+            await clearer(session, run_id=run_id, organization_id=organization_id)
 
     async def _reflect_probe_result(
         self, result: Any, *, run_id: str, user: UserContext, operation_key: str
@@ -938,6 +1081,40 @@ class AgentRunService:
         total = len(plan)
         active = checkpoint.active_step
         latest = locked.events[-1].transition
+        pause = await self._load_pause_signal(
+            session,
+            run_id=checkpoint.root_task_id,
+            organization_id=locked.root.organization_id,
+        )
+        if pause is not None:
+            expected_digest = _digest(checkpoint.model_dump(mode="json"))
+            if pause.checkpoint_digest != expected_digest or pause.signal.run_id != checkpoint.root_task_id:
+                return self._state_conflict(checkpoint.root_task_id, plan, completed, bundle=locked.bundle)
+            if pause.signal.outcome is RunPauseOutcome.AWAITING_INPUT:
+                return self._projection(
+                    bundle=locked.bundle,
+                    provider_mode=locked.bundle.provider_mode,
+                    run_id=checkpoint.root_task_id,
+                    state=AgentRunState.AWAITING_INPUT,
+                    legal_actions=_pause_legal_actions(pause.signal),
+                    plan=plan,
+                    completed_steps=completed,
+                    total_steps=total,
+                    reason_code=pause.signal.reason_code,
+                    pause_signal=pause.signal,
+                )
+            return self._projection(
+                bundle=locked.bundle,
+                provider_mode=locked.bundle.provider_mode,
+                run_id=checkpoint.root_task_id,
+                state=AgentRunState.NEEDS_HUMAN,
+                legal_actions=_pause_legal_actions(pause.signal),
+                plan=plan,
+                completed_steps=completed,
+                total_steps=total,
+                reason_code=pause.signal.reason_code,
+                pause_signal=pause.signal,
+            )
         if checkpoint.state is PlanRunState.COMPLETED and active is None:
             return self._projection(
                 bundle=locked.bundle,
@@ -1561,6 +1738,28 @@ def _require_approver(user: UserContext) -> None:
 
 def _safe_reason(reason: str | None) -> str:
     return "Authenticated decision" if not reason else f"Authenticated decision ({_digest(reason)[:12]})"
+
+
+def _redact_pause_signal(signal: RunPauseSignal) -> RunPauseSignal:
+    """Keep only contract-safe prompt metadata and canonical input declarations."""
+
+    prompt = signal.prompt
+    if prompt is not None:
+        prompt = prompt.model_copy(update={"message": "Additional information is required to continue this run."})
+    request = signal.input_request
+    if request is not None:
+        request = request.model_copy(update={"values": {}, "bindings": (), "adapter_requirements": ()})
+    return signal.model_copy(update={"prompt": prompt, "input_request": request})
+
+
+def _pause_legal_actions(signal: RunPauseSignal) -> tuple[AgentRunAction, ...]:
+    mapping = {
+        RunPauseAction.SUBMIT_INPUT: AgentRunAction.SUBMIT_INPUT,
+        RunPauseAction.RESUME: AgentRunAction.RESUME,
+        RunPauseAction.TAKE_OVER: AgentRunAction.TAKE_OVER,
+        RunPauseAction.CANCEL: AgentRunAction.CANCEL,
+    }
+    return tuple(mapping[action] for action in signal.allowed_actions if action in mapping)
 
 
 def _operation_key(*, tenant_id: str, run_id: str, command: str, caller_key: str, predecessor: str) -> str:

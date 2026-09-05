@@ -14,7 +14,16 @@ canonical inputs. The model forbids extra fields, so adapter/vendor payloads
 stay outside the AgentPact boundary.
 
 This is an additive contract only: it does not alter BrowserLoop state,
-AgentRunService execution, persistence, migrations, or domain fixtures.
+database migrations, or domain fixtures.
+
+The Agent Run service now accepts an adapter-produced signal through its
+neutral pause boundary, stores the redacted snapshot in the existing
+governance audit stream, and projects it as `AWAITING_INPUT` or `NEEDS_HUMAN`
+with only the signal's legal actions. Input submission is validated against the
+declared semantic slots and delegated to an adapter-owned `resume_run` hook;
+the platform never replays a browser effect or copies submitted values into
+the persisted signal. A missing adapter resume hook fails closed. Existing
+stores remain compatible because the pause methods are optional at runtime.
 
 ## Stripe explicit composition
 

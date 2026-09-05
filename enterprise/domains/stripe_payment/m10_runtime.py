@@ -59,6 +59,8 @@ from enterprise.governance.capabilities import CapabilityDataScope
 from enterprise.governance.contracts import ExecutionAttemptStatus
 from enterprise.governance.creation_snapshot import TaskCreationPath, TrustedTaskCreationSnapshot
 from enterprise.governance.input_contracts import (
+    AdapterRequirement,
+    FieldBinding,
     InputRequest,
     InputSensitivity,
     InputSlotSpec,
@@ -127,6 +129,61 @@ _STRIPE_INPUT_TARGETS: dict[str, InputTargetKind] = {
     "payment_intent_id": InputTargetKind.IDENTIFIER,
     "amount_minor": InputTargetKind.NUMBER,
 }
+_STRIPE_ADAPTER_ID = M10_ADAPTER_ID
+STRIPE_INPUT_SLOTS: tuple[InputSlotSpec, ...] = tuple(
+    InputSlotSpec(
+        slot_name=name,
+        target_kind=kind,
+        source=InputSource.USER,
+        sensitivity=InputSensitivity.SENSITIVE,
+        allowed_sources=(InputSource.USER,),
+    )
+    for name, kind in _STRIPE_INPUT_TARGETS.items()
+)
+STRIPE_INPUT_BINDINGS: tuple[FieldBinding, ...] = (
+    FieldBinding(
+        binding_version="v1",
+        slot_name="payment_intent_id",
+        adapter_field="payment_intent",
+        target_kind=InputTargetKind.IDENTIFIER,
+        adapter_id=_STRIPE_ADAPTER_ID,
+        source=InputSource.ADAPTER,
+        sensitivity=InputSensitivity.SENSITIVE,
+    ),
+    FieldBinding(
+        binding_version="v1",
+        slot_name="amount_minor",
+        adapter_field="amount",
+        target_kind=InputTargetKind.NUMBER,
+        adapter_id=_STRIPE_ADAPTER_ID,
+        source=InputSource.ADAPTER,
+        sensitivity=InputSensitivity.SENSITIVE,
+    ),
+)
+STRIPE_ADAPTER_REQUIREMENTS: tuple[AdapterRequirement, ...] = (
+    AdapterRequirement(
+        requirement_name="hosted_checkout_session",
+        target_kind=InputTargetKind.CUSTOM,
+        source=InputSource.ADAPTER,
+        sensitivity=InputSensitivity.INTERNAL,
+        description="A governed Stripe hosted Checkout session must be available before effect execution.",
+    ),
+)
+
+
+def stripe_input_declaration() -> tuple[tuple[InputSlotSpec, ...], tuple[FieldBinding, ...], tuple[AdapterRequirement, ...]]:
+    """Return Stripe's adapter-local semantic declaration and hosted mappings."""
+
+    return STRIPE_INPUT_SLOTS, STRIPE_INPUT_BINDINGS, STRIPE_ADAPTER_REQUIREMENTS
+
+
+def map_stripe_inputs_to_checkout(business_inputs: dict[str, Any]) -> dict[str, Any]:
+    """Translate semantic Pack values to hosted Checkout fields at the adapter edge."""
+
+    missing = missing_stripe_inputs(business_inputs)
+    if missing:
+        raise ValueError(f"Missing Stripe semantic inputs: {', '.join(missing)}")
+    return {binding.adapter_field: business_inputs[binding.slot_name] for binding in STRIPE_INPUT_BINDINGS}
 
 
 def _missing_stripe_business_slots(business_inputs: dict[str, Any]) -> tuple[str, ...]:
@@ -166,16 +223,7 @@ def build_stripe_input_pause_signal(
         raise ValueError("Stripe input pause requires at least one missing slot")
     unique_slots = tuple(dict.fromkeys(missing_slots))
     checkpoint = checkpoint_id or "stripe-input-" + _digest([run_id, step_id, unique_slots])[:32]
-    slots = tuple(
-        InputSlotSpec(
-            slot_name=name,
-            target_kind=_STRIPE_INPUT_TARGETS[name],
-            source=InputSource.USER,
-            sensitivity=InputSensitivity.SENSITIVE,
-            allowed_sources=(InputSource.USER,),
-        )
-        for name in unique_slots
-    )
+    slots = tuple(slot for slot in STRIPE_INPUT_SLOTS if slot.slot_name in unique_slots)
     request = InputRequest(
         request_id=f"stripe-input-request:{checkpoint}",
         pack_id=PACK_ID,

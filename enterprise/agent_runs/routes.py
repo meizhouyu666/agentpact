@@ -9,6 +9,7 @@ from enterprise.auth.dependencies import CurrentUser
 from .service import (
     AgentRunCommandRequest,
     AgentRunCreateRequest,
+    AgentRunInputSubmissionRequest,
     AgentRunDecisionTrace,
     AgentRunError,
     AgentRunPage,
@@ -17,6 +18,7 @@ from .service import (
     AgentRunService,
     AgentRunTimelineEvent,
 )
+from .pause_signal import RunPauseSignal
 
 router = APIRouter(prefix="/enterprise/agent-runs", tags=["enterprise-agent-runs"])
 _SERVICE_STATE_KEY = "agentpact_agent_run_service"
@@ -144,6 +146,45 @@ async def cancel_agent_run(
 ) -> AgentRunProjection:
     try:
         return await _configured_service(request).cancel(run_id, body, user=user)
+    except AgentRunError as exc:
+        _raise_http(exc)
+
+
+@router.post("/{run_id}/pause", response_model=AgentRunProjection)
+async def record_agent_run_pause(
+    request: Request,
+    run_id: str,
+    body: RunPauseSignal,
+    user: CurrentUser,
+) -> AgentRunProjection:
+    try:
+        return await _configured_service(request).record_pause_signal(run_id, body, user=user)
+    except AgentRunError as exc:
+        _raise_http(exc)
+
+
+@router.post("/{run_id}/submit-input", response_model=AgentRunProjection)
+async def submit_agent_run_input(
+    request: Request,
+    run_id: str,
+    body: AgentRunInputSubmissionRequest,
+    user: CurrentUser,
+) -> AgentRunProjection:
+    try:
+        return await _configured_service(request).submit_input(run_id, body, user=user)
+    except AgentRunError as exc:
+        _raise_http(exc)
+
+
+@router.post("/{run_id}/resume", response_model=AgentRunProjection)
+async def resume_agent_run(
+    request: Request,
+    run_id: str,
+    body: AgentRunCommandRequest,
+    user: CurrentUser,
+) -> AgentRunProjection:
+    try:
+        return await _configured_service(request).resume(run_id, body, user=user)
     except AgentRunError as exc:
         _raise_http(exc)
 

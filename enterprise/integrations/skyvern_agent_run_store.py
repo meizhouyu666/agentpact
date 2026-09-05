@@ -7,21 +7,30 @@ the snapshots defined in :mod:`enterprise.agent_runs.persistence`.
 
 from __future__ import annotations
 
-from datetime import datetime
+import hashlib
+import json
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import and_, or_, select
 
 from enterprise.agent_runs.persistence import (
     AgentRunNativePair,
+    AgentRunPauseSnapshot,
     AgentRunNativeStore,
     AgentRunStepSnapshot,
     AgentRunStepStatus,
     AgentRunTaskSnapshot,
     AgentRunTaskStatus,
 )
+from enterprise.agent_runs.pause_signal import RunPauseSignal
 from enterprise.governance.contracts import ExecutionAttemptStatus
-from enterprise.governance.models import ExecutionAttemptModel, ExecutionPermitModel, GovernedTaskAdmissionModel
+from enterprise.governance.models import (
+    ExecutionAttemptModel,
+    ExecutionPermitModel,
+    GovernedTaskAdmissionModel,
+    GovernanceAuditEventModel,
+)
 from skyvern.forge.sdk.db.models import StepModel, TaskModel
 from skyvern.forge.sdk.models import StepStatus
 from skyvern.forge.sdk.schemas.tasks import TaskStatus
@@ -165,6 +174,139 @@ class SkyvernAgentRunStore(AgentRunNativeStore):
             transition=transition,
             organization_id=organization_id,
         )
+
+    async def save_pause_signal(
+        self,
+        session: Any,
+        signal: RunPauseSignal,
+        *,
+        checkpoint_digest: str,
+        organization_id: str,
+        modified_at: datetime,
+    ) -> None:
+        payload = {
+            "schema_version": "agentpact.run-pause/v1",
+            "run_id": signal.run_id,
+            "checkpoint_digest": checkpoint_digest,
+            "signal": signal.model_dump(mode="json"),
+        }
+        event_id = "agent_run_pause_" + hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        existing = (
+            await session.scalars(
+                select(GovernanceAuditEventModel)
+                .where(
+                    GovernanceAuditEventModel.task_id == signal.run_id,
+                    GovernanceAuditEventModel.organization_id == organization_id,
+                    GovernanceAuditEventModel.event_type == "agent-run.pause",
+                )
+                .order_by(GovernanceAuditEventModel.created_at.desc())
+            )
+        ).first()
+        if existing is not None:
+            if existing.payload != payload:
+                raise ValueError("Conflicting pause signal already exists")
+            return
+        session.add(
+            GovernanceAuditEventModel(
+                event_id=event_id,
+                task_id=signal.run_id,
+                step_id=signal.step_id,
+                contract_id=None,
+                organization_id=organization_id,
+                event_type="agent-run.pause",
+                mode="audit",
+                payload=payload,
+                created_at=modified_at,
+            )
+        )
+        await session.flush()
+
+    async def get_pause_signal(
+        self,
+        session: Any,
+        *,
+        run_id: str,
+        organization_id: str,
+    ) -> AgentRunPauseSnapshot | None:
+        rows = list(
+            await session.scalars(
+                select(GovernanceAuditEventModel)
+                .where(
+                    GovernanceAuditEventModel.task_id == run_id,
+                    GovernanceAuditEventModel.organization_id == organization_id,
+                    GovernanceAuditEventModel.event_type.in_(("agent-run.pause", "agent-run.pause.resolved")),
+                )
+                .order_by(GovernanceAuditEventModel.created_at.asc(), GovernanceAuditEventModel.event_id.asc())
+            )
+        )
+        candidate: GovernanceAuditEventModel | None = None
+        for row in rows:
+            payload = row.payload
+            if row.event_type == "agent-run.pause":
+                if not isinstance(payload, dict) or payload.get("schema_version") != "agentpact.run-pause/v1":
+                    raise ValueError("Invalid persisted Agent Run pause signal")
+                candidate = row
+            elif candidate is not None and isinstance(payload, dict):
+                if payload.get("pause_event_id") == candidate.event_id:
+                    candidate = None
+        if candidate is None:
+            return None
+        payload = candidate.payload
+        assert isinstance(payload, dict)
+        return AgentRunPauseSnapshot(
+            signal=RunPauseSignal.model_validate(payload.get("signal")),
+            checkpoint_digest=str(payload.get("checkpoint_digest", "")),
+            modified_at=candidate.created_at,
+        )
+
+    async def clear_pause_signal(
+        self,
+        session: Any,
+        *,
+        run_id: str,
+        organization_id: str,
+    ) -> None:
+        pauses = list(
+            (
+                await session.scalars(
+                    select(GovernanceAuditEventModel).where(
+                        GovernanceAuditEventModel.task_id == run_id,
+                        GovernanceAuditEventModel.organization_id == organization_id,
+                        GovernanceAuditEventModel.event_type == "agent-run.pause",
+                    ).order_by(GovernanceAuditEventModel.created_at.desc(), GovernanceAuditEventModel.event_id.desc())
+                )
+            ).all()
+        )
+        if not pauses:
+            return
+        pause = pauses[0]
+        resolution_payload = {
+            "schema_version": "agentpact.run-pause-resolution/v1",
+            "run_id": run_id,
+            "pause_event_id": pause.event_id,
+            "status": "cleared",
+        }
+        event_id = "agent_run_pause_resolution_" + hashlib.sha256(
+            json.dumps(resolution_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        existing = await session.get(GovernanceAuditEventModel, event_id)
+        if existing is None:
+            session.add(
+                GovernanceAuditEventModel(
+                    event_id=event_id,
+                    task_id=run_id,
+                    step_id=pause.step_id,
+                    contract_id=None,
+                    organization_id=organization_id,
+                    event_type="agent-run.pause.resolved",
+                    mode="audit",
+                    payload=resolution_payload,
+                    created_at=pause.created_at + timedelta(microseconds=1),
+                )
+            )
+            await session.flush()
 
     @staticmethod
     def _task_snapshot(model: Any) -> AgentRunTaskSnapshot:
