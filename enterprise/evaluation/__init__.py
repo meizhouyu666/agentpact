@@ -1,6 +1,22 @@
 """Generic offline evaluation helpers for platform governance contracts."""
 
 from .benchmark import BenchmarkMetrics, BenchmarkRecord, replay_fault, summarize
+from .benchmark_protocol import (
+    ARTIFACT_SCHEMA_VERSION,
+    MANIFEST_SCHEMA_VERSION,
+    ArmDefinition,
+    BenchmarkArmDefinition,
+    BenchmarkManifest,
+    BenchmarkRunBudget,
+    ExecutionProfile,
+    OfflineBenchmarkReport,
+    OfflineBenchmarkReportArtifact,
+    RunBudget,
+    StripeBenchmarkManifest,
+    adapt_arm_outcome,
+    build_offline_benchmark_report,
+    build_paired_benchmark_case_result,
+)
 from .quantitative_benchmark import (
     Arm,
     ArmMetrics,
@@ -45,6 +61,20 @@ __all__ = [
     "SafetyObservations",
     "aggregate_quantitative_benchmark",
     "aggregate_paired_quantitative_benchmark",
+    "ARTIFACT_SCHEMA_VERSION",
+    "MANIFEST_SCHEMA_VERSION",
+    "ArmDefinition",
+    "BenchmarkArmDefinition",
+    "BenchmarkManifest",
+    "BenchmarkRunBudget",
+    "ExecutionProfile",
+    "OfflineBenchmarkReport",
+    "OfflineBenchmarkReportArtifact",
+    "RunBudget",
+    "StripeBenchmarkManifest",
+    "adapt_arm_outcome",
+    "build_offline_benchmark_report",
+    "build_paired_benchmark_case_result",
     "replay_fault",
     "summarize",
 ]
