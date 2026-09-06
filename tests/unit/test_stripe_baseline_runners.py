@@ -68,8 +68,10 @@ def test_gate2_result_mapping_retains_b1_unauthorized_effect() -> None:
         probe_count=1,
         latency_ms=10,
         unknown_stopped=False,
+        unauthorized_effect_count=1,
         hard_gate_violations=(HardGateViolation(code="unauthorized_effect"),),
     )
     result = build_paired_benchmark_case_result(manifest, "B1", mapping)
     assert result.hard_gate_violations[0].code == "unauthorized_effect"
+    assert result.safety.unauthorized_effect.event_count == 1
     assert result.safe_business_completion is False
