@@ -3,7 +3,13 @@
 This is an experiment composition edge, not an AgentPact runtime dependency.
 It creates a temporary loopback-only PostgreSQL cluster, applies migrations,
 runs independent Gate 2 pairs one at a time, and stops immediately after an
-environment/fairness failure or a preserved hard-gate violation.
+environment/fairness failure or a non-continuable hard-gate violation.
+
+Strict hard-gate stopping remains the default.  A preregistered Stripe
+test-mode batch may explicitly continue after the expected B1
+``unauthorized_effect`` safety event so the ungoverned baseline can produce a
+bounded comparison sample.  The event remains a hard-gate violation and is
+always retained in the safety ledger.
 
 The Stripe key and browser/PostgreSQL executable paths may be loaded from an
 explicit ``--env-file``. Secrets are kept in process memory and are never
@@ -48,7 +54,10 @@ from enterprise.domains.stripe_payment.constants import (
 from scripts.stripe_gate2_pair import _run_pair
 from skyvern.forge.sdk.db.models import OrganizationModel
 
-BATCH_SCHEMA_VERSION = "agentpact.stripe-gate3-batch.v1"
+BATCH_SCHEMA_VERSION = "agentpact.stripe-gate3-batch.v2"
+STRICT_STOP_POLICY_ID = "strict-hard-gate-stop.v1"
+BASELINE_CONTINUATION_POLICY_ID = "stripe-test-mode-b1-unauthorized-continuation.v1"
+_CONTINUABLE_BASELINE_VIOLATIONS = frozenset({("B1", "unauthorized_effect")})
 PairRunner = Callable[[str, Path], Awaitable[dict[str, Any]]]
 
 
@@ -283,8 +292,42 @@ def _pair_record(artifact: Mapping[str, Any], output: Path) -> dict[str, Any]:
     }
 
 
-def _stop_reason(record: Mapping[str, Any]) -> str | None:
-    if record["hard_gate_violations"]:
+def _stop_policy(*, continue_baseline_unsafe_effects: bool) -> dict[str, Any]:
+    return {
+        "policy_id": (
+            BASELINE_CONTINUATION_POLICY_ID
+            if continue_baseline_unsafe_effects
+            else STRICT_STOP_POLICY_ID
+        ),
+        "stripe_mode": "test",
+        "continue_after": (
+            [
+                {"arm": arm, "code": code}
+                for arm, code in sorted(_CONTINUABLE_BASELINE_VIOLATIONS)
+            ]
+            if continue_baseline_unsafe_effects
+            else []
+        ),
+        "violations_remain_hard_gate_failures": True,
+        "violations_preserved_in_safety_ledger": True,
+    }
+
+
+def _stop_reason(
+    record: Mapping[str, Any],
+    *,
+    continue_baseline_unsafe_effects: bool = False,
+) -> str | None:
+    non_continuable_hard_gates = tuple(
+        violation
+        for violation in record["hard_gate_violations"]
+        if not (
+            continue_baseline_unsafe_effects
+            and (violation["arm"], violation["code"])
+            in _CONTINUABLE_BASELINE_VIOLATIONS
+        )
+    )
+    if non_continuable_hard_gates:
         return "hard_gate_violation"
     if record["environment_fault"]:
         return "environment_fault"
@@ -318,6 +361,7 @@ async def _run_batch(
     batch_id: str,
     output_dir: Path,
     repetitions: int,
+    continue_baseline_unsafe_effects: bool = False,
     pair_runner: PairRunner = _run_pair,
 ) -> dict[str, Any]:
     index_path = output_dir / f"{batch_id}-index.json"
@@ -332,6 +376,9 @@ async def _run_batch(
         "discarded_pair_count": 0,
         "hard_gate_event_count": 0,
         "safety_ledger": [],
+        "stop_policy": _stop_policy(
+            continue_baseline_unsafe_effects=continue_baseline_unsafe_effects
+        ),
         "stopped_early": False,
         "stop_reason": None,
         "pairs": records,
@@ -362,7 +409,10 @@ async def _run_batch(
         ]
         index["safety_ledger"] = safety_ledger
         index["hard_gate_event_count"] = sum(item["event_count"] for item in safety_ledger)
-        reason = _stop_reason(record)
+        reason = _stop_reason(
+            record,
+            continue_baseline_unsafe_effects=continue_baseline_unsafe_effects,
+        )
         if reason:
             index["stopped_early"] = ordinal < repetitions
             index["stop_reason"] = reason
@@ -378,6 +428,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--batch-id", default=None)
     parser.add_argument("--repetitions", type=int, default=5, choices=range(1, 6))
     parser.add_argument("--env-file", type=Path, default=None)
+    parser.add_argument(
+        "--continue-baseline-unsafe-effects",
+        action="store_true",
+        help=(
+            "continue a Stripe test-mode batch only after B1 unauthorized_effect "
+            "events; all events remain hard-gate failures in the safety ledger"
+        ),
+    )
     args = parser.parse_args(argv)
     if args.env_file:
         load_dotenv(args.env_file, override=False)
@@ -396,6 +454,7 @@ def main(argv: list[str] | None = None) -> int:
                     batch_id=batch_id,
                     output_dir=args.output_dir,
                     repetitions=args.repetitions,
+                    continue_baseline_unsafe_effects=args.continue_baseline_unsafe_effects,
                 )
             )
     print(
