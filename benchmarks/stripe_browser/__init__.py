@@ -20,6 +20,8 @@ from .protocol import (
 )
 from .runner import (
     ArtifactSink,
+    BaselineExecutor,
+    BaselineRunnerNotConfigured,
     BrowserBenchmarkRunner,
     EnvironmentSecretProvider,
     InMemoryArtifactSink,
@@ -28,6 +30,8 @@ from .runner import (
     ResultSink,
     RunnerConfig,
     StripeBenchmarkRunnerConfig,
+    StripeMatchedToolsBenchmarkRunner,
+    StripePromptOnlyBenchmarkRunner,
     StripeRecordedBenchmarkRunner,
     compose_stripe_benchmark_runner,
     inject_stripe_test_secret,
@@ -43,8 +47,10 @@ __all__ = [
     "StripeBenchmarkManifest", "adapt_arm_outcome", "build_offline_benchmark_report",
     "build_paired_benchmark_case_result", "ArtifactSink", "BrowserBenchmarkRunner",
     "EnvironmentSecretProvider", "InMemoryArtifactSink", "InMemoryResultSink",
+    "BaselineExecutor", "BaselineRunnerNotConfigured",
     "ProcessEnvironmentSecretProvider", "ResultSink", "RunnerConfig",
-    "StripeBenchmarkRunnerConfig", "StripeRecordedBenchmarkRunner",
+    "StripeBenchmarkRunnerConfig", "StripeMatchedToolsBenchmarkRunner",
+    "StripePromptOnlyBenchmarkRunner", "StripeRecordedBenchmarkRunner",
     "compose_stripe_benchmark_runner", "inject_stripe_test_secret", "redact_secrets",
     "validate_stripe_test_secret",
 ]

@@ -30,6 +30,7 @@ from benchmarks.stripe_browser.protocol import (  # noqa: E402
     build_offline_benchmark_report,
     build_paired_benchmark_case_result,
 )
+from benchmarks.stripe_browser.runner import StripePromptOnlyBenchmarkRunner  # noqa: E402
 from enterprise.evaluation import CaseOpportunity, CountObservation, SafetyObservations  # noqa: E402
 
 PAIR_ARTIFACT_SCHEMA = "agentpact.stripe-testmode-data-pair.v1"
@@ -101,7 +102,11 @@ def _result_values(*, status: str, reason: str, succeeded: bool = False) -> dict
 
 def _blocked_reason(*, arm: str, live: bool) -> str:
     if arm in {"B0", "B1"}:
-        return f"{arm.lower()}_runner_not_implemented"
+        return (
+            "prompt_only_no_write_capability"
+            if arm == "B0"
+            else "b1_runner_not_implemented"
+        )
     if not live:
         return "dry_run_no_execution"
     return "governed_live_infrastructure_missing"
@@ -114,6 +119,14 @@ def build_pair_artifact(*, pair_id: str, live: bool = False, g_reason: str | Non
     outcomes = []
     arm_execution: dict[str, dict[str, str]] = {}
     for arm in ("G", "B0", "B1"):
+        if arm == "B0":
+            result = StripePromptOnlyBenchmarkRunner().run(manifest)
+            outcomes.append(result)
+            arm_execution[arm] = {
+                "status": "blocked",
+                "reason": "prompt_only_no_write_capability",
+            }
+            continue
         reason = g_reason if arm == "G" and g_reason else _blocked_reason(arm=arm, live=live)
         outcome = build_paired_benchmark_case_result(
             manifest,

@@ -11,13 +11,19 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import ConfigDict, Field, model_validator
 
-from enterprise.evaluation.quantitative_benchmark import Arm, BenchmarkCaseResult, PairedBenchmarkCaseResult
+from enterprise.evaluation.quantitative_benchmark import (
+    Arm,
+    BenchmarkCaseResult,
+    CountObservation,
+    PairedBenchmarkCaseResult,
+    SafetyObservations,
+)
 
 from .protocol import (
     ExecutionProfile,
@@ -180,6 +186,122 @@ class BrowserBenchmarkRunner(Protocol):
     def run(self, manifest: StripeBenchmarkManifest) -> PairedBenchmarkCaseResult: ...
 
 
+class BaselineRunnerNotConfigured(NotImplementedError):
+    """A comparison arm has no honest execution adapter yet."""
+
+
+def _baseline_outcome(
+    manifest: StripeBenchmarkManifest,
+    *,
+    actual_business_state: str,
+    final_run_state: str,
+    task_success: bool,
+    business_state_correct: bool,
+    action_count: int,
+    probe_count: int,
+    latency_ms: int = 0,
+) -> BenchmarkCaseResult:
+    zero = CountObservation(event_count=0, denominator=1)
+    return BenchmarkCaseResult(
+        case_id=manifest.case_id,
+        corpus_version=manifest.corpus_version,
+        pack_id=manifest.pack_id,
+        pack_version=manifest.pack_version,
+        platform_version="stripe-browser-baseline.v1",
+        provider_mode=manifest.profile.provider_mode,
+        model_version=manifest.profile.model_version,
+        browser_runtime_version=manifest.profile.browser_runtime_version,
+        expected_business_state=manifest.expected_business_state,
+        actual_business_state=actual_business_state,
+        final_run_state=final_run_state,
+        task_success=task_success,
+        business_state_correct=business_state_correct,
+        first_action_hit=True if action_count else None,
+        incorrect_action=False,
+        unknown_stopped=False,
+        evidence_complete=True,
+        action_count=action_count,
+        replan_count=0,
+        approval_count=0,
+        probe_count=probe_count,
+        latency_ms=latency_ms,
+        model_cost=0.0,
+        safety=SafetyObservations(
+            unauthorized_effect=zero,
+            stale_observation_execution=zero,
+            approval_bypass=zero,
+            duplicate_effect=zero,
+        ),
+    )
+
+
+def _persist_baseline_result(
+    manifest: StripeBenchmarkManifest,
+    arm: Literal["B0", "B1"],
+    outcome: BenchmarkCaseResult | PairedBenchmarkCaseResult | Mapping[str, Any],
+    result_sink: ResultSink | None,
+) -> PairedBenchmarkCaseResult:
+    result = build_paired_benchmark_case_result(manifest, arm, outcome)
+    if result_sink is not None:
+        result_sink.put_result(result)
+    return result
+
+
+class StripePromptOnlyBenchmarkRunner:
+    """Executable B0 arm: produce intent, but never attempt an external write."""
+
+    arm = "B0"
+
+    def __init__(self, *, result_sink: ResultSink | None = None) -> None:
+        self.result_sink = result_sink
+
+    def run(self, manifest: StripeBenchmarkManifest) -> PairedBenchmarkCaseResult:
+        outcome = _baseline_outcome(
+            manifest,
+            actual_business_state="NOT_ATTEMPTED:prompt_only_no_write_capability",
+            final_run_state="BLOCKED",
+            task_success=False,
+            business_state_correct=False,
+            action_count=0,
+            probe_count=0,
+        )
+        return _persist_baseline_result(manifest, self.arm, outcome, self.result_sink)
+
+
+BaselineExecutor = Callable[
+    [StripeBenchmarkManifest],
+    BenchmarkCaseResult | PairedBenchmarkCaseResult | Mapping[str, Any],
+]
+
+
+class StripeMatchedToolsBenchmarkRunner:
+    """B1 arm backed by an injected ungoverned browser/tools executor.
+
+    The benchmark layer owns only the arm contract and result binding. The
+    caller must provide the actual browser/tools composition and independently
+    map its result to :class:`BenchmarkCaseResult`; no AgentPact governance
+    service is created here.
+    """
+
+    arm = "B1"
+
+    def __init__(self, executor: BaselineExecutor | None = None, *, result_sink: ResultSink | None = None) -> None:
+        self.executor = executor
+        self.result_sink = result_sink
+
+    def run(self, manifest: StripeBenchmarkManifest) -> PairedBenchmarkCaseResult:
+        if self.executor is None:
+            raise BaselineRunnerNotConfigured(
+                "B1 requires an explicit matched-tools browser executor composition"
+            )
+        outcome = self.executor(manifest)
+        if isinstance(outcome, PairedBenchmarkCaseResult) and outcome.arm != self.arm:
+            raise ValueError("matched-tools executor crossed the B1 arm boundary")
+        if isinstance(outcome, Mapping) and "arm" in outcome and outcome["arm"] != self.arm:
+            raise ValueError("matched-tools executor crossed the B1 arm boundary")
+        return _persist_baseline_result(manifest, self.arm, outcome, self.result_sink)
+
+
 class StripeRecordedBenchmarkRunner:
     """One-arm recorded runner; no browser, network, or enforce path is wired."""
 
@@ -220,6 +342,8 @@ def compose_stripe_benchmark_runner(
 
 __all__ = [
     "ArtifactSink",
+    "BaselineExecutor",
+    "BaselineRunnerNotConfigured",
     "BrowserBenchmarkRunner",
     "EnvironmentSecretProvider",
     "InMemoryArtifactSink",
@@ -228,6 +352,8 @@ __all__ = [
     "ResultSink",
     "RunnerConfig",
     "StripeBenchmarkRunnerConfig",
+    "StripeMatchedToolsBenchmarkRunner",
+    "StripePromptOnlyBenchmarkRunner",
     "StripeRecordedBenchmarkRunner",
     "compose_stripe_benchmark_runner",
     "inject_stripe_test_secret",

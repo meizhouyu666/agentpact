@@ -13,7 +13,7 @@ def test_dry_run_writes_one_pair_with_explicit_blocked_reasons(tmp_path):
     outcomes = artifact["benchmark_artifact"]["outcomes"]
     assert [item["arm"] for item in outcomes] == ["G", "B0", "B1"]
     assert len({item["pair_id"] for item in outcomes}) == 1
-    assert artifact["arm_execution"]["B0"]["reason"] == "b0_runner_not_implemented"
+    assert artifact["arm_execution"]["B0"]["reason"] == "prompt_only_no_write_capability"
     assert artifact["arm_execution"]["B1"]["reason"] == "b1_runner_not_implemented"
     assert artifact["arm_execution"]["G"]["reason"] == "dry_run_no_execution"
     assert artifact["redaction"]["secrets_written"] is False
