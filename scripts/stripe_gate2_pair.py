@@ -17,10 +17,12 @@ The script is intentionally manual and is not part of the unit-test suite.
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import argparse
 import asyncio
 import json
 import os
+import sys
 import time
 import uuid
 from datetime import datetime, timezone
@@ -28,6 +30,10 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 # Register ORM targets before any SQLAlchemy flush in the governed arm.
 import enterprise.approval.models  # noqa: F401
